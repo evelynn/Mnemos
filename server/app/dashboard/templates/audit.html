@@ -1,0 +1,8 @@
+{% extends "_layout.html" %}
+{% block title %}Audit — Mnemos{% endblock %}
+{% block content %}
+<header class="page-head"><h1>Audit log</h1></header>
+<div hx-get="/api/v1/audit?limit=100" hx-trigger="load" hx-swap="innerHTML" id="audit-list">
+  <p class="muted">Loading recent events…</p>
+</div>
+{% endblock %}

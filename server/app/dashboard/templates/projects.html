@@ -1,0 +1,8 @@
+{% extends "_layout.html" %}
+{% block title %}Projects — Mnemos{% endblock %}
+{% block content %}
+<header class="page-head"><h1>Projects</h1></header>
+<div hx-get="/api/v1/projects" hx-trigger="load" hx-swap="innerHTML" id="projects-list">
+  <p class="muted">Loading projects…</p>
+</div>
+{% endblock %}

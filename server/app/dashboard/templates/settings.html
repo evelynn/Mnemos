@@ -1,0 +1,11 @@
+{% extends "_layout.html" %}
+{% block title %}Settings — Mnemos{% endblock %}
+{% block content %}
+<header class="page-head"><h1>Settings</h1></header>
+<section>
+  <h2>Connections (Secrets)</h2>
+  <div hx-get="/api/v1/secrets" hx-trigger="load" hx-swap="innerHTML" id="secrets-list">
+    <p class="muted">Loading…</p>
+  </div>
+</section>
+{% endblock %}
