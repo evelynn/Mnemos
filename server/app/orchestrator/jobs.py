@@ -19,7 +19,7 @@ from app.analyzers.registry import runner_for
 from app.audit.logger import record as audit_record
 from app.config import get_settings
 from app.db import SessionLocal
-from app.merge.writer import upsert_node
+from app.merge.writer import upsert_edge, upsert_node
 from app.models.graph import AnalysisRun
 from app.models.projects import Project
 from app.orchestrator.progress import ProgressBus
@@ -71,7 +71,7 @@ async def run_ingest(ctx: dict, project_id_str: str, run_id_str: str, path: str)
         await _set_run_status(session, run_id, status="running", started_at=now)
 
     await bus.publish(run_id, {"phase": "started", "at": now.isoformat()})
-    totals = {"symbols": 0, "errors": 0}
+    totals = {"symbols": 0, "edges": 0, "contracts": 0, "errors": 0}
 
     try:
         for language in project.languages:
@@ -85,34 +85,64 @@ async def run_ingest(ctx: dict, project_id_str: str, run_id_str: str, path: str)
             await bus.publish(run_id, {"phase": "language_start", "language": language})
 
             async with SessionLocal() as session:
-                async for rec in runner.run("symbols", path):
-                    if rec.stream == "stderr":
-                        totals["errors"] += 1
-                        await bus.publish(run_id, {"phase": "analyzer_error", **rec.payload})
-                        continue
-                    payload = rec.payload
-                    if payload.get("record_type") != "symbol":
-                        continue
-                    data = payload.get("data", {})
-                    node_id = data.get("id")
-                    if not node_id:
-                        continue
-                    await upsert_node(
-                        session,
-                        project_id=project_id,
-                        node_id=node_id,
-                        kind="Symbol",
-                        data=data,
-                        certainty=data.get("certainty", "asserted"),
-                        source_name=payload.get("source_name", "unknown"),
-                    )
-                    totals["symbols"] += 1
-                    if totals["symbols"] % 200 == 0:
-                        await session.commit()
-                        await bus.publish(
-                            run_id,
-                            {"phase": "progress", "symbols": totals["symbols"]},
-                        )
+                for verb in ("symbols", "contracts", "calls"):
+                    async for rec in runner.run(verb, path):
+                        if rec.stream == "stderr":
+                            totals["errors"] += 1
+                            await bus.publish(run_id, {"phase": "analyzer_error", **rec.payload})
+                            continue
+                        payload = rec.payload
+                        data = payload.get("data", {}) or {}
+                        source_name = payload.get("source_name", "unknown")
+                        match payload.get("record_type"):
+                            case "symbol":
+                                node_id = data.get("id")
+                                if not node_id:
+                                    continue
+                                await upsert_node(
+                                    session,
+                                    project_id=project_id,
+                                    node_id=node_id,
+                                    kind="Symbol",
+                                    data=data,
+                                    certainty=data.get("certainty", "asserted"),
+                                    source_name=source_name,
+                                )
+                                totals["symbols"] += 1
+                            case "contract":
+                                node_id = data.get("id")
+                                if not node_id:
+                                    continue
+                                await upsert_node(
+                                    session,
+                                    project_id=project_id,
+                                    node_id=node_id,
+                                    kind="Contract",
+                                    data=data,
+                                    certainty=data.get("certainty", "inferred"),
+                                    source_name=source_name,
+                                )
+                                totals["contracts"] += 1
+                            case "edge":
+                                src = data.get("source_id")
+                                tgt = data.get("target_id")
+                                kind = data.get("kind", "CALLS")
+                                if not src or not tgt:
+                                    continue
+                                await upsert_edge(
+                                    session,
+                                    project_id=project_id,
+                                    source_id=src,
+                                    target_id=tgt,
+                                    kind=kind,
+                                    data=data.get("metadata", {}) or {},
+                                    certainty=data.get("certainty", "asserted"),
+                                    source_name=source_name,
+                                )
+                                totals["edges"] += 1
+                        if sum(totals.values()) % 200 == 0:
+                            await session.commit()
+                            await bus.publish(run_id, {"phase": "progress", **totals})
                 await session.commit()
 
             await bus.publish(

@@ -141,20 +141,129 @@ public static class Commands
         return 0;
     }
 
-    public static Task<int> CallsAsync(string[] args)
+    public static async Task<int> CallsAsync(string[] args)
     {
-        // Full call graph arrives in Week 3; Week 2 ships a stub that emits zero edges.
-        var (_, output) = ParseCommon(args);
+        var (path, output) = ParseCommon(args);
+        if (path is null) { Console.Error.WriteLine("calls requires <path>"); return 2; }
+
         using var writer = OpenOutput(output);
-        return Task.FromResult(0);
+        var compilations = await LoadAsync(path);
+        foreach (var compilation in compilations)
+        {
+            foreach (var tree in compilation.SyntaxTrees)
+            {
+                SemanticModel model;
+                try { model = compilation.GetSemanticModel(tree); }
+                catch (Exception ex) { Envelope.ReportError(tree.FilePath, ex.Message); continue; }
+                var root = await tree.GetRootAsync();
+                foreach (var invocation in root.DescendantNodes().OfType<InvocationExpressionSyntax>())
+                {
+                    var caller = invocation.Ancestors()
+                        .OfType<MemberDeclarationSyntax>()
+                        .Select(m => model.GetDeclaredSymbol(m))
+                        .FirstOrDefault(s => s is IMethodSymbol);
+                    if (caller is null) continue;
+
+                    var symInfo = model.GetSymbolInfo(invocation);
+                    var callee = symInfo.Symbol ?? symInfo.CandidateSymbols.FirstOrDefault();
+                    if (callee is null) continue;
+
+                    var line = invocation.GetLocation().GetLineSpan();
+                    var data = new
+                    {
+                        source_id = $"csharp:{caller.GetDocumentationCommentId() ?? caller.ToDisplayString()}",
+                        target_id = $"csharp:{callee.GetDocumentationCommentId() ?? callee.ToDisplayString()}",
+                        kind = "CALLS",
+                        certainty = "asserted",
+                        created_by = new[] { Envelope.SourceName },
+                        metadata = new
+                        {
+                            invocation_site = new
+                            {
+                                file = tree.FilePath,
+                                line = line.StartLinePosition.Line + 1,
+                                col = line.StartLinePosition.Character + 1,
+                            }
+                        },
+                    };
+                    Envelope.WriteLine(writer, "edge", data);
+                }
+            }
+        }
+        return 0;
     }
 
-    public static Task<int> ContractsAsync(string[] args)
+    public static async Task<int> ContractsAsync(string[] args)
     {
-        // ASP.NET contract extraction is Week 3/4 work per spec §15.2.
-        var (_, output) = ParseCommon(args);
+        var (path, output) = ParseCommon(args);
+        if (path is null) { Console.Error.WriteLine("contracts requires <path>"); return 2; }
+
         using var writer = OpenOutput(output);
-        return Task.FromResult(0);
+        var compilations = await LoadAsync(path);
+        foreach (var compilation in compilations)
+        {
+            foreach (var tree in compilation.SyntaxTrees)
+            {
+                SemanticModel model;
+                try { model = compilation.GetSemanticModel(tree); }
+                catch (Exception ex) { Envelope.ReportError(tree.FilePath, ex.Message); continue; }
+                var root = await tree.GetRootAsync();
+
+                foreach (var method in root.DescendantNodes().OfType<MethodDeclarationSyntax>())
+                {
+                    foreach (var attrList in method.AttributeLists)
+                    {
+                        foreach (var attr in attrList.Attributes)
+                        {
+                            var name = attr.Name.ToString();
+                            string? verb = name switch
+                            {
+                                var n when n.StartsWith("HttpGet") => "GET",
+                                var n when n.StartsWith("HttpPost") => "POST",
+                                var n when n.StartsWith("HttpPut") => "PUT",
+                                var n when n.StartsWith("HttpDelete") => "DELETE",
+                                var n when n.StartsWith("HttpPatch") => "PATCH",
+                                _ => null,
+                            };
+                            if (verb is null) continue;
+                            var route = "/";
+                            if (attr.ArgumentList?.Arguments.FirstOrDefault()?.Expression
+                                is LiteralExpressionSyntax lit &&
+                                lit.Token.Value is string s) route = s;
+
+                            var id = $"http.{verb}.{route}";
+                            var contract = new
+                            {
+                                id,
+                                kind = "http_endpoint",
+                                name = $"{verb} {route}",
+                                spec = new { method = verb, path = route },
+                                metadata = new { detected_by = "aspnet_attribute" },
+                                certainty = "asserted",
+                                created_by = new[] { Envelope.SourceName },
+                            };
+                            Envelope.WriteLine(writer, "contract", contract);
+
+                            var methodSym = model.GetDeclaredSymbol(method);
+                            if (methodSym is not null)
+                            {
+                                var exposes = new
+                                {
+                                    source_id = $"csharp:{methodSym.GetDocumentationCommentId() ?? methodSym.ToDisplayString()}",
+                                    target_id = id,
+                                    kind = "EXPOSES",
+                                    certainty = "asserted",
+                                    created_by = new[] { Envelope.SourceName },
+                                    metadata = new { },
+                                };
+                                Envelope.WriteLine(writer, "edge", exposes);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return 0;
     }
 
     public static Task<int> DataAccessAsync(string[] args)
