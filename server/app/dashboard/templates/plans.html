@@ -2,5 +2,54 @@
 {% block title %}Plans — Mnemos{% endblock %}
 {% block content %}
 <header class="page-head"><h1>Plans (Gate A)</h1></header>
-<p class="muted">Plan approval surface arrives in Week 7.</p>
+
+<form onsubmit="return load(event)">
+  <label>Project ID<input type="text" id="pid" required placeholder="uuid" /></label>
+  <button class="primary" type="submit">Load</button>
+</form>
+<div id="out"></div>
+
+<script>
+async function load(ev) {
+  ev.preventDefault();
+  const pid = document.getElementById("pid").value.trim();
+  const r = await fetch(`/api/v1/projects/${pid}/plans`);
+  const rows = await r.json();
+  const out = document.getElementById("out");
+  if (!Array.isArray(rows) || rows.length === 0) {
+    out.innerHTML = '<p class="muted">No plans yet.</p>';
+    return false;
+  }
+  let html = '';
+  for (const p of rows) {
+    html += `<div class="plan">
+      <h3>${p.spec.title ?? p.id} <span class="muted">${p.status}</span></h3>
+      <p>${p.spec.motivation ?? ""}</p>
+      <details>
+        <summary>Tasks (${p.tasks.length})</summary>
+        <ul>${p.tasks.map(t => `<li><b>${t.id}</b>: ${t.title}</li>`).join("")}</ul>
+      </details>
+      <details>
+        <summary>Impact</summary>
+        <pre>${JSON.stringify(p.impact_report, null, 2)}</pre>
+      </details>
+      <div class="actions">
+        <button onclick="decide('${p.id}','approve')" class="primary">Approve</button>
+        <button onclick="decide('${p.id}','reject')" class="danger">Reject</button>
+      </div>
+    </div>`;
+  }
+  out.innerHTML = html;
+  return false;
+}
+async function decide(id, s) {
+  const feedback = s === "reject" ? prompt("Feedback?") : null;
+  const r = await fetch(`/api/v1/plans/${id}/decide`, {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({status: s, feedback}),
+  });
+  alert(await r.text());
+}
+</script>
 {% endblock %}

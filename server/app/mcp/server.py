@@ -24,6 +24,11 @@ from app.mcp.data_queries import (
     get_sample_data,
     search_data,
 )
+from app.mcp.dev_tools import (
+    edit_file_in_worktree,
+    run_in_sandbox_tool,
+    submit_plan as submit_plan_tool,
+)
 from app.mcp.queries import (
     find_callees,
     find_callers,
@@ -215,6 +220,52 @@ _TOOLS = [
             "required": ["entry_contract_id"],
         },
     ),
+    Tool(
+        name="submit_plan",
+        description=(
+            "Submit a Plan for Gate A approval. Creates a worktree at "
+            "/var/lib/mnemos/worktrees/<plan>/."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "spec": {"type": "object"},
+                "tasks": {"type": "array"},
+                "target_component_id": {"type": "string"},
+                "requester": {"type": "string"},
+            },
+            "required": ["spec", "tasks", "target_component_id", "requester"],
+        },
+    ),
+    Tool(
+        name="edit_file_in_worktree",
+        description=(
+            "Apply string-edits to a file inside the plan's worktree. Rejects "
+            "unapproved plans and paths that escape the worktree root."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "plan_id": {"type": "string"},
+                "file_path": {"type": "string"},
+                "edits": {"type": "array"},
+            },
+            "required": ["plan_id", "file_path", "edits"],
+        },
+    ),
+    Tool(
+        name="run_in_sandbox",
+        description="Run an allowlisted command inside the plan worktree.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "plan_id": {"type": "string"},
+                "command": {"type": "string"},
+                "timeout_sec": {"type": "integer", "default": 300},
+            },
+            "required": ["plan_id", "command"],
+        },
+    ),
 ]
 
 
@@ -330,6 +381,29 @@ def build_server(project_id: uuid.UUID) -> Server:
                     project_id=project_id,
                     entry_contract_id=arguments["entry_contract_id"],
                     max_depth=int(arguments.get("max_depth", 6)),
+                )
+            elif name == "submit_plan":
+                result = await submit_plan_tool(
+                    db,
+                    project_id=project_id,
+                    spec=arguments["spec"],
+                    tasks=arguments["tasks"],
+                    target_component_id=arguments["target_component_id"],
+                    requester=arguments["requester"],
+                )
+            elif name == "edit_file_in_worktree":
+                result = await edit_file_in_worktree(
+                    db,
+                    plan_id=uuid.UUID(arguments["plan_id"]),
+                    file_path=arguments["file_path"],
+                    edits=arguments["edits"],
+                )
+            elif name == "run_in_sandbox":
+                result = await run_in_sandbox_tool(
+                    db,
+                    plan_id=uuid.UUID(arguments["plan_id"]),
+                    command=arguments["command"],
+                    timeout_sec=int(arguments.get("timeout_sec", 300)),
                 )
             else:
                 result = {"error": f"unknown tool: {name}"}
