@@ -5,10 +5,12 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api import analysis as analysis_api
 from app.api import audit as audit_api
 from app.api import auth as auth_api
 from app.api import projects as projects_api
 from app.api import secrets as secrets_api
+from app.api import webhooks as webhooks_api
 from app.audit.middleware import AuditMiddleware
 from app.config import get_settings
 from app.dashboard.router import router as dashboard_router
@@ -38,7 +40,9 @@ def create_app() -> FastAPI:
     app.include_router(auth_api.router)
     app.include_router(secrets_api.router)
     app.include_router(projects_api.router)
+    app.include_router(analysis_api.router)
     app.include_router(audit_api.router)
+    app.include_router(webhooks_api.router)
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     app.include_router(dashboard_router)
 

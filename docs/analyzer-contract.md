@@ -1,0 +1,72 @@
+# Analyzer plugin contract (Phase 1)
+
+This document is the binding interface between the platform and any
+language/database analyzer. It mirrors `Mnemos_spec.md` §6.
+
+## 1. CLI surface
+
+Every analyzer MUST expose a single command-line entry point named
+`ggoss-<name>` (binary or shell script) that supports the following verbs:
+
+| Verb | Purpose | Notes |
+|---|---|---|
+| `probe <path>` | Detect whether the analyzer applies to the given path. | Output: a single JSON object on stdout: `{"applicable": bool, "reason": string, "files_found": int}`. Exit code 0 in both cases (applicability is data, not failure). |
+| `inventory <path>` | Enumerate analyzable inputs without producing graph records. | Output: one JSON object on stdout summarising files/modules/errors. |
+| `symbols <path> [--output <file>]` | Stream `record_type=symbol` records. | JSON Lines on stdout (or `--output` file). |
+| `calls <path> [--output <file>]` | Stream `record_type=edge,kind=CALLS` records. | JSON Lines. |
+| `contracts <path> [--output <file>]` | Stream `record_type=contract` and the EXPOSES edges that connect them. | JSON Lines. |
+| `data_access <path> [--output <file>]` | Stream READS/WRITES edges referencing DataEntities. | JSON Lines. |
+| `schema` | Print the JSON Schema for this analyzer's `data` payloads. | One JSON document on stdout. |
+
+DB analyzers (`ggoss-sql-mssql`, `ggoss-sql-oracle`) extend the surface with
+`live_schema`, `live_stats`, `sample`, `query` (see §6.3 of the spec).
+
+## 2. Output record envelope
+
+Every record emitted to stdout (or `--output`) is one JSON object per line:
+
+```json
+{
+  "record_type": "symbol" | "contract" | "data_entity" | "edge" | "sample",
+  "source_name": "ggoss-csharp",
+  "source_version": "1.0.0",
+  "analyzed_at": "2026-04-17T10:00:00Z",
+  "data": { /* §5.1 / §5.2 schema */ }
+}
+```
+
+`source_name` MUST be unique per analyzer + variant. The platform uses it to
+populate `created_by` arrays on nodes/edges.
+
+## 3. Error reporting
+
+- Recoverable errors are written to **stderr** as JSON Lines, one per problem:
+  ```json
+  {"level":"error","file":"Order.cs","message":"...","recoverable":true}
+  ```
+- The analyzer MUST continue past recoverable failures.
+- Only `recoverable: false` (or a crash) yields a non-zero exit code.
+
+## 4. Performance budget
+
+- 100k LOC: `symbols` ≤ 10 minutes
+- 300k LOC: `symbols` ≤ 30 minutes
+- Resident memory ≤ 4 GB
+
+## 5. Container conventions
+
+- Image name: `mnemos/<analyzer-name>:<version>` (locally built; no registry
+  required for Phase 1).
+- Working directory inside the container: `/work` — the platform mounts the
+  target source tree at this path read-only.
+- Output files (when `--output` is used) go to `/work/.mnemos/out/`, which the
+  platform creates writable.
+- Long-lived state files MUST live under `/work/.mnemos/` so cleanup is one
+  `rm -rf`.
+- `STDIN` is unused.
+
+## 6. Versioning
+
+- The CLI surface itself is versioned through the `schema` command's output
+  (`$schema` field). Breaking changes require a major bump.
+- Minor versions add optional fields, never remove them.

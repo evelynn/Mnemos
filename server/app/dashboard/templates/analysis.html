@@ -2,5 +2,69 @@
 {% block title %}Analysis — Mnemos{% endblock %}
 {% block content %}
 <header class="page-head"><h1>Analysis</h1></header>
-<p class="muted">Analyzer pipeline arrives in Week 2.</p>
+
+<section>
+  <h2>Projects</h2>
+  <div id="project-select"
+       hx-get="/api/v1/projects"
+       hx-trigger="load"
+       hx-swap="innerHTML">
+    <p class="muted">Loading…</p>
+  </div>
+</section>
+
+<section>
+  <h2>Trigger run</h2>
+  <form id="trigger" onsubmit="return triggerRun(event)">
+    <label>Project ID<input type="text" name="project_id" required placeholder="uuid" /></label>
+    <label>Source path<input type="text" name="source_path" required value="/work" /></label>
+    <label>Git SHA<input type="text" name="git_sha" value="HEAD" /></label>
+    <button type="submit" class="primary">Start analysis</button>
+  </form>
+  <pre id="trigger-result" class="muted"></pre>
+</section>
+
+<section>
+  <h2>Live progress</h2>
+  <label>Run ID<input type="text" id="run-id" placeholder="uuid" /></label>
+  <button onclick="subscribe()" class="primary">Subscribe</button>
+  <pre id="events"></pre>
+</section>
+
+<script>
+async function triggerRun(ev) {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const pid = fd.get("project_id");
+  const resp = await fetch(`/api/v1/projects/${pid}/analyze`, {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({
+      git_sha: fd.get("git_sha"),
+      scope: "full",
+      source_path: fd.get("source_path"),
+    }),
+  });
+  const out = document.getElementById("trigger-result");
+  out.textContent = await resp.text();
+  return false;
+}
+
+let _sse;
+function subscribe() {
+  if (_sse) _sse.close();
+  const id = document.getElementById("run-id").value.trim();
+  if (!id) return;
+  const el = document.getElementById("events");
+  el.textContent = "";
+  _sse = new EventSource(`/api/v1/analysis_runs/${id}/events`);
+  _sse.addEventListener("progress", (e) => {
+    el.textContent += e.data + "\n";
+    el.scrollTop = el.scrollHeight;
+  });
+  _sse.addEventListener("open", (e) => {
+    el.textContent += "# stream open\n";
+  });
+}
+</script>
 {% endblock %}
