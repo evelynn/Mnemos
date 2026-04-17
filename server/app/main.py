@@ -9,6 +9,7 @@ from app.api import analysis as analysis_api
 from app.api import artifacts as artifacts_api
 from app.api import audit as audit_api
 from app.api import auth as auth_api
+from app.api import data as data_api
 from app.api import projects as projects_api
 from app.api import secrets as secrets_api
 from app.api import webhooks as webhooks_api
@@ -43,6 +44,7 @@ def create_app() -> FastAPI:
     app.include_router(projects_api.router)
     app.include_router(analysis_api.router)
     app.include_router(artifacts_api.router)
+    app.include_router(data_api.router)
     app.include_router(audit_api.router)
     app.include_router(webhooks_api.router)
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")

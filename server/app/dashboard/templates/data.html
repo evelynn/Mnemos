@@ -1,6 +1,32 @@
 {% extends "_layout.html" %}
 {% block title %}Data — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>Data</h1></header>
-<p class="muted">DB sample browser arrives in Week 5.</p>
+<header class="page-head"><h1>Data entities</h1></header>
+<form onsubmit="return loadEntities(event)">
+  <label>Project ID<input type="text" id="pid" required placeholder="uuid" /></label>
+  <button class="primary" type="submit">Load</button>
+</form>
+<div id="out"></div>
+
+<script>
+async function loadEntities(ev) {
+  ev.preventDefault();
+  const pid = document.getElementById("pid").value.trim();
+  if (!pid) return false;
+  const resp = await fetch(`/api/v1/projects/${pid}/data_entities`);
+  const rows = await resp.json();
+  const out = document.getElementById("out");
+  if (!Array.isArray(rows) || rows.length === 0) {
+    out.innerHTML = '<p class="muted">No data entities yet — run a live_schema extraction.</p>';
+    return false;
+  }
+  let html = '<table class="data"><thead><tr><th>ID</th><th>Kind</th><th>Component</th><th>Sensitive</th><th>Certainty</th></tr></thead><tbody>';
+  for (const r of rows) {
+    html += `<tr><td><code>${r.id}</code></td><td>${r.kind ?? ""}</td><td>${r.component_id ?? ""}</td><td>${r.is_sensitive ? "yes" : "no"}</td><td>${r.certainty}</td></tr>`;
+  }
+  html += "</tbody></table>";
+  out.innerHTML = html;
+  return false;
+}
+</script>
 {% endblock %}

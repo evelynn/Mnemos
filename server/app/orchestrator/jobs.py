@@ -19,6 +19,7 @@ from app.analyzers.registry import runner_for
 from app.audit.logger import record as audit_record
 from app.config import get_settings
 from app.db import SessionLocal
+from app.merge.contract_id import http_contract_id
 from app.merge.writer import upsert_edge, upsert_node
 from app.models.graph import AnalysisRun
 from app.models.projects import Project
@@ -113,6 +114,12 @@ async def run_ingest(ctx: dict, project_id_str: str, run_id_str: str, path: str)
                                 node_id = data.get("id")
                                 if not node_id:
                                     continue
+                                spec = data.get("spec") or {}
+                                if data.get("kind") == "http_endpoint" and spec:
+                                    method = spec.get("method", "GET")
+                                    raw_path = spec.get("path", "/")
+                                    node_id = http_contract_id(method, raw_path)
+                                    data = {**data, "id": node_id}
                                 await upsert_node(
                                     session,
                                     project_id=project_id,
@@ -123,12 +130,28 @@ async def run_ingest(ctx: dict, project_id_str: str, run_id_str: str, path: str)
                                     source_name=source_name,
                                 )
                                 totals["contracts"] += 1
+                            case "data_entity":
+                                node_id = data.get("id")
+                                if not node_id:
+                                    continue
+                                await upsert_node(
+                                    session,
+                                    project_id=project_id,
+                                    node_id=node_id,
+                                    kind="DataEntity",
+                                    data=data,
+                                    certainty=data.get("certainty", "verified"),
+                                    source_name=source_name,
+                                )
                             case "edge":
                                 src = data.get("source_id")
                                 tgt = data.get("target_id")
                                 kind = data.get("kind", "CALLS")
                                 if not src or not tgt:
                                     continue
+                                if tgt.startswith("http.") and tgt.count(".") >= 2:
+                                    method, _, rest = tgt.removeprefix("http.").partition(".")
+                                    tgt = http_contract_id(method, rest)
                                 await upsert_edge(
                                     session,
                                     project_id=project_id,

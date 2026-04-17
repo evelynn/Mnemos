@@ -18,7 +18,14 @@ from mcp.types import TextContent, Tool
 
 from app.audit.logger import record as audit_record
 from app.db import SessionLocal
-from app.mcp.queries import find_callers, get_symbol, search_symbols
+from app.mcp.queries import (
+    find_callees,
+    find_callers,
+    get_contract,
+    get_symbol,
+    impact_analysis,
+    search_symbols,
+)
 
 _TOOLS = [
     Tool(
@@ -61,6 +68,57 @@ _TOOLS = [
             "required": ["symbol_id"],
         },
     ),
+    Tool(
+        name="find_callees",
+        description="List CALLS edges whose source is this symbol.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol_id": {"type": "string"},
+                "limit": {"type": "integer", "default": 100},
+            },
+            "required": ["symbol_id"],
+        },
+    ),
+    Tool(
+        name="impact_analysis",
+        description=(
+            "Transitive caller walk. Returns directly + transitively affected "
+            "symbols. Test/data impacts arrive in later phases."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol_id": {"type": "string"},
+                "max_depth": {"type": "integer", "default": 3},
+            },
+            "required": ["symbol_id"],
+        },
+    ),
+    Tool(
+        name="get_contract",
+        description="Fetch a Contract node plus its exposers and callers.",
+        inputSchema={
+            "type": "object",
+            "properties": {"contract_id": {"type": "string"}},
+            "required": ["contract_id"],
+        },
+    ),
+    Tool(
+        name="read_file",
+        description=(
+            "Read a file from the platform's repo mirror at /var/lib/mnemos/repos. "
+            "Paths are resolved below the project's checkout root."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "file_path": {"type": "string"},
+            },
+            "required": ["file_path"],
+        },
+    ),
 ]
 
 
@@ -96,6 +154,35 @@ def build_server(project_id: uuid.UUID) -> Server:
                     project_id=project_id,
                     symbol_id=arguments["symbol_id"],
                     limit=int(arguments.get("limit", 100)),
+                )
+            elif name == "find_callees":
+                result = await find_callees(
+                    db,
+                    project_id=project_id,
+                    symbol_id=arguments["symbol_id"],
+                    limit=int(arguments.get("limit", 100)),
+                )
+            elif name == "impact_analysis":
+                result = await impact_analysis(
+                    db,
+                    project_id=project_id,
+                    symbol_id=arguments["symbol_id"],
+                    max_depth=int(arguments.get("max_depth", 3)),
+                )
+            elif name == "get_contract":
+                result = await get_contract(
+                    db,
+                    project_id=project_id,
+                    contract_id=arguments["contract_id"],
+                )
+                if result is None:
+                    result = {"error": "not_found"}
+            elif name == "read_file":
+                from app.mcp.file_read import read_project_file
+
+                result = await read_project_file(
+                    project_id=project_id,
+                    file_path=arguments["file_path"],
                 )
             else:
                 result = {"error": f"unknown tool: {name}"}

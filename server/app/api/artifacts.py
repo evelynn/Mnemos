@@ -1,11 +1,11 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.artifacts import build_mcp_config
+from app.artifacts import build_agents_md, build_mcp_config
 from app.auth.deps import CurrentUser
 from app.db import get_session
 from app.models.projects import Project
@@ -29,9 +29,11 @@ async def list_artifacts(
     db: AsyncSession = Depends(get_session),
 ) -> dict:
     await _require_project(project_id, db)
+    base = f"/api/v1/projects/{project_id}/artifacts"
     return {
         "artifacts": [
-            {"name": "mcp.json", "path": f"/api/v1/projects/{project_id}/artifacts/mcp.json"},
+            {"name": "mcp.json", "path": f"{base}/mcp.json"},
+            {"name": "AGENTS.md", "path": f"{base}/AGENTS.md"},
         ]
     }
 
@@ -44,3 +46,14 @@ async def get_mcp_json(
 ) -> JSONResponse:
     await _require_project(project_id, db)
     return JSONResponse(build_mcp_config(project_id))
+
+
+@router.get("/AGENTS.md")
+async def get_agents_md(
+    project_id: uuid.UUID,
+    _: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+) -> PlainTextResponse:
+    await _require_project(project_id, db)
+    md = await build_agents_md(db, project_id=project_id)
+    return PlainTextResponse(md, media_type="text/markdown")
