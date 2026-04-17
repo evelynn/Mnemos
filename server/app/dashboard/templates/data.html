@@ -2,31 +2,65 @@
 {% block title %}Data — Mnemos{% endblock %}
 {% block content %}
 <header class="page-head"><h1>Data entities</h1></header>
+
 <form onsubmit="return loadEntities(event)">
   <label>Project ID<input type="text" id="pid" required placeholder="uuid" /></label>
-  <button class="primary" type="submit">Load</button>
+  <button class="primary" type="submit">Load entities</button>
 </form>
-<div id="out"></div>
+<div id="entities"></div>
+
+<section>
+  <h2>Sample viewer</h2>
+  <label>Entity ID<input type="text" id="eid" placeholder="db.mssql.OrderDb.dbo.Orders" /></label>
+  <button class="primary" onclick="loadSample()">Load sample</button>
+  <div id="sample"></div>
+</section>
 
 <script>
 async function loadEntities(ev) {
   ev.preventDefault();
   const pid = document.getElementById("pid").value.trim();
   if (!pid) return false;
-  const resp = await fetch(`/api/v1/projects/${pid}/data_entities`);
-  const rows = await resp.json();
-  const out = document.getElementById("out");
+  const r = await fetch(`/api/v1/projects/${pid}/data_entities`);
+  const rows = await r.json();
+  const out = document.getElementById("entities");
   if (!Array.isArray(rows) || rows.length === 0) {
-    out.innerHTML = '<p class="muted">No data entities yet — run a live_schema extraction.</p>';
+    out.innerHTML = '<p class="muted">No data entities yet.</p>';
     return false;
   }
-  let html = '<table class="data"><thead><tr><th>ID</th><th>Kind</th><th>Component</th><th>Sensitive</th><th>Certainty</th></tr></thead><tbody>';
+  let html = '<table class="data"><thead><tr><th>ID</th><th>Kind</th><th>Sensitive</th><th>Certainty</th></tr></thead><tbody>';
   for (const r of rows) {
-    html += `<tr><td><code>${r.id}</code></td><td>${r.kind ?? ""}</td><td>${r.component_id ?? ""}</td><td>${r.is_sensitive ? "yes" : "no"}</td><td>${r.certainty}</td></tr>`;
+    html += `<tr><td><code>${r.id}</code></td><td>${r.kind ?? ""}</td><td>${r.is_sensitive ? "yes" : "no"}</td><td>${r.certainty}</td></tr>`;
   }
   html += "</tbody></table>";
   out.innerHTML = html;
   return false;
+}
+
+async function loadSample() {
+  const pid = document.getElementById("pid").value.trim();
+  const eid = document.getElementById("eid").value.trim();
+  if (!pid || !eid) return;
+  const r = await fetch(`/api/v1/projects/${pid}/data_entities/${encodeURIComponent(eid)}/sample`);
+  const payload = await r.json();
+  const out = document.getElementById("sample");
+  if (!r.ok) {
+    out.innerHTML = `<p class="error">${payload.detail ?? r.statusText}</p>`;
+    return;
+  }
+  const rows = payload.rows ?? [];
+  if (!rows.length) {
+    out.innerHTML = '<p class="muted">No rows in sample.</p>';
+    return;
+  }
+  const cols = Object.keys(rows[0]);
+  let html = '<table class="data"><thead><tr>' + cols.map(c => `<th>${c}</th>`).join("") + '</tr></thead><tbody>';
+  for (const row of rows) {
+    html += "<tr>" + cols.map(c => `<td>${row[c] ?? ""}</td>`).join("") + "</tr>";
+  }
+  html += "</tbody></table>";
+  if (payload.masking_applied) html += '<p class="muted">masking applied</p>';
+  out.innerHTML = html;
 }
 </script>
 {% endblock %}

@@ -18,6 +18,12 @@ from mcp.types import TextContent, Tool
 
 from app.audit.logger import record as audit_record
 from app.db import SessionLocal
+from app.mcp.data_queries import (
+    get_column_stats,
+    get_data_entity,
+    get_sample_data,
+    search_data,
+)
 from app.mcp.queries import (
     find_callees,
     find_callers,
@@ -119,6 +125,54 @@ _TOOLS = [
             "required": ["file_path"],
         },
     ),
+    Tool(
+        name="get_data_entity",
+        description="Fetch a DataEntity node plus sample availability.",
+        inputSchema={
+            "type": "object",
+            "properties": {"entity_id": {"type": "string"}},
+            "required": ["entity_id"],
+        },
+    ),
+    Tool(
+        name="get_sample_data",
+        description=(
+            "Return the most recent masked sample for a DataEntity. "
+            "Refuses sensitive entities."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "entity_id": {"type": "string"},
+                "limit": {"type": "integer", "default": 10},
+            },
+            "required": ["entity_id"],
+        },
+    ),
+    Tool(
+        name="get_column_stats",
+        description="Return stored stats for a single column from the latest sample.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "entity_id": {"type": "string"},
+                "column": {"type": "string"},
+            },
+            "required": ["entity_id", "column"],
+        },
+    ),
+    Tool(
+        name="search_data",
+        description="Scan stored samples for values matching a regex.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "value_pattern": {"type": "string"},
+                "max_hits": {"type": "integer", "default": 50},
+            },
+            "required": ["value_pattern"],
+        },
+    ),
 ]
 
 
@@ -183,6 +237,33 @@ def build_server(project_id: uuid.UUID) -> Server:
                 result = await read_project_file(
                     project_id=project_id,
                     file_path=arguments["file_path"],
+                )
+            elif name == "get_data_entity":
+                result = await get_data_entity(
+                    db, project_id=project_id, entity_id=arguments["entity_id"]
+                )
+                if result is None:
+                    result = {"error": "not_found"}
+            elif name == "get_sample_data":
+                result = await get_sample_data(
+                    db,
+                    project_id=project_id,
+                    entity_id=arguments["entity_id"],
+                    limit=int(arguments.get("limit", 10)),
+                )
+            elif name == "get_column_stats":
+                result = await get_column_stats(
+                    db,
+                    project_id=project_id,
+                    entity_id=arguments["entity_id"],
+                    column=arguments["column"],
+                )
+            elif name == "search_data":
+                result = await search_data(
+                    db,
+                    project_id=project_id,
+                    value_pattern=arguments["value_pattern"],
+                    max_hits=int(arguments.get("max_hits", 50)),
                 )
             else:
                 result = {"error": f"unknown tool: {name}"}

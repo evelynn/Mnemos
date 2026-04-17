@@ -45,6 +45,7 @@ def create_app() -> FastAPI:
     app.include_router(analysis_api.router)
     app.include_router(artifacts_api.router)
     app.include_router(data_api.router)
+    app.include_router(data_api.query_router)
     app.include_router(audit_api.router)
     app.include_router(webhooks_api.router)
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
