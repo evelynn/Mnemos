@@ -1,8 +1,9 @@
-"""ARQ job functions.
+"""ARQ job functions — staged execution with per-stage progress tracking.
 
-Only the Week-2 subset is implemented: ``run_ingest`` bootstraps a run and
-fans out to ``run_analyzer`` per language. Additional jobs (merge, summarise,
-runtime correlator, etc.) land in later weeks per spec §13.3.
+Every stage is wrapped in :class:`app.orchestrator.stages.StageTracker` so
+the GUI can show a pipeline view and each summariser pass can exit in
+``status=partial`` when its budget is spent without losing progress.
+Design rationale: ``docs/analysis-strategy.md``.
 """
 
 from __future__ import annotations
@@ -20,13 +21,14 @@ from app.audit.logger import record as audit_record
 from app.config import get_settings
 from app.db import SessionLocal
 from app.extractor.agent import Extractor
-from app.extractor.runner import summarise_l1
+from app.extractor.runner import summarise_l1, summarise_l2, summarise_l3
 from app.merge.contract_id import http_contract_id
 from app.merge.findings import run_all as rebuild_findings
 from app.merge.writer import upsert_edge, upsert_node
 from app.models.graph import AnalysisRun
 from app.models.projects import Project
 from app.orchestrator.progress import ProgressBus
+from app.orchestrator.stages import StageTracker
 
 log = logging.getLogger(__name__)
 _settings = get_settings()
@@ -55,12 +57,156 @@ async def _set_run_status(
     await session.commit()
 
 
-async def run_ingest(ctx: dict, project_id_str: str, run_id_str: str, path: str) -> None:
-    """Drive a single analysis run end-to-end.
+async def _record_payload(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    payload: dict[str, Any],
+    accept_kinds: set[str],
+    totals: dict[str, int],
+) -> None:
+    """Apply one analyzer JSON record if its record_type is in ``accept_kinds``."""
+    record_type = payload.get("record_type")
+    if record_type not in accept_kinds:
+        return
+    data = payload.get("data", {}) or {}
+    source_name = payload.get("source_name", "unknown")
 
-    Week 2 scope: spawn per-language analyzer, stream symbols into the graph.
-    Merge/summarise stages are no-ops here and wired up in Weeks 3 & 6.
-    """
+    if record_type == "symbol":
+        node_id = data.get("id")
+        if not node_id:
+            return
+        await upsert_node(
+            session,
+            project_id=project_id,
+            node_id=node_id,
+            kind="Symbol",
+            data=data,
+            certainty=data.get("certainty", "asserted"),
+            source_name=source_name,
+        )
+        totals["symbols"] += 1
+    elif record_type == "contract":
+        node_id = data.get("id")
+        if not node_id:
+            return
+        spec = data.get("spec") or {}
+        if data.get("kind") == "http_endpoint" and spec:
+            method = spec.get("method", "GET")
+            raw_path = spec.get("path", "/")
+            node_id = http_contract_id(method, raw_path)
+            data = {**data, "id": node_id}
+        await upsert_node(
+            session,
+            project_id=project_id,
+            node_id=node_id,
+            kind="Contract",
+            data=data,
+            certainty=data.get("certainty", "inferred"),
+            source_name=source_name,
+        )
+        totals["contracts"] += 1
+    elif record_type == "data_entity":
+        node_id = data.get("id")
+        if not node_id:
+            return
+        await upsert_node(
+            session,
+            project_id=project_id,
+            node_id=node_id,
+            kind="DataEntity",
+            data=data,
+            certainty=data.get("certainty", "verified"),
+            source_name=source_name,
+        )
+        totals["data_entities"] = totals.get("data_entities", 0) + 1
+    elif record_type == "edge":
+        src = data.get("source_id")
+        tgt = data.get("target_id")
+        kind = data.get("kind", "CALLS")
+        if not src or not tgt:
+            return
+        if tgt.startswith("http.") and tgt.count(".") >= 2:
+            method, _, rest = tgt.removeprefix("http.").partition(".")
+            tgt = http_contract_id(method, rest)
+        await upsert_edge(
+            session,
+            project_id=project_id,
+            source_id=src,
+            target_id=tgt,
+            kind=kind,
+            data=data.get("metadata", {}) or {},
+            certainty=data.get("certainty", "asserted"),
+            source_name=source_name,
+        )
+        totals["edges"] += 1
+
+
+_VERB_ACCEPT = {
+    "symbols": {"symbol", "data_entity"},
+    "contracts": {"contract", "edge"},
+    "calls": {"edge"},
+    "data_access": {"edge"},
+    "live_schema": {"data_entity"},
+}
+
+
+async def _run_analyzer_stage(
+    bus: ProgressBus,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    language: str,
+    verb: str,
+    path: str,
+    position: int,
+    totals: dict[str, int],
+) -> None:
+    """One analyser verb (e.g. 'symbols' for 'csharp') as a tracked stage."""
+    runner = runner_for(language)
+    if runner is None:
+        # Skipped stage recorded so the GUI still shows it.
+        async with StageTracker(
+            bus,
+            run_id,
+            project_id,
+            f"{verb}:{language}",
+            language=language,
+            position=position,
+        ) as stage:
+            stage.set_stats({"skipped": True, "reason": "no_analyzer"})
+        return
+
+    async with StageTracker(
+        bus,
+        run_id,
+        project_id,
+        f"{verb}:{language}",
+        language=language,
+        position=position,
+        time_budget_sec=1800,
+    ) as stage:
+        accept = _VERB_ACCEPT.get(verb, set())
+        async with SessionLocal() as session:
+            async for rec in runner.run(verb, path):
+                if rec.stream == "stderr":
+                    totals["errors"] += 1
+                    continue
+                before = sum(totals.values())
+                await _record_payload(
+                    session,
+                    project_id=project_id,
+                    payload=rec.payload,
+                    accept_kinds=accept,
+                    totals=totals,
+                )
+                after = sum(totals.values())
+                if after > before:
+                    await stage.increment(after - before)
+            await session.commit()
+        stage.set_stats({k: totals.get(k, 0) for k in ("symbols", "edges", "contracts", "data_entities")})
+
+
+async def run_ingest(ctx: dict, project_id_str: str, run_id_str: str, path: str) -> None:
     project_id = uuid.UUID(project_id_str)
     run_id = uuid.UUID(run_id_str)
     bus: ProgressBus = ctx["progress"]
@@ -74,121 +220,70 @@ async def run_ingest(ctx: dict, project_id_str: str, run_id_str: str, path: str)
             return
         await _set_run_status(session, run_id, status="running", started_at=now)
 
-    await bus.publish(run_id, {"phase": "started", "at": now.isoformat()})
-    totals = {"symbols": 0, "edges": 0, "contracts": 0, "errors": 0}
+    await bus.publish(run_id, {"event": "run_started", "at": now.isoformat()})
+    totals: dict[str, int] = {
+        "symbols": 0,
+        "edges": 0,
+        "contracts": 0,
+        "data_entities": 0,
+        "errors": 0,
+    }
+    position = 0
 
     try:
+        # Stages L0: per-language, per-verb extraction.
         for language in project.languages:
-            runner = runner_for(language)
-            if runner is None:
-                await bus.publish(
-                    run_id,
-                    {"phase": "skipped", "language": language, "reason": "no_analyzer"},
+            for verb in ("symbols", "contracts", "calls", "data_access"):
+                position += 1
+                await _run_analyzer_stage(
+                    bus, project_id, run_id, language, verb, path, position, totals
                 )
-                continue
-            await bus.publish(run_id, {"phase": "language_start", "language": language})
 
+        # Stage: Findings reconciliation.
+        position += 1
+        async with StageTracker(
+            bus,
+            run_id,
+            project_id,
+            "findings",
+            position=position,
+            time_budget_sec=600,
+        ) as stage:
             async with SessionLocal() as session:
-                for verb in ("symbols", "contracts", "calls"):
-                    async for rec in runner.run(verb, path):
-                        if rec.stream == "stderr":
-                            totals["errors"] += 1
-                            await bus.publish(run_id, {"phase": "analyzer_error", **rec.payload})
-                            continue
-                        payload = rec.payload
-                        data = payload.get("data", {}) or {}
-                        source_name = payload.get("source_name", "unknown")
-                        match payload.get("record_type"):
-                            case "symbol":
-                                node_id = data.get("id")
-                                if not node_id:
-                                    continue
-                                await upsert_node(
-                                    session,
-                                    project_id=project_id,
-                                    node_id=node_id,
-                                    kind="Symbol",
-                                    data=data,
-                                    certainty=data.get("certainty", "asserted"),
-                                    source_name=source_name,
-                                )
-                                totals["symbols"] += 1
-                            case "contract":
-                                node_id = data.get("id")
-                                if not node_id:
-                                    continue
-                                spec = data.get("spec") or {}
-                                if data.get("kind") == "http_endpoint" and spec:
-                                    method = spec.get("method", "GET")
-                                    raw_path = spec.get("path", "/")
-                                    node_id = http_contract_id(method, raw_path)
-                                    data = {**data, "id": node_id}
-                                await upsert_node(
-                                    session,
-                                    project_id=project_id,
-                                    node_id=node_id,
-                                    kind="Contract",
-                                    data=data,
-                                    certainty=data.get("certainty", "inferred"),
-                                    source_name=source_name,
-                                )
-                                totals["contracts"] += 1
-                            case "data_entity":
-                                node_id = data.get("id")
-                                if not node_id:
-                                    continue
-                                await upsert_node(
-                                    session,
-                                    project_id=project_id,
-                                    node_id=node_id,
-                                    kind="DataEntity",
-                                    data=data,
-                                    certainty=data.get("certainty", "verified"),
-                                    source_name=source_name,
-                                )
-                            case "edge":
-                                src = data.get("source_id")
-                                tgt = data.get("target_id")
-                                kind = data.get("kind", "CALLS")
-                                if not src or not tgt:
-                                    continue
-                                if tgt.startswith("http.") and tgt.count(".") >= 2:
-                                    method, _, rest = tgt.removeprefix("http.").partition(".")
-                                    tgt = http_contract_id(method, rest)
-                                await upsert_edge(
-                                    session,
-                                    project_id=project_id,
-                                    source_id=src,
-                                    target_id=tgt,
-                                    kind=kind,
-                                    data=data.get("metadata", {}) or {},
-                                    certainty=data.get("certainty", "asserted"),
-                                    source_name=source_name,
-                                )
-                                totals["edges"] += 1
-                        if sum(totals.values()) % 200 == 0:
-                            await session.commit()
-                            await bus.publish(run_id, {"phase": "progress", **totals})
-                await session.commit()
+                finding_stats = await rebuild_findings(session, project_id)
+            totals["findings"] = sum(finding_stats.values())
+            for _ in range(totals["findings"]):
+                await stage.increment()
+            stage.set_stats(finding_stats)
 
-            await bus.publish(
-                run_id,
-                {"phase": "language_done", "language": language, **totals},
-            )
-
-        # Week-6 post-ingest stages: findings, L1 summaries.
-        async with SessionLocal() as session:
-            finding_stats = await rebuild_findings(session, project_id)
-        totals["findings"] = sum(finding_stats.values())
-        await bus.publish(run_id, {"phase": "findings", **finding_stats})
-
+        # Stages L1-L3: hierarchical summarisation. Each summariser enforces
+        # its own LLM budget; StageTracker adds a wall-clock ceiling.
         extractor = Extractor()
-        async with SessionLocal() as session:
-            summarised = await summarise_l1(
-                session, extractor, project_id=project_id, limit=25
-            )
-        totals["l1_summaries"] = summarised
-        await bus.publish(run_id, {"phase": "l1_summaries", "count": summarised})
+
+        for level, label, fn in (
+            (1, "l1_summaries", summarise_l1),
+            (2, "l2_summaries", summarise_l2),
+            (3, "l3_summaries", summarise_l3),
+        ):
+            position += 1
+            async with StageTracker(
+                bus,
+                run_id,
+                project_id,
+                label,
+                position=position,
+                time_budget_sec=1200,
+            ) as stage:
+                async with SessionLocal() as session:
+                    produced = await fn(
+                        session,
+                        extractor,
+                        project_id=project_id,
+                        limit=25,
+                        progress_cb=stage.increment,
+                    )
+                totals[label] = produced
+                stage.set_stats({label: produced})
 
         completed = datetime.now(tz=timezone.utc)
         async with SessionLocal() as session:
@@ -206,7 +301,7 @@ async def run_ingest(ctx: dict, project_id_str: str, run_id_str: str, path: str)
             project_id=project_id,
             details=totals,
         )
-        await bus.publish(run_id, {"phase": "completed", **totals})
+        await bus.publish(run_id, {"event": "run_completed", **totals})
     except Exception as exc:  # noqa: BLE001
         log.exception("run_ingest failed")
         async with SessionLocal() as session:
@@ -218,7 +313,7 @@ async def run_ingest(ctx: dict, project_id_str: str, run_id_str: str, path: str)
                 error_log=str(exc),
                 stats=totals,
             )
-        await bus.publish(run_id, {"phase": "failed", "error": str(exc)})
+        await bus.publish(run_id, {"event": "run_failed", "error": str(exc)})
 
 
 async def _startup(ctx: dict) -> None:

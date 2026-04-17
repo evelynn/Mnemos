@@ -14,6 +14,7 @@ from app.auth.deps import CurrentUser
 from app.db import get_session
 from app.models.graph import AnalysisRun, Node
 from app.models.projects import Project
+from app.models.stages import AnalysisStage
 from app.orchestrator.progress import ProgressBus
 from app.orchestrator.queue import get_queue
 
@@ -172,6 +173,38 @@ async def cancel_run(
         project_id=run.project_id,
     )
     return {"status": "cancelled"}
+
+
+@router.get("/analysis_runs/{run_id}/stages")
+async def get_run_stages(
+    run_id: uuid.UUID,
+    _: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    rows = (
+        await db.execute(
+            select(AnalysisStage)
+            .where(AnalysisStage.run_id == run_id)
+            .order_by(AnalysisStage.position, AnalysisStage.created_at)
+        )
+    ).scalars().all()
+    return [
+        {
+            "id": str(s.id),
+            "position": s.position,
+            "name": s.name,
+            "language": s.language,
+            "status": s.status,
+            "items_total": s.items_total,
+            "items_done": s.items_done,
+            "started_at": s.started_at.isoformat() if s.started_at else None,
+            "completed_at": s.completed_at.isoformat() if s.completed_at else None,
+            "time_budget_sec": s.time_budget_sec,
+            "stats": s.stats,
+            "error_log": s.error_log,
+        }
+        for s in rows
+    ]
 
 
 @router.get("/projects/{project_id}/graph/stats")

@@ -45,6 +45,7 @@ async def summarise_l1(
     *,
     project_id: uuid.UUID,
     limit: int = 25,
+    progress_cb=None,
 ) -> int:
     symbols = (
         await session.execute(
@@ -123,5 +124,150 @@ async def summarise_l1(
             )
         )
         count += 1
+        if progress_cb is not None:
+            await progress_cb()
+    await session.commit()
+    return count
+
+
+async def summarise_l2(
+    session: AsyncSession,
+    extractor: Extractor,
+    *,
+    project_id: uuid.UUID,
+    limit: int = 25,
+    progress_cb=None,
+) -> int:
+    """File-level summary built purely from this file's L1 summaries.
+
+    Groups L1 summaries by ``data.location.file`` of their target symbol so
+    we never ask the LLM to read a file directly — only to condense
+    already-condensed function-level summaries.
+    """
+    from app.models.findings import Summary  # local import avoids cycle
+
+    l1_rows = (
+        await session.execute(
+            select(Summary, Node)
+            .join(Node, Node.id == Summary.target_id)
+            .where(
+                Summary.project_id == project_id,
+                Summary.level == 1,
+                Summary.superseded_by.is_(None),
+                Node.project_id == project_id,
+                Node.valid_to.is_(None),
+            )
+        )
+    ).all()
+
+    by_file: dict[str, list[tuple[Summary, Node]]] = {}
+    for summary, node in l1_rows:
+        data = node.data or {}
+        loc = (data.get("location") or {}).get("file")
+        if not loc:
+            continue
+        by_file.setdefault(loc, []).append((summary, node))
+
+    count = 0
+    for file_path, group in list(by_file.items())[:limit]:
+        evidence = [
+            {
+                "kind": "node",
+                "node_id": n.id,
+                "data": {"name": (n.data or {}).get("name")},
+                "l1_summary": s.summary,
+                "certainty": n.certainty,
+            }
+            for s, n in group[:40]
+        ]
+        result = await extractor.summarize(2, file_path, evidence)
+        accepted, _ = await validate_claims(
+            session, project_id=project_id, claims=result.claims
+        )
+        await _supersede_current(session, project_id, file_path, 2)
+        session.add(
+            Summary(
+                project_id=project_id,
+                target_id=file_path,
+                level=2,
+                summary=result.summary,
+                detailed=result.detailed,
+                claims=accepted,
+                open_questions=result.open_questions,
+                model_used=result.model_used,
+                tokens_used=result.tokens_used,
+                generated_at=datetime.now(tz=timezone.utc),
+            )
+        )
+        count += 1
+        if progress_cb is not None:
+            await progress_cb()
+    await session.commit()
+    return count
+
+
+async def summarise_l3(
+    session: AsyncSession,
+    extractor: Extractor,
+    *,
+    project_id: uuid.UUID,
+    limit: int = 25,
+    progress_cb=None,
+) -> int:
+    """Module-level summary from L2 file summaries.
+
+    Module boundary ≔ first path segment of the file (directory or package).
+    Phase-2 replaces this with user-confirmed module definitions (spec §10.2).
+    """
+    from app.models.findings import Summary
+
+    l2_rows = (
+        await session.execute(
+            select(Summary).where(
+                Summary.project_id == project_id,
+                Summary.level == 2,
+                Summary.superseded_by.is_(None),
+            )
+        )
+    ).scalars().all()
+
+    by_module: dict[str, list[Summary]] = {}
+    for s in l2_rows:
+        parts = s.target_id.strip("/").split("/", 1)
+        module = parts[0] if parts else "root"
+        by_module.setdefault(module, []).append(s)
+
+    count = 0
+    for module, group in list(by_module.items())[:limit]:
+        evidence = [
+            {
+                "kind": "node",
+                "node_id": s.target_id,
+                "l2_summary": s.summary,
+            }
+            for s in group[:40]
+        ]
+        result = await extractor.summarize(3, module, evidence)
+        accepted, _ = await validate_claims(
+            session, project_id=project_id, claims=result.claims
+        )
+        await _supersede_current(session, project_id, module, 3)
+        session.add(
+            Summary(
+                project_id=project_id,
+                target_id=module,
+                level=3,
+                summary=result.summary,
+                detailed=result.detailed,
+                claims=accepted,
+                open_questions=result.open_questions,
+                model_used=result.model_used,
+                tokens_used=result.tokens_used,
+                generated_at=datetime.now(tz=timezone.utc),
+            )
+        )
+        count += 1
+        if progress_cb is not None:
+            await progress_cb()
     await session.commit()
     return count
