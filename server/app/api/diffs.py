@@ -13,7 +13,7 @@ from app.auth.deps import CurrentUser
 from app.db import get_session
 from app.gitlab_client.mr import create_mr_from_worktree
 from app.models.plans import DiffSubmission, Plan
-from app.safety.self_review import review_diff, to_jsonable
+from app.safety.review import run_pipeline
 
 router = APIRouter(tags=["diffs"])
 
@@ -66,14 +66,21 @@ async def submit_diff(
     if plan is None:
         raise HTTPException(status_code=404, detail="plan_not_found")
 
-    review = review_diff(body.diff)
+    report = await run_pipeline(
+        db,
+        project_id=plan.project_id,
+        plan_id=plan.id,
+        diff=body.diff,
+    )
+    jsonable = report.as_jsonable()
     submission = DiffSubmission(
         plan_id=body.plan_id,
         task_id=body.task_id,
         diff=body.diff,
         test_results=body.test_results,
         self_review_notes=body.self_review_notes,
-        auto_review_findings=to_jsonable(review),
+        auto_review_findings=jsonable,
+        status="blocked" if report.verdict == "blocked" else "pending_approval",
     )
     db.add(submission)
     await db.commit()
@@ -83,7 +90,11 @@ async def submit_diff(
         action="diff.submit",
         target=str(submission.id),
         project_id=plan.project_id,
-        details={"findings": len(review.findings)},
+        details={
+            "verdict": report.verdict,
+            "findings": len(report.findings),
+            "by_pass": {p.name: len(p.findings) for p in report.passes},
+        },
     )
     return _out(submission)
 
@@ -102,10 +113,16 @@ async def get_submission(
     return _out(submission)
 
 
+class ApproveBody(BaseModel):
+    override: bool = False
+    rationale: str | None = None
+
+
 @router.post("/api/v1/diff_submissions/{submission_id}/approve")
 async def approve_submission(
     submission_id: uuid.UUID,
     user: CurrentUser,
+    body: ApproveBody | None = None,
     db: AsyncSession = Depends(get_session),
 ) -> DiffOut:
     submission = (
@@ -118,6 +135,27 @@ async def approve_submission(
     ).scalar_one_or_none()
     if plan is None or plan.worktree_path is None:
         raise HTTPException(status_code=400, detail="plan_or_worktree_missing")
+
+    findings = submission.auto_review_findings or {}
+    verdict = findings.get("verdict") if isinstance(findings, dict) else None
+    if verdict == "blocked":
+        if not body or not body.override:
+            raise HTTPException(
+                status_code=409,
+                detail="blocked_by_review: pass override=true with rationale to force-approve",
+            )
+        if not body.rationale or len(body.rationale) < 20:
+            raise HTTPException(
+                status_code=400,
+                detail="override_requires_rationale (>=20 chars)",
+            )
+        await audit_record(
+            actor=f"user:{user.id}",
+            action="diff.override",
+            target=str(submission.id),
+            project_id=plan.project_id,
+            details={"rationale": body.rationale},
+        )
 
     mr = await create_mr_from_worktree(
         db,
