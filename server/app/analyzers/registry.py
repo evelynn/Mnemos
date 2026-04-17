@@ -1,0 +1,22 @@
+"""Which analyzers apply to which project languages."""
+
+from app.analyzers.runner import AnalyzerRunner
+
+# The binary may be shadowed by a docker-run wrapper in production; the
+# platform only talks to it via the CLI contract in docs/analyzer-contract.md.
+_BINARIES = {
+    "csharp": "ggoss-csharp",
+    "typescript": "ggoss-ts",
+    "mssql": "ggoss-sql-mssql",
+    "oracle": "ggoss-sql-oracle",
+    "dotnet_binary": "ggoss-binary-dotnet",
+}
+
+
+def binary_for(language: str) -> str | None:
+    return _BINARIES.get(language)
+
+
+def runner_for(language: str) -> AnalyzerRunner | None:
+    binary = binary_for(language)
+    return AnalyzerRunner(binary) if binary else None

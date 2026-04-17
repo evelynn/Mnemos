@@ -1,0 +1,19 @@
+{
+  "name": "ggoss-ts",
+  "version": "1.0.0",
+  "description": "Mnemos TypeScript/JavaScript analyzer",
+  "type": "module",
+  "main": "src/index.mjs",
+  "bin": {
+    "ggoss-ts": "src/index.mjs"
+  },
+  "scripts": {
+    "start": "node src/index.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Sign in — Mnemos{% endblock %}
+{% block body %}
+<main class="login">
+  <h1>Mnemos</h1>
+  <p class="subtitle">Knowledge Production Platform</p>
+  <form method="post" action="/login" class="login-form">
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <label>
+      Username
+      <input type="text" name="username" autocomplete="username" required autofocus />
+    </label>
+    <label>
+      Password
+      <input type="password" name="password" autocomplete="current-password" required />
+    </label>
+    <button type="submit">Sign in</button>
+  </form>
+</main>
+{% endblock %}

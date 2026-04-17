@@ -1,0 +1,191 @@
+{% extends "_layout.html" %}
+{% block title %}Analysis — Mnemos{% endblock %}
+{% block content %}
+<header class="page-head"><h1>Analysis</h1></header>
+
+<section class="hint">
+  <p class="muted">
+    Large systems cannot be fed to an LLM in one shot. Mnemos walks a fixed pipeline
+    (L0 facts → L1 function → L2 file → L3 module summaries) and each stage writes
+    progress into the database. The pipeline below updates in real time via SSE —
+    see <code>docs/analysis-strategy.md</code> for the full design.
+  </p>
+</section>
+
+<section>
+  <h2>Trigger run</h2>
+  <form id="trigger" onsubmit="return triggerRun(event)">
+    <label>Project ID<input type="text" name="project_id" required placeholder="uuid" /></label>
+    <label>Source path<input type="text" name="source_path" required value="/work" /></label>
+    <label>Git SHA<input type="text" name="git_sha" value="HEAD" /></label>
+    <button type="submit" class="primary">Start analysis</button>
+  </form>
+  <pre id="trigger-result" class="muted"></pre>
+</section>
+
+<section>
+  <h2>Recent runs</h2>
+  <form onsubmit="return loadRuns(event)">
+    <label>Project ID<input type="text" id="rpid" required placeholder="uuid" /></label>
+    <button class="primary" type="submit">Load runs</button>
+  </form>
+  <div id="runs"></div>
+</section>
+
+<section>
+  <h2>Pipeline monitor</h2>
+  <label>Run ID<input type="text" id="run-id" placeholder="uuid" /></label>
+  <button onclick="monitor()" class="primary">Monitor</button>
+  <button onclick="stopMonitor()">Stop</button>
+
+  <div id="pipeline"></div>
+
+  <details>
+    <summary>Raw event stream</summary>
+    <pre id="events"></pre>
+  </details>
+</section>
+
+<style>
+.pipeline-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.75rem; margin-top: 0.75rem; }
+.stage-card { border: 1px solid #d0d7de; border-radius: 6px; padding: 0.75rem; background: #fff; }
+.stage-card h4 { margin: 0 0 0.25rem; font-size: 0.95rem; display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+.badge { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid transparent; }
+.badge.pending    { background: #eef1f4; color: #555; }
+.badge.running    { background: #dbe9ff; color: #0a3b8c; border-color: #9fc0ff; }
+.badge.completed  { background: #dff4e0; color: #145a1f; border-color: #78c68a; }
+.badge.partial    { background: #fff1c2; color: #6a4b00; border-color: #d8ba57; }
+.badge.failed     { background: #ffdede; color: #7a1818; border-color: #d08989; }
+.progress { margin-top: 0.4rem; height: 8px; background: #eef1f4; border-radius: 999px; overflow: hidden; }
+.progress .bar { height: 100%; background: #1f6feb; transition: width 0.25s; }
+.stage-card .muted { font-size: 0.78rem; }
+.stage-card pre { font-size: 0.75rem; margin: 0.3rem 0 0; white-space: pre-wrap; }
+</style>
+
+<script>
+async function triggerRun(ev) {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const pid = fd.get("project_id");
+  const resp = await fetch(`/api/v1/projects/${pid}/analyze`, {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({
+      git_sha: fd.get("git_sha"),
+      scope: "full",
+      source_path: fd.get("source_path"),
+    }),
+  });
+  document.getElementById("trigger-result").textContent = await resp.text();
+  return false;
+}
+
+async function loadRuns(ev) {
+  ev.preventDefault();
+  const pid = document.getElementById("rpid").value.trim();
+  const r = await fetch(`/api/v1/projects/${pid}/analysis_runs`);
+  const rows = await r.json();
+  const out = document.getElementById("runs");
+  if (!Array.isArray(rows) || rows.length === 0) {
+    out.innerHTML = '<p class="muted">No runs yet.</p>';
+    return false;
+  }
+  let html = '<table class="data"><thead><tr><th>ID</th><th>Status</th><th>Triggered by</th><th>Git SHA</th><th>Started</th><th>Stats</th><th></th></tr></thead><tbody>';
+  for (const r of rows) {
+    const stats = r.stats ? JSON.stringify(r.stats) : "";
+    html += `<tr>
+      <td><code>${r.id}</code></td>
+      <td><span class="badge ${r.status}">${r.status}</span></td>
+      <td>${r.triggered_by}</td>
+      <td>${r.git_sha}</td>
+      <td>${r.started_at || ""}</td>
+      <td><pre>${stats}</pre></td>
+      <td><button onclick="monitorId('${r.id}')">Monitor</button></td>
+    </tr>`;
+  }
+  html += "</tbody></table>";
+  out.innerHTML = html;
+  return false;
+}
+
+let _sse;
+let _poll;
+let _stages = new Map();
+
+function monitorId(id) {
+  document.getElementById("run-id").value = id;
+  monitor();
+}
+
+function stopMonitor() {
+  if (_sse) _sse.close();
+  if (_poll) clearInterval(_poll);
+  _sse = null; _poll = null;
+}
+
+async function monitor() {
+  stopMonitor();
+  const id = document.getElementById("run-id").value.trim();
+  if (!id) return;
+  _stages = new Map();
+  document.getElementById("events").textContent = "";
+  document.getElementById("pipeline").innerHTML = '<p class="muted">Waiting for stage events…</p>';
+
+  await refreshStages(id);
+
+  _sse = new EventSource(`/api/v1/analysis_runs/${id}/events`);
+  _sse.addEventListener("progress", async (e) => {
+    const el = document.getElementById("events");
+    el.textContent += e.data + "\n";
+    el.scrollTop = el.scrollHeight;
+    try {
+      const ev = JSON.parse(e.data);
+      if (ev.event && ev.event.startsWith("stage_")) {
+        await refreshStages(id);
+      }
+    } catch {}
+  });
+  _poll = setInterval(() => refreshStages(id), 3000);
+}
+
+async function refreshStages(id) {
+  try {
+    const r = await fetch(`/api/v1/analysis_runs/${id}/stages`);
+    if (!r.ok) return;
+    const stages = await r.json();
+    renderPipeline(stages);
+  } catch {}
+}
+
+function renderPipeline(stages) {
+  const pipeline = document.getElementById("pipeline");
+  if (!stages.length) {
+    pipeline.innerHTML = '<p class="muted">No stages recorded yet.</p>';
+    return;
+  }
+  const html = ['<div class="pipeline-grid">'];
+  for (const s of stages) {
+    const pct = s.items_total > 0
+      ? Math.min(100, Math.round((s.items_done / s.items_total) * 100))
+      : (s.status === "completed" ? 100 : 0);
+    const progress = s.items_total > 0
+      ? `${s.items_done} / ${s.items_total}`
+      : (s.status === "completed" ? "done" : "–");
+    const stats = s.stats ? `<pre>${JSON.stringify(s.stats)}</pre>` : "";
+    const err = s.error_log ? `<pre class="error">${s.error_log}</pre>` : "";
+    html.push(`<div class="stage-card">
+      <h4>
+        <span>${s.position}. ${s.name}${s.language ? ` <span class="muted">(${s.language})</span>` : ""}</span>
+        <span class="badge ${s.status}">${s.status}</span>
+      </h4>
+      <div class="progress"><div class="bar" style="width:${pct}%"></div></div>
+      <div class="muted">${progress}${s.time_budget_sec ? ` · budget ${s.time_budget_sec}s` : ""}</div>
+      ${stats}
+      ${err}
+    </div>`);
+  }
+  html.push('</div>');
+  pipeline.innerHTML = html.join("");
+}
+</script>
+{% endblock %}

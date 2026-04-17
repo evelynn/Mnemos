@@ -1,0 +1,93 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: mnemos-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mnemos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mnemos}
+      POSTGRES_DB: ${POSTGRES_DB:-mnemos}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mnemos} -d ${POSTGRES_DB:-mnemos}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: mnemos-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  platform:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: mnemos-platform
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mnemos}:${POSTGRES_PASSWORD:-mnemos}@postgres:5432/${POSTGRES_DB:-mnemos}
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      FERNET_KEY: ${FERNET_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${PLATFORM_PORT:-8080}:8080"
+    volumes:
+      - platform_data:/var/lib/mnemos
+      - repos_data:/var/lib/mnemos/repos
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v1/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  worker:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: mnemos-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mnemos}:${POSTGRES_PASSWORD:-mnemos}@postgres:5432/${POSTGRES_DB:-mnemos}
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      FERNET_KEY: ${FERNET_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    command: ["python", "-m", "app.worker"]
+    volumes:
+      - platform_data:/var/lib/mnemos
+      - repos_data:/var/lib/mnemos/repos
+
+  analyzer-csharp:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-csharp
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-csharp:latest
+    entrypoint: ["true"]  # built on-demand; the platform invokes via docker run
+
+volumes:
+  postgres_data:
+  redis_data:
+  platform_data:
+  repos_data:
