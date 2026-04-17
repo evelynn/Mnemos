@@ -2,5 +2,51 @@
 {% block title %}Findings — Mnemos{% endblock %}
 {% block content %}
 <header class="page-head"><h1>Findings</h1></header>
-<p class="muted">Findings surface arrives in Week 6.</p>
+
+<form onsubmit="return loadFindings(event)">
+  <label>Project ID<input type="text" id="pid" required placeholder="uuid" /></label>
+  <label>Severity
+    <select id="sev"><option value="">(all)</option><option>info</option><option>warning</option><option>error</option></select>
+  </label>
+  <label>Status
+    <select id="st"><option value="">(all)</option><option>open</option><option>acknowledged</option><option>resolved</option><option>false_positive</option></select>
+  </label>
+  <button class="primary" type="submit">Load</button>
+  <button type="button" onclick="rebuild()">Rebuild</button>
+</form>
+<div id="out"></div>
+
+<script>
+async function loadFindings(ev) {
+  ev.preventDefault();
+  const pid = document.getElementById("pid").value.trim();
+  const sev = document.getElementById("sev").value;
+  const st = document.getElementById("st").value;
+  if (!pid) return false;
+  const qs = new URLSearchParams();
+  if (sev) qs.set("severity", sev);
+  if (st) qs.set("status", st);
+  const r = await fetch(`/api/v1/projects/${pid}/findings?${qs}`);
+  const rows = await r.json();
+  const out = document.getElementById("out");
+  if (!Array.isArray(rows) || rows.length === 0) {
+    out.innerHTML = '<p class="muted">No findings.</p>';
+    return false;
+  }
+  let html = '<table class="data"><thead><tr><th>Kind</th><th>Severity</th><th>Status</th><th>Subject</th><th>Detail</th></tr></thead><tbody>';
+  for (const f of rows) {
+    html += `<tr><td>${f.kind}</td><td>${f.severity}</td><td>${f.status}</td><td><code>${f.subject_node_id ?? f.subject_edge_id ?? ""}</code></td><td><pre>${JSON.stringify(f.detail)}</pre></td></tr>`;
+  }
+  html += "</tbody></table>";
+  out.innerHTML = html;
+  return false;
+}
+
+async function rebuild() {
+  const pid = document.getElementById("pid").value.trim();
+  if (!pid) return;
+  const r = await fetch(`/api/v1/projects/${pid}/findings/rebuild`, {method: "POST"});
+  alert(await r.text());
+}
+</script>
 {% endblock %}

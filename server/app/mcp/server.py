@@ -27,9 +27,12 @@ from app.mcp.data_queries import (
 from app.mcp.queries import (
     find_callees,
     find_callers,
+    find_runtime_path,
     get_contract,
+    get_module_summary,
     get_symbol,
     impact_analysis,
+    list_findings,
     search_symbols,
 )
 
@@ -173,6 +176,45 @@ _TOOLS = [
             "required": ["value_pattern"],
         },
     ),
+    Tool(
+        name="list_findings",
+        description="List current Findings; filter by severity/status.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "severity": {"type": "string", "nullable": True},
+                "status": {"type": "string", "nullable": True},
+                "limit": {"type": "integer", "default": 50},
+            },
+        },
+    ),
+    Tool(
+        name="get_module_summary",
+        description="Return the current L1/L2/L3 summary for a target node.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "string"},
+                "level": {"type": "integer"},
+            },
+            "required": ["target_id", "level"],
+        },
+    ),
+    Tool(
+        name="find_runtime_path",
+        description=(
+            "BFS over exercised CALLS edges starting at a contract. Shows "
+            "chains that were observed in telemetry."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "entry_contract_id": {"type": "string"},
+                "max_depth": {"type": "integer", "default": 6},
+            },
+            "required": ["entry_contract_id"],
+        },
+    ),
 ]
 
 
@@ -264,6 +306,30 @@ def build_server(project_id: uuid.UUID) -> Server:
                     project_id=project_id,
                     value_pattern=arguments["value_pattern"],
                     max_hits=int(arguments.get("max_hits", 50)),
+                )
+            elif name == "list_findings":
+                result = await list_findings(
+                    db,
+                    project_id=project_id,
+                    severity=arguments.get("severity"),
+                    status=arguments.get("status"),
+                    limit=int(arguments.get("limit", 50)),
+                )
+            elif name == "get_module_summary":
+                result = await get_module_summary(
+                    db,
+                    project_id=project_id,
+                    target_id=arguments["target_id"],
+                    level=int(arguments["level"]),
+                )
+                if result is None:
+                    result = {"error": "not_found"}
+            elif name == "find_runtime_path":
+                result = await find_runtime_path(
+                    db,
+                    project_id=project_id,
+                    entry_contract_id=arguments["entry_contract_id"],
+                    max_depth=int(arguments.get("max_depth", 6)),
                 )
             else:
                 result = {"error": f"unknown tool: {name}"}

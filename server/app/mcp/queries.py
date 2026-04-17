@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.findings import Finding, Summary
 from app.models.graph import Edge, Node
 
 
@@ -208,6 +209,109 @@ async def impact_analysis(
         "opaque_components_touched": [],
         "runtime_exercised": False,
     }
+
+
+async def list_findings(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    severity: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    stmt = (
+        select(Finding)
+        .where(Finding.project_id == project_id)
+        .order_by(Finding.last_seen_at.desc())
+        .limit(max(1, min(limit, 500)))
+    )
+    if severity:
+        stmt = stmt.where(Finding.severity == severity)
+    if status:
+        stmt = stmt.where(Finding.status == status)
+    rows = (await session.execute(stmt)).scalars().all()
+    return [
+        {
+            "id": str(f.id),
+            "kind": f.kind,
+            "severity": f.severity,
+            "status": f.status,
+            "subject_node_id": f.subject_node_id,
+            "subject_edge_id": str(f.subject_edge_id) if f.subject_edge_id else None,
+            "detail": f.detail,
+            "first_seen_at": f.first_seen_at.isoformat(),
+            "last_seen_at": f.last_seen_at.isoformat(),
+        }
+        for f in rows
+    ]
+
+
+async def get_module_summary(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    target_id: str,
+    level: int,
+) -> dict[str, Any] | None:
+    row = (
+        await session.execute(
+            select(Summary)
+            .where(
+                Summary.project_id == project_id,
+                Summary.target_id == target_id,
+                Summary.level == level,
+                Summary.superseded_by.is_(None),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    return {
+        "target_id": row.target_id,
+        "level": row.level,
+        "summary": row.summary,
+        "detailed": row.detailed,
+        "claims": row.claims,
+        "open_questions": row.open_questions,
+        "generated_at": row.generated_at.isoformat(),
+        "model_used": row.model_used,
+    }
+
+
+async def find_runtime_path(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    entry_contract_id: str,
+    max_depth: int = 6,
+) -> dict[str, Any]:
+    """Return reachable symbols from a contract, restricted to exercised edges."""
+    max_depth = max(1, min(max_depth, 10))
+    frontier = [entry_contract_id]
+    seen: set[str] = {entry_contract_id}
+    chain: list[str] = []
+    for _ in range(max_depth):
+        rows = (
+            await session.execute(
+                select(Edge).where(
+                    Edge.project_id == project_id,
+                    Edge.source_id.in_(frontier),
+                    Edge.valid_to.is_(None),
+                    Edge.data["exercised"].astext == "true",
+                )
+            )
+        ).scalars().all()
+        frontier = []
+        for e in rows:
+            if e.target_id in seen:
+                continue
+            seen.add(e.target_id)
+            frontier.append(e.target_id)
+            chain.append(e.target_id)
+        if not frontier:
+            break
+    return {"common_paths": [{"frequency": 1, "chain": chain}]}
 
 
 async def get_contract(

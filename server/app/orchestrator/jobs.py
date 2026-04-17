@@ -19,7 +19,10 @@ from app.analyzers.registry import runner_for
 from app.audit.logger import record as audit_record
 from app.config import get_settings
 from app.db import SessionLocal
+from app.extractor.agent import Extractor
+from app.extractor.runner import summarise_l1
 from app.merge.contract_id import http_contract_id
+from app.merge.findings import run_all as rebuild_findings
 from app.merge.writer import upsert_edge, upsert_node
 from app.models.graph import AnalysisRun
 from app.models.projects import Project
@@ -172,6 +175,20 @@ async def run_ingest(ctx: dict, project_id_str: str, run_id_str: str, path: str)
                 run_id,
                 {"phase": "language_done", "language": language, **totals},
             )
+
+        # Week-6 post-ingest stages: findings, L1 summaries.
+        async with SessionLocal() as session:
+            finding_stats = await rebuild_findings(session, project_id)
+        totals["findings"] = sum(finding_stats.values())
+        await bus.publish(run_id, {"phase": "findings", **finding_stats})
+
+        extractor = Extractor()
+        async with SessionLocal() as session:
+            summarised = await summarise_l1(
+                session, extractor, project_id=project_id, limit=25
+            )
+        totals["l1_summaries"] = summarised
+        await bus.publish(run_id, {"phase": "l1_summaries", "count": summarised})
 
         completed = datetime.now(tz=timezone.utc)
         async with SessionLocal() as session:
