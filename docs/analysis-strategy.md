@@ -133,3 +133,64 @@ Phase-1 escape hatch is scope narrowing:
 Phase 2 extends this with true incremental graph updates keyed on git
 deltas, and with L4/L5 summary fan-out across domains detected via Louvain
 community detection (spec §10.2, §15.4).
+
+## 7. Scaling to large files and many files
+
+The hierarchy in §2 handles a system of ordinary files. Two separate
+pathologies still need explicit handling: **a single file or function that
+is itself enormous**, and **a codebase whose sheer symbol count (>100k)
+exceeds any per-run budget**. Both are solved by shrinking inputs further
+and persisting progress across runs so later runs only do what's left.
+
+### 7.1 Large file / large function
+
+| Risk                                    | Strategy                                                                                                 |
+|-----------------------------------------|----------------------------------------------------------------------------------------------------------|
+| 5k-line method body won't fit a prompt  | L0 analysers never send bodies — they emit `signature`, `location`, and the CALLS neighbourhood only.    |
+| 500-method single file overflows L2     | Token-budget packer groups L1 summaries into N chunks, produces N "partial L2"s, then folds them.        |
+| Huge generated file (e.g. `obj/`)       | Directory ignore-list at `probe` time; generated files remain L0 facts but are skipped for summaries.    |
+| Binary/non-UTF8 file                    | `read_file` returns `encoding=binary_hex` with byte cap; summariser refuses.                             |
+| Claude Code needs to read a huge file    | `read_file` accepts `start_line`/`end_line` so the client streams the file in windows.                   |
+
+Concretely:
+
+- **Signatures only, never bodies.** L1 evidence for a function is
+  `{signature, callers, callees, data_access}`, not `body`. If the body is
+  needed, Claude Code fetches it via `read_file` with a line range.
+- **L2 chunking.** When a file has more L1 summaries than the L2 token
+  budget allows, the packer splits them into disjoint chunks of ~3K
+  tokens each. Each chunk produces a partial L2; a final rollup pass
+  condenses the partials into one L2 for the file.
+- **L3 directory-folding.** Same idea one level up: large directories
+  are split into subtrees, each summarised, then folded.
+
+### 7.2 Many files (100k+ symbols)
+
+| Risk                                       | Strategy                                                                                                                        |
+|--------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
+| Per-run L1 limit leaves most symbols cold  | **Continuation runs**: `scope=continuation` skips L0, chews only pending summariser targets.                                    |
+| Re-running analysis re-summarises unchanged code | **Content-hash skip**: each Summary stores the hash of its evidence; the next run skips targets whose hash matches the latest. |
+| Which 25 to summarise first matters        | **Priority ordering**: entry points (HTTP contracts, Main methods, controller actions) first, then high in/out degree.          |
+| Budgets hide the work remaining            | **Pending-count stats** on the pipeline card show (done / total / pending) so operators know how many continuation runs to queue. |
+| Single-threaded L1 is slow on big systems  | `summarise_*` accepts a `limit` argument; the scheduler can enqueue multiple `run_ingest(scope=continuation)` jobs concurrently, each with a different limit window. |
+
+The combined effect: an operator on a 200k-symbol system runs one full
+analysis (L0 facts land, budgets cap L1/L2/L3 at 25 each), then queues N
+continuation runs until `pending=0`. Each continuation run takes hours,
+not days, because it skips analyser work and touches only unchanged
+targets through hash-equality checks.
+
+### 7.3 Hard ceiling: opt-in scope
+
+If even continuation runs aren't fast enough, the operator narrows the
+scope:
+
+- Trigger with `source_path=<subtree>` — only that subtree's L0 facts go
+  into the graph this run, and only its symbols are eligible for L1/L2/L3.
+- Flip a module to `analysis_scope=skip` in the Projects settings to
+  permanently exclude it (vendored libraries, generated code, tests).
+- Per-language runs: `languages=["csharp"]` on trigger.
+
+All three knobs are recorded in `audit_log` so partial analyses never
+silently bias the graph — the operator can always see exactly what was
+analysed.

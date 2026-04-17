@@ -13,13 +13,34 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extractor.agent import Extractor
+from app.extractor.packing import evidence_hash, pack_by_budget
 from app.extractor.validator import validate_claims
 from app.models.findings import Summary
 from app.models.graph import Edge, Node
+
+_HASH_KEY = "_evidence_hash"
+
+
+async def _current_summary(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    target_id: str,
+    level: int,
+) -> Summary | None:
+    return (
+        await session.execute(
+            select(Summary).where(
+                Summary.project_id == project_id,
+                Summary.target_id == target_id,
+                Summary.level == level,
+                Summary.superseded_by.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
 
 
 async def _supersede_current(
@@ -39,6 +60,112 @@ async def _supersede_current(
     )
 
 
+def _unchanged(prev: Summary | None, evidence: list[dict[str, Any]]) -> bool:
+    """True if the previous summary's evidence hash matches the new evidence."""
+    if prev is None or not prev.claims:
+        return False
+    existing = prev.open_questions or []  # reuse unused column? no — use marker claim
+    prev_hash = None
+    for c in prev.claims:
+        if isinstance(c, dict) and c.get("claim") == _HASH_KEY:
+            prev_hash = c.get("evidence", [{}])[0].get("node_id")
+            break
+    if prev_hash is None:
+        return False
+    return prev_hash == evidence_hash(evidence)
+
+
+def _stamp_hash(
+    claims: list[dict[str, Any]], evidence: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Embed the evidence hash as a synthetic claim so later runs can skip."""
+    stamp = {
+        "claim": _HASH_KEY,
+        "evidence": [
+            {"kind": "node", "node_id": evidence_hash(evidence), "certainty": "asserted"}
+        ],
+    }
+    return [*claims, stamp]
+
+
+async def _priority_symbols(
+    session: AsyncSession, project_id: uuid.UUID, limit: int
+) -> list[Node]:
+    """Rank candidates for L1: entry points first, then by caller degree.
+
+    A large codebase has 100k+ symbols; the operator-visible first pass must
+    cover the useful surface (HTTP contracts, controllers, background jobs)
+    before grinding through private helpers.
+    """
+    # Prefer symbols with data.is_entry_point=true or targeted by EXPOSES.
+    entry_rows = (
+        await session.execute(
+            select(Node)
+            .where(
+                Node.project_id == project_id,
+                Node.kind == "Symbol",
+                Node.valid_to.is_(None),
+                Node.data["is_entry_point"].astext == "true",
+            )
+            .limit(limit)
+        )
+    ).scalars().all()
+
+    if len(entry_rows) >= limit:
+        return entry_rows[:limit]
+
+    # Top up by in-degree (count of CALLS edges whose target is this symbol).
+    deg_stmt = (
+        select(Edge.target_id, func.count().label("deg"))
+        .where(
+            Edge.project_id == project_id,
+            Edge.kind == "CALLS",
+            Edge.valid_to.is_(None),
+        )
+        .group_by(Edge.target_id)
+        .order_by(func.count().desc())
+        .limit(limit * 3)
+    )
+    top_ids = [r[0] for r in (await session.execute(deg_stmt)).all()]
+    seen = {n.id for n in entry_rows}
+    wanted = [i for i in top_ids if i not in seen][: limit - len(entry_rows)]
+
+    high_deg_rows = (
+        await session.execute(
+            select(Node).where(
+                Node.project_id == project_id,
+                Node.kind == "Symbol",
+                Node.valid_to.is_(None),
+                Node.id.in_(wanted),
+            )
+        )
+    ).scalars().all() if wanted else []
+
+    combined = [*entry_rows, *high_deg_rows]
+    if len(combined) >= limit:
+        return combined[:limit]
+
+    # Final top-up: plain lexical scan. Still cheap because of the current-row index.
+    filler_stmt = (
+        select(Node)
+        .where(
+            Node.project_id == project_id,
+            Node.kind == "Symbol",
+            Node.valid_to.is_(None),
+        )
+        .limit(limit)
+    )
+    filler = (await session.execute(filler_stmt)).scalars().all()
+    seen = {n.id for n in combined}
+    for n in filler:
+        if n.id in seen:
+            continue
+        combined.append(n)
+        if len(combined) >= limit:
+            break
+    return combined[:limit]
+
+
 async def summarise_l1(
     session: AsyncSession,
     extractor: Extractor,
@@ -47,17 +174,7 @@ async def summarise_l1(
     limit: int = 25,
     progress_cb=None,
 ) -> int:
-    symbols = (
-        await session.execute(
-            select(Node)
-            .where(
-                Node.project_id == project_id,
-                Node.kind == "Symbol",
-                Node.valid_to.is_(None),
-            )
-            .limit(limit)
-        )
-    ).scalars().all()
+    symbols = await _priority_symbols(session, project_id, limit)
 
     count = 0
     for sym in symbols:
@@ -103,6 +220,12 @@ async def summarise_l1(
                 }
             )
 
+        prev = await _current_summary(session, project_id, sym.id, 1)
+        if _unchanged(prev, evidence):
+            if progress_cb is not None:
+                await progress_cb()
+            continue
+
         result = await extractor.summarize(1, sym.id, evidence)
         accepted, _rejected = await validate_claims(
             session, project_id=project_id, claims=result.claims
@@ -116,7 +239,7 @@ async def summarise_l1(
                 level=1,
                 summary=result.summary,
                 detailed=result.detailed,
-                claims=accepted,
+                claims=_stamp_hash(accepted, evidence),
                 open_questions=result.open_questions,
                 model_used=result.model_used,
                 tokens_used=result.tokens_used,
@@ -170,7 +293,7 @@ async def summarise_l2(
 
     count = 0
     for file_path, group in list(by_file.items())[:limit]:
-        evidence = [
+        raw = [
             {
                 "kind": "node",
                 "node_id": n.id,
@@ -178,9 +301,32 @@ async def summarise_l2(
                 "l1_summary": s.summary,
                 "certainty": n.certainty,
             }
-            for s, n in group[:40]
+            for s, n in group
         ]
-        result = await extractor.summarize(2, file_path, evidence)
+        # Token-budget chunking: a 500-method file produces several partial L2s
+        # that we then fold into one rollup; no chunk exceeds ~3K tokens.
+        chunks = pack_by_budget(raw, max_tokens=3000)
+
+        # Hash check before spending any tokens.
+        flat_hash_input = raw
+        prev = await _current_summary(session, project_id, file_path, 2)
+        if _unchanged(prev, flat_hash_input):
+            if progress_cb is not None:
+                await progress_cb()
+            continue
+
+        partials: list[str] = []
+        for i, chunk in enumerate(chunks):
+            target_label = file_path if len(chunks) == 1 else f"{file_path}#chunk{i + 1}"
+            partial = await extractor.summarize(2, target_label, chunk)
+            partials.append(partial.summary)
+
+        if len(partials) == 1:
+            result = await extractor.summarize(2, file_path, raw)
+        else:
+            rollup_input = [{"kind": "node", "node_id": file_path, "partial_summary": p} for p in partials]
+            result = await extractor.summarize(2, file_path, rollup_input)
+
         accepted, _ = await validate_claims(
             session, project_id=project_id, claims=result.claims
         )
@@ -192,7 +338,7 @@ async def summarise_l2(
                 level=2,
                 summary=result.summary,
                 detailed=result.detailed,
-                claims=accepted,
+                claims=_stamp_hash(accepted, flat_hash_input),
                 open_questions=result.open_questions,
                 model_used=result.model_used,
                 tokens_used=result.tokens_used,
@@ -239,15 +385,31 @@ async def summarise_l3(
 
     count = 0
     for module, group in list(by_module.items())[:limit]:
-        evidence = [
+        raw = [
             {
                 "kind": "node",
                 "node_id": s.target_id,
                 "l2_summary": s.summary,
             }
-            for s in group[:40]
+            for s in group
         ]
-        result = await extractor.summarize(3, module, evidence)
+        prev = await _current_summary(session, project_id, module, 3)
+        if _unchanged(prev, raw):
+            if progress_cb is not None:
+                await progress_cb()
+            continue
+
+        chunks = pack_by_budget(raw, max_tokens=4000)
+        if len(chunks) == 1:
+            result = await extractor.summarize(3, module, raw)
+        else:
+            partials: list[str] = []
+            for i, chunk in enumerate(chunks):
+                r = await extractor.summarize(3, f"{module}#chunk{i + 1}", chunk)
+                partials.append(r.summary)
+            rollup = [{"kind": "node", "node_id": module, "partial_summary": p} for p in partials]
+            result = await extractor.summarize(3, module, rollup)
+
         accepted, _ = await validate_claims(
             session, project_id=project_id, claims=result.claims
         )
@@ -259,7 +421,7 @@ async def summarise_l3(
                 level=3,
                 summary=result.summary,
                 detailed=result.detailed,
-                claims=accepted,
+                claims=_stamp_hash(accepted, raw),
                 open_questions=result.open_questions,
                 model_used=result.model_used,
                 tokens_used=result.tokens_used,

@@ -206,11 +206,22 @@ async def _run_analyzer_stage(
         stage.set_stats({k: totals.get(k, 0) for k in ("symbols", "edges", "contracts", "data_entities")})
 
 
-async def run_ingest(ctx: dict, project_id_str: str, run_id_str: str, path: str) -> None:
+async def run_ingest(
+    ctx: dict,
+    project_id_str: str,
+    run_id_str: str,
+    path: str,
+    options: dict[str, Any] | None = None,
+) -> None:
     project_id = uuid.UUID(project_id_str)
     run_id = uuid.UUID(run_id_str)
     bus: ProgressBus = ctx["progress"]
     now = datetime.now(tz=timezone.utc)
+    opts = options or {}
+    scope = opts.get("scope", "full")
+    l1_limit = int(opts.get("l1_limit", 25))
+    l2_limit = int(opts.get("l2_limit", 25))
+    l3_limit = int(opts.get("l3_limit", 25))
 
     async with SessionLocal() as session:
         project = (
@@ -231,39 +242,40 @@ async def run_ingest(ctx: dict, project_id_str: str, run_id_str: str, path: str)
     position = 0
 
     try:
-        # Stages L0: per-language, per-verb extraction.
-        for language in project.languages:
-            for verb in ("symbols", "contracts", "calls", "data_access"):
-                position += 1
-                await _run_analyzer_stage(
-                    bus, project_id, run_id, language, verb, path, position, totals
-                )
+        if scope != "continuation":
+            # Stages L0: per-language, per-verb extraction.
+            for language in project.languages:
+                for verb in ("symbols", "contracts", "calls", "data_access"):
+                    position += 1
+                    await _run_analyzer_stage(
+                        bus, project_id, run_id, language, verb, path, position, totals
+                    )
 
-        # Stage: Findings reconciliation.
-        position += 1
-        async with StageTracker(
-            bus,
-            run_id,
-            project_id,
-            "findings",
-            position=position,
-            time_budget_sec=600,
-        ) as stage:
-            async with SessionLocal() as session:
-                finding_stats = await rebuild_findings(session, project_id)
-            totals["findings"] = sum(finding_stats.values())
-            for _ in range(totals["findings"]):
-                await stage.increment()
-            stage.set_stats(finding_stats)
+            # Stage: Findings reconciliation.
+            position += 1
+            async with StageTracker(
+                bus,
+                run_id,
+                project_id,
+                "findings",
+                position=position,
+                time_budget_sec=600,
+            ) as stage:
+                async with SessionLocal() as session:
+                    finding_stats = await rebuild_findings(session, project_id)
+                totals["findings"] = sum(finding_stats.values())
+                for _ in range(totals["findings"]):
+                    await stage.increment()
+                stage.set_stats(finding_stats)
 
         # Stages L1-L3: hierarchical summarisation. Each summariser enforces
         # its own LLM budget; StageTracker adds a wall-clock ceiling.
         extractor = Extractor()
 
-        for level, label, fn in (
-            (1, "l1_summaries", summarise_l1),
-            (2, "l2_summaries", summarise_l2),
-            (3, "l3_summaries", summarise_l3),
+        for level, label, fn, lim in (
+            (1, "l1_summaries", summarise_l1, l1_limit),
+            (2, "l2_summaries", summarise_l2, l2_limit),
+            (3, "l3_summaries", summarise_l3, l3_limit),
         ):
             position += 1
             async with StageTracker(
@@ -279,11 +291,11 @@ async def run_ingest(ctx: dict, project_id_str: str, run_id_str: str, path: str)
                         session,
                         extractor,
                         project_id=project_id,
-                        limit=25,
+                        limit=lim,
                         progress_cb=stage.increment,
                     )
                 totals[label] = produced
-                stage.set_stats({label: produced})
+                stage.set_stats({label: produced, "limit": lim})
 
         completed = datetime.now(tz=timezone.utc)
         async with SessionLocal() as session:

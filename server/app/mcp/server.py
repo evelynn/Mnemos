@@ -123,13 +123,16 @@ _TOOLS = [
         name="read_file",
         description=(
             "Read a file from the platform's repo mirror at /var/lib/mnemos/repos. "
-            "Paths are resolved below the project's checkout root."
+            "Supply start_line + end_line to stream a window of a huge file; "
+            "omitted range returns the first 2000 lines plus truncated=true."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "project_id": {"type": "string"},
                 "file_path": {"type": "string"},
+                "start_line": {"type": "integer", "nullable": True},
+                "end_line": {"type": "integer", "nullable": True},
             },
             "required": ["file_path"],
         },
@@ -349,6 +352,8 @@ def build_server(project_id: uuid.UUID) -> Server:
                 result = await read_project_file(
                     project_id=project_id,
                     file_path=arguments["file_path"],
+                    start_line=arguments.get("start_line"),
+                    end_line=arguments.get("end_line"),
                 )
             elif name == "get_data_entity":
                 result = await get_data_entity(

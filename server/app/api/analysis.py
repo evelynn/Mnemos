@@ -23,8 +23,11 @@ router = APIRouter(prefix="/api/v1", tags=["analysis"])
 
 class AnalysisTriggerRequest(BaseModel):
     git_sha: str = Field(default="HEAD")
-    scope: str = Field(default="full", pattern="^(full|incremental)$")
+    scope: str = Field(default="full", pattern="^(full|incremental|continuation)$")
     source_path: str = Field(description="Absolute path visible to the worker")
+    l1_limit: int = Field(default=25, ge=1, le=1000)
+    l2_limit: int = Field(default=25, ge=1, le=1000)
+    l3_limit: int = Field(default=25, ge=1, le=1000)
 
 
 class AnalysisRunOut(BaseModel):
@@ -88,6 +91,12 @@ async def trigger_analysis(
         str(project_id),
         str(run.id),
         body.source_path,
+        {
+            "scope": body.scope,
+            "l1_limit": body.l1_limit,
+            "l2_limit": body.l2_limit,
+            "l3_limit": body.l3_limit,
+        },
     )
     await audit_record(
         actor=f"user:{user.id}",
