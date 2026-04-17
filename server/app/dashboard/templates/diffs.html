@@ -2,5 +2,50 @@
 {% block title %}Diffs — Mnemos{% endblock %}
 {% block content %}
 <header class="page-head"><h1>Diffs (Gate B)</h1></header>
-<p class="muted">Diff approval surface arrives in Week 8.</p>
+
+<form onsubmit="return load(event)">
+  <label>Plan ID<input type="text" id="pid" required placeholder="uuid" /></label>
+  <button class="primary" type="submit">Load submissions</button>
+</form>
+<div id="out"></div>
+
+<script>
+async function load(ev) {
+  ev.preventDefault();
+  const pid = document.getElementById("pid").value.trim();
+  if (!pid) return false;
+  const r = await fetch(`/api/v1/plans/${pid}/submissions`);
+  const rows = await r.json();
+  const out = document.getElementById("out");
+  if (!Array.isArray(rows) || rows.length === 0) {
+    out.innerHTML = '<p class="muted">No submissions for this plan.</p>';
+    return false;
+  }
+  let html = '';
+  for (const s of rows) {
+    html += `<section class="submission">
+      <h3>Task ${s.task_id} <span class="muted">${s.status}</span></h3>
+      <details open><summary>Diff</summary><pre>${escapeHtml(s.diff || "(empty)")}</pre></details>
+      <details><summary>Auto review (${(s.auto_review_findings || []).length})</summary>
+        <pre>${JSON.stringify(s.auto_review_findings, null, 2)}</pre>
+      </details>
+      <details><summary>Test results</summary><pre>${JSON.stringify(s.test_results, null, 2)}</pre></details>
+      ${s.gitlab_mr_url ? `<p><a href="${s.gitlab_mr_url}" target="_blank">MR !${s.gitlab_mr_iid}</a></p>` : ""}
+      <div class="actions">
+        <button class="primary" onclick="decide('${s.id}','approve')">Approve → MR</button>
+        <button class="danger" onclick="decide('${s.id}','reject')">Reject</button>
+      </div>
+    </section>`;
+  }
+  out.innerHTML = html;
+  return false;
+}
+function escapeHtml(s) {
+  return s.replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+}
+async function decide(id, s) {
+  const r = await fetch(`/api/v1/diff_submissions/${id}/${s}`, {method: "POST"});
+  alert(await r.text());
+}
+</script>
 {% endblock %}

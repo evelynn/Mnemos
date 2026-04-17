@@ -10,6 +10,7 @@ from app.api import artifacts as artifacts_api
 from app.api import audit as audit_api
 from app.api import auth as auth_api
 from app.api import data as data_api
+from app.api import diffs as diffs_api
 from app.api import findings as findings_api
 from app.api import plans as plans_api
 from app.api import projects as projects_api
@@ -51,6 +52,7 @@ def create_app() -> FastAPI:
     app.include_router(data_api.query_router)
     app.include_router(findings_api.router)
     app.include_router(plans_api.router)
+    app.include_router(diffs_api.router)
     app.include_router(audit_api.router)
     app.include_router(webhooks_api.router)
     app.include_router(otlp_router)

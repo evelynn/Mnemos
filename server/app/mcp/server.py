@@ -27,6 +27,7 @@ from app.mcp.data_queries import (
 from app.mcp.dev_tools import (
     edit_file_in_worktree,
     run_in_sandbox_tool,
+    submit_diff as submit_diff_tool,
     submit_plan as submit_plan_tool,
 )
 from app.mcp.queries import (
@@ -266,6 +267,24 @@ _TOOLS = [
             "required": ["plan_id", "command"],
         },
     ),
+    Tool(
+        name="submit_diff",
+        description=(
+            "Submit the plan worktree's current diff for Gate B approval. "
+            "Auto self-review runs and returns findings."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "plan_id": {"type": "string"},
+                "task_id": {"type": "string"},
+                "diff": {"type": "string", "nullable": True},
+                "test_results": {"type": "object", "nullable": True},
+                "self_review_notes": {"type": "string", "nullable": True},
+            },
+            "required": ["plan_id", "task_id"],
+        },
+    ),
 ]
 
 
@@ -404,6 +423,15 @@ def build_server(project_id: uuid.UUID) -> Server:
                     plan_id=uuid.UUID(arguments["plan_id"]),
                     command=arguments["command"],
                     timeout_sec=int(arguments.get("timeout_sec", 300)),
+                )
+            elif name == "submit_diff":
+                result = await submit_diff_tool(
+                    db,
+                    plan_id=uuid.UUID(arguments["plan_id"]),
+                    task_id=arguments["task_id"],
+                    diff=arguments.get("diff"),
+                    test_results=arguments.get("test_results"),
+                    self_review_notes=arguments.get("self_review_notes"),
                 )
             else:
                 result = {"error": f"unknown tool: {name}"}

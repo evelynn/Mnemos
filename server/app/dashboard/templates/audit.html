@@ -2,7 +2,39 @@
 {% block title %}Audit — Mnemos{% endblock %}
 {% block content %}
 <header class="page-head"><h1>Audit log</h1></header>
-<div hx-get="/api/v1/audit?limit=100" hx-trigger="load" hx-swap="innerHTML" id="audit-list">
-  <p class="muted">Loading recent events…</p>
-</div>
+
+<form onsubmit="return load(event)">
+  <label>Actor filter<input type="text" id="actor" placeholder="user:<uuid> or system" /></label>
+  <label>Action filter<input type="text" id="action" placeholder="plan.submit" /></label>
+  <label>Limit<input type="number" id="limit" value="200" min="1" max="1000" /></label>
+  <button class="primary" type="submit">Search</button>
+</form>
+<div id="out"></div>
+
+<script>
+async function load(ev) {
+  ev.preventDefault();
+  const qs = new URLSearchParams();
+  const actor = document.getElementById("actor").value.trim();
+  const action = document.getElementById("action").value.trim();
+  const limit = document.getElementById("limit").value || "200";
+  if (actor) qs.set("actor", actor);
+  if (action) qs.set("action", action);
+  qs.set("limit", limit);
+  const r = await fetch(`/api/v1/audit?${qs}`);
+  const rows = await r.json();
+  const out = document.getElementById("out");
+  if (!Array.isArray(rows) || rows.length === 0) {
+    out.innerHTML = '<p class="muted">No events.</p>';
+    return false;
+  }
+  let html = '<table class="data"><thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th></tr></thead><tbody>';
+  for (const e of rows) {
+    html += `<tr><td>${e.occurred_at}</td><td>${e.actor}</td><td>${e.action}</td><td><code>${e.target ?? ""}</code></td><td><pre>${JSON.stringify(e.details)}</pre></td></tr>`;
+  }
+  html += "</tbody></table>";
+  out.innerHTML = html;
+  return false;
+}
+</script>
 {% endblock %}

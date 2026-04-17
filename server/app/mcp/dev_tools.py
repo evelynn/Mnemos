@@ -9,7 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.mcp.queries import impact_analysis
-from app.models.plans import Plan
+from app.models.plans import DiffSubmission, Plan
+from app.safety.self_review import review_diff, to_jsonable
 from app.sandbox.runner import run_in_sandbox
 from app.sandbox.worktree import (
     compute_diff,
@@ -98,6 +99,43 @@ async def edit_file_in_worktree(
     plan.status = "executing"
     await session.commit()
     return {"success": True, "resulting_diff": diff[:20000]}
+
+
+async def submit_diff(
+    session: AsyncSession,
+    *,
+    plan_id: uuid.UUID,
+    task_id: str,
+    diff: str | None = None,
+    test_results: dict[str, Any] | None = None,
+    self_review_notes: str | None = None,
+) -> dict[str, Any]:
+    plan = (
+        await session.execute(select(Plan).where(Plan.id == plan_id))
+    ).scalar_one_or_none()
+    if plan is None:
+        return {"error": "plan_not_found"}
+    if diff is None:
+        diff = await compute_diff(plan_id)
+
+    review = review_diff(diff)
+    submission = DiffSubmission(
+        plan_id=plan_id,
+        task_id=task_id,
+        diff=diff,
+        test_results=test_results,
+        self_review_notes=self_review_notes,
+        auto_review_findings=to_jsonable(review),
+    )
+    session.add(submission)
+    await session.commit()
+    await session.refresh(submission)
+    return {
+        "submission_id": str(submission.id),
+        "status": submission.status,
+        "gate_b_url": f"/diffs#{submission.id}",
+        "auto_review_findings": to_jsonable(review),
+    }
 
 
 async def run_in_sandbox_tool(
