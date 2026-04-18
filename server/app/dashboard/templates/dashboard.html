@@ -2,8 +2,130 @@
 {% block title %}Dashboard — Mnemos{% endblock %}
 {% block content %}
 <header class="page-head"><h1>Dashboard</h1></header>
-<section class="placeholder">
-  <p>Welcome to Mnemos. Use the sidebar to navigate.</p>
-  <p class="muted">Detailed status widgets land in later weeks.</p>
+
+<section class="summary-grid">
+  <div class="stat-card">
+    <h3>Projects</h3>
+    <div class="big" id="stat-projects">…</div>
+    <a href="/projects" class="muted">Manage →</a>
+  </div>
+  <div class="stat-card">
+    <h3>Recent runs (7d)</h3>
+    <div class="big" id="stat-runs">…</div>
+    <a href="/analysis" class="muted">Open Analysis →</a>
+  </div>
+  <div class="stat-card">
+    <h3>Open findings</h3>
+    <div class="big" id="stat-findings">…</div>
+    <a href="/findings" class="muted">Open Findings →</a>
+  </div>
+  <div class="stat-card">
+    <h3>Readiness</h3>
+    <div class="big" id="stat-ready">…</div>
+    <span class="muted" id="stat-ready-detail"></span>
+  </div>
 </section>
+
+<section>
+  <h2>Latest analysis runs</h2>
+  <div id="runs-box"><p class="muted">Loading…</p></div>
+</section>
+
+<style>
+.summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin: 1rem 0 1.5rem; }
+.stat-card { border: 1px solid #d0d7de; border-radius: 6px; padding: 0.9rem; background: #fff; }
+.stat-card h3 { margin: 0 0 0.3rem; font-size: 0.85rem; color: #57606a; text-transform: uppercase; letter-spacing: 0.03em; }
+.stat-card .big { font-size: 1.8rem; font-weight: 600; margin-bottom: 0.3rem; }
+.stat-card .big.ok { color: #145a1f; }
+.stat-card .big.warn { color: #6a4b00; }
+.stat-card .big.fail { color: #7a1818; }
+</style>
+
+<script>
+async function loadSummary() {
+  // Projects count (scoped to caller's org).
+  try {
+    const r = await fetch("/api/v1/projects");
+    const rows = r.ok ? await r.json() : [];
+    document.getElementById("stat-projects").textContent = rows.length;
+
+    // Walk projects to aggregate recent runs + open findings.
+    let runs = 0, findings = 0;
+    const since = Date.now() - 7 * 24 * 3600 * 1000;
+    for (const p of rows) {
+      try {
+        const rr = await fetch(`/api/v1/projects/${p.id}/analysis_runs`);
+        if (rr.ok) {
+          const runRows = await rr.json();
+          runs += runRows.filter(r => new Date(r.created_at || r.started_at || 0).getTime() > since).length;
+        }
+      } catch {}
+      try {
+        const fr = await fetch(`/api/v1/projects/${p.id}/findings?status=open`);
+        if (fr.ok) findings += (await fr.json()).length;
+      } catch {}
+    }
+    document.getElementById("stat-runs").textContent = runs;
+    document.getElementById("stat-findings").textContent = findings;
+    const fEl = document.getElementById("stat-findings");
+    fEl.className = "big " + (findings === 0 ? "ok" : findings < 10 ? "warn" : "fail");
+
+    // Render the last 5 runs across all org projects.
+    const latest = [];
+    for (const p of rows.slice(0, 10)) {
+      try {
+        const rr = await fetch(`/api/v1/projects/${p.id}/analysis_runs`);
+        if (rr.ok) {
+          const runRows = await rr.json();
+          for (const rn of runRows.slice(0, 3)) latest.push({...rn, _project: p.name});
+        }
+      } catch {}
+    }
+    latest.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+    const box = document.getElementById("runs-box");
+    if (!latest.length) {
+      box.innerHTML = '<p class="muted">No analysis runs yet. Start one from the Analysis tab.</p>';
+    } else {
+      let html = '<table class="data"><thead><tr><th>Project</th><th>Status</th><th>SHA</th><th>Started</th><th></th></tr></thead><tbody>';
+      for (const r of latest.slice(0, 10)) {
+        html += `<tr>
+          <td>${r._project}</td>
+          <td><span class="badge ${r.status}">${r.status}</span></td>
+          <td><code>${(r.git_sha || "").slice(0, 10)}</code></td>
+          <td>${r.started_at || r.created_at || ""}</td>
+          <td><a href="/analysis">Monitor</a></td>
+        </tr>`;
+      }
+      html += "</tbody></table>";
+      box.innerHTML = html;
+    }
+  } catch (e) {
+    document.getElementById("stat-projects").textContent = "?";
+  }
+}
+
+async function loadReady() {
+  try {
+    const r = await fetch("/api/v1/health/ready");
+    const body = await r.json();
+    const el = document.getElementById("stat-ready");
+    const det = document.getElementById("stat-ready-detail");
+    if (r.ok) {
+      el.textContent = "✓";
+      el.className = "big ok";
+      det.textContent = "DB · Redis · worker OK";
+    } else {
+      el.textContent = "!";
+      el.className = "big fail";
+      const bad = Object.entries(body.checks || {}).filter(([, v]) => !v.ok).map(([k]) => k);
+      det.textContent = "degraded: " + bad.join(", ");
+    }
+  } catch {
+    document.getElementById("stat-ready").textContent = "?";
+  }
+}
+
+loadReady();
+loadSummary();
+</script>
 {% endblock %}

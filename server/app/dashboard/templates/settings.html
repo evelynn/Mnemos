@@ -2,22 +2,151 @@
 {% block title %}Settings — Mnemos{% endblock %}
 {% block content %}
 <header class="page-head"><h1>Settings</h1></header>
+
 <section>
   <h2>Connections (Secrets)</h2>
-  <div hx-get="/api/v1/secrets" hx-trigger="load" hx-swap="innerHTML" id="secrets-list">
-    <p class="muted">Loading…</p>
-  </div>
+  <p class="muted">
+    Encrypted at rest via the configured KMS backend. Only the
+    metadata is ever returned by this API — the plaintext value is
+    accessible only to the analyzer containers that need it.
+  </p>
+
+  {% if user.role == 'admin' %}
+  <form onsubmit="return createSecret(event)">
+    <label>Label<input type="text" name="label" required placeholder="mssql-prod-orderdb" /></label>
+    <label>Kind
+      <select name="kind" required>
+        <option value="db_connection">db_connection</option>
+        <option value="gitlab_token">gitlab_token</option>
+        <option value="llm_api_key">llm_api_key</option>
+        <option value="other">other</option>
+      </select>
+    </label>
+    <label>Value<input type="password" name="value" required autocomplete="new-password" /></label>
+    <button type="submit" class="primary">Create secret</button>
+  </form>
+  <pre id="secret-create-result" class="muted"></pre>
+  {% else %}
+  <p class="muted"><em>Secret mutation is admin-only.</em></p>
+  {% endif %}
+
+  <button class="primary" onclick="loadSecrets()">Refresh list</button>
+  <div id="secrets-list"><p class="muted">Click refresh.</p></div>
 </section>
+
 <section>
-  <h2>Project Databases</h2>
+  <h2>Project databases</h2>
   <p class="muted">
     Per-project DB bindings carry <code>sensitive_tables</code>,
     <code>masking_rules</code>, <code>allow_awr</code>, and
-    <code>maintenance_windows</code> (spec §12.2). Manage them via
-    <code>/api/v1/projects/{project_id}/dbs</code>.
+    <code>maintenance_windows</code> (spec §12.2). Listed below per
+    project in your organisation — use the API to create and update
+    (<code>POST /api/v1/projects/{project_id}/dbs</code>).
   </p>
-  <div hx-get="/api/v1/projects" hx-trigger="load" hx-swap="innerHTML" id="project-dbs-projects">
-    <p class="muted">Loading projects…</p>
-  </div>
+  <button class="primary" onclick="loadProjectDbs()">Load</button>
+  <div id="project-dbs-box"><p class="muted">Click load.</p></div>
 </section>
+
+<script>
+async function createSecret(ev) {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const r = await fetch("/api/v1/secrets", {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({
+      label: fd.get("label"),
+      kind: fd.get("kind"),
+      value: fd.get("value"),
+    }),
+  });
+  document.getElementById("secret-create-result").textContent =
+    `HTTP ${r.status}\n${await r.text()}`;
+  if (r.ok) { ev.target.reset(); loadSecrets(); }
+  return false;
+}
+
+async function loadSecrets() {
+  const r = await fetch("/api/v1/secrets");
+  const out = document.getElementById("secrets-list");
+  if (!r.ok) {
+    out.innerHTML = `<p class="error">HTTP ${r.status}</p>`;
+    return;
+  }
+  const rows = await r.json();
+  if (!rows.length) {
+    out.innerHTML = '<p class="muted">No secrets stored.</p>';
+    return;
+  }
+  const isAdmin = {{ 'true' if user.role == 'admin' else 'false' }};
+  let html = '<table class="data"><thead><tr><th>Label</th><th>Kind</th><th>Created</th><th>Last tested</th><th>Test result</th><th></th></tr></thead><tbody>';
+  for (const s of rows) {
+    const actions = isAdmin
+      ? `<button onclick="testSecret('${s.id}')">Test</button>
+         <button onclick="deleteSecret('${s.id}','${s.label}')" class="danger">Delete</button>`
+      : '<span class="muted">read-only</span>';
+    html += `<tr>
+      <td><strong>${s.label}</strong></td>
+      <td><code>${s.kind}</code></td>
+      <td>${s.created_at}</td>
+      <td>${s.last_tested_at || '-'}</td>
+      <td>${s.last_test_result || '-'}</td>
+      <td>${actions}</td>
+    </tr>`;
+  }
+  html += "</tbody></table>";
+  out.innerHTML = html;
+}
+
+async function testSecret(id) {
+  const r = await fetch(`/api/v1/secrets/${id}/test`, {method: "POST"});
+  alert(`HTTP ${r.status}\n${await r.text()}`);
+  loadSecrets();
+}
+
+async function deleteSecret(id, label) {
+  if (!confirm(`Delete secret "${label}"?`)) return;
+  const r = await fetch(`/api/v1/secrets/${id}`, {method: "DELETE"});
+  if (r.ok || r.status === 204) loadSecrets();
+  else alert(`HTTP ${r.status}: ${await r.text()}`);
+}
+
+async function loadProjectDbs() {
+  const r = await fetch("/api/v1/projects");
+  const box = document.getElementById("project-dbs-box");
+  if (!r.ok) {
+    box.innerHTML = `<p class="error">HTTP ${r.status}</p>`;
+    return;
+  }
+  const projects = await r.json();
+  if (!projects.length) {
+    box.innerHTML = '<p class="muted">No projects in your organisation yet.</p>';
+    return;
+  }
+  const chunks = [];
+  for (const p of projects) {
+    const dr = await fetch(`/api/v1/projects/${p.id}/dbs`);
+    const dbs = dr.ok ? await dr.json() : [];
+    let inner;
+    if (!dbs.length) {
+      inner = '<p class="muted">no DBs bound</p>';
+    } else {
+      inner = '<table class="data"><thead><tr><th>Display</th><th>Kind</th><th>Component ID</th><th>AWR</th><th>Sensitive tables</th><th>Windows</th></tr></thead><tbody>';
+      for (const d of dbs) {
+        inner += `<tr>
+          <td><strong>${d.display_name}</strong></td>
+          <td><code>${d.kind}</code></td>
+          <td><code>${d.component_id}</code></td>
+          <td>${d.allow_awr ? '✓' : '-'}</td>
+          <td>${(d.sensitive_tables || []).length}</td>
+          <td>${(d.maintenance_windows || []).length}</td>
+        </tr>`;
+      }
+      inner += "</tbody></table>";
+    }
+    chunks.push(`<details open><summary><strong>${p.name}</strong> <span class="muted">${p.id}</span></summary>${inner}</details>`);
+  }
+  box.innerHTML = chunks.join("");
+}
+</script>
 {% endblock %}
