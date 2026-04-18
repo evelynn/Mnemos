@@ -27,6 +27,7 @@ dependencies = [
     "python-gitlab>=4.4",
     "anthropic>=0.34",
     "mcp>=1.0",
+    "prometheus-client>=0.20",
 ]
 
 [project.optional-dependencies]
@@ -48,3 +49,6 @@ target-version = "py312"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: hits Postgres/Redis and the FastAPI app end-to-end",
+]

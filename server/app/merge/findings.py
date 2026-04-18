@@ -10,12 +10,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, func, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.findings import Finding
-from app.models.graph import Edge, Node
+from app.models.graph import Edge
 
 
 async def _upsert_finding(

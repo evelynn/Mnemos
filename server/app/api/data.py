@@ -18,7 +18,6 @@ from app.data_sampler.project_db import (
     enforce_policy,
     requires_awr,
     resolve_project_db,
-    sensitive_tables_hit,
 )
 from app.db import get_session
 from app.models.auth import User
@@ -171,15 +170,15 @@ async def refresh_sample(
     request: Request,
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    # Samples hit the source DB via the analyzer, so keep them bounded.
-    request.state.user = user
-    await rl_enforce(actor_key(request, "data.sample"), limit=20, window_sec=60)
     """Ingest a freshly-captured raw sample.
 
     The caller (analyzer runner / manual trigger) supplies pre-fetched rows;
     the platform performs masking and stat computation server-side so raw
     values never linger in storage.
     """
+    # Samples hit the source DB via the analyzer, so keep them bounded.
+    request.state.user = user
+    await rl_enforce(actor_key(request, "data.sample"), limit=20, window_sec=60)
     entity = (
         await db.execute(
             select(Node).where(
@@ -258,16 +257,16 @@ async def query_data(
     db: AsyncSession = Depends(get_session),
     user: User = Depends(require_operator),
 ) -> dict[str, Any]:
-    # 30 queries per minute per user: the landing zone is fronting
-    # production DBs, so even operators need a ceiling.
-    request.state.user = user
-    await rl_enforce(actor_key(request, "data.query"), limit=30, window_sec=60)
     """Accept a pre-executed read-only query result, mask it, and log it.
 
     The actual SELECT is run by the analyzer container (ggoss-sql-mssql /
     ggoss-sql-oracle ``query``) so the platform's own process stays isolated
     from production DBs; this endpoint is the guarded landing zone.
     """
+    # 30 queries per minute per user: the landing zone is fronting
+    # production DBs, so even operators need a ceiling.
+    request.state.user = user
+    await rl_enforce(actor_key(request, "data.query"), limit=30, window_sec=60)
     if not body.sql.strip().lower().startswith("select"):
         raise HTTPException(status_code=400, detail="only_select_allowed")
 

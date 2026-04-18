@@ -315,6 +315,12 @@ async def run_ingest(
             project_id=project_id,
             details=totals,
         )
+        try:
+            from app.obs.metrics import analysis_runs_total
+
+            analysis_runs_total.labels(status="completed").inc()
+        except Exception:
+            pass
         await bus.publish(run_id, {"event": "run_completed", **totals})
     except Exception as exc:  # noqa: BLE001
         log.exception("run_ingest failed")
@@ -327,6 +333,12 @@ async def run_ingest(
                 error_log=str(exc),
                 stats=totals,
             )
+        try:
+            from app.obs.metrics import analysis_runs_total
+
+            analysis_runs_total.labels(status="failed").inc()
+        except Exception:
+            pass
         await bus.publish(run_id, {"event": "run_failed", "error": str(exc)})
 
 

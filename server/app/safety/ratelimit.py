@@ -22,6 +22,7 @@ import uuid
 
 from fastapi import HTTPException, Request, status
 
+from app.obs.metrics import rate_limited_total
 from app.orchestrator.redis_pool import get_redis
 
 
@@ -53,6 +54,9 @@ async def enforce(
         )
 
     if int(count) > limit:
+        # Scope is usually in ``key`` as the second segment ``rl:<scope>:<actor>``.
+        scope = key.split(":", 2)[1] if ":" in key else "unknown"
+        rate_limited_total.labels(scope=scope).inc()
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="rate_limited",

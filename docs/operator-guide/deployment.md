@@ -113,16 +113,51 @@ mnemos.example.com {
 }
 ```
 
-## 6. Key rotation (Phase B follow-up)
+## 6. Key rotation
 
-A proper rotation rewraps every ciphertext column with the new Fernet
-key. Until that script lands, treat `FERNET_KEY` as immutable once
-secrets are stored. If the key leaks, rotate all underlying DB
-credentials (which is what you would have to do anyway).
+Rewrap every stored secret from the old Fernet key to a new one. Safe to
+run live; prefer a maintenance window anyway so a newly-created secret
+isn't missed mid-rotation.
+
+```bash
+# 1. Generate a new key.
+NEW_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+
+# 2. Dry run first — confirm every secret decrypts with the current key.
+docker compose exec platform python -m app.cli rotate-fernet-key \
+  --old-key "$(grep ^FERNET_KEY= .env | cut -d= -f2-)" \
+  --new-key "$NEW_KEY" \
+  --dry-run
+
+# 3. Commit the rotation.
+docker compose exec platform python -m app.cli rotate-fernet-key \
+  --old-key "$(grep ^FERNET_KEY= .env | cut -d= -f2-)" \
+  --new-key "$NEW_KEY"
+
+# 4. Update .env and restart so new encryptions use the new key.
+sed -i "s|^FERNET_KEY=.*|FERNET_KEY=$NEW_KEY|" .env
+docker compose up -d
+```
+
+If the CLI reports `skipped > 0`, at least one row failed to decrypt
+with the supplied old key — **do not** flip `.env` until you investigate
+(the row is likely corrupted or was encrypted with a prior key).
 
 ## 7. Backups
 
-- Postgres: `pg_dump` the `mnemos` database on a cron. Store off-host.
+- Postgres: `scripts/backup.sh` dumps the DB in custom (`-Fc`) format and
+  prunes anything older than `MNEMOS_BACKUP_RETENTION_DAYS` (default 14).
+  Wire via cron or a systemd timer:
+
+  ```cron
+  15 3 * * * cd /opt/mnemos && ./scripts/backup.sh /var/backups/mnemos >> /var/log/mnemos-backup.log 2>&1
+  ```
+
+- Restore: `MNEMOS_RESTORE_CONFIRM=yes ./scripts/restore.sh <file>`.
+  The script stops platform+worker, drops the DB, runs `pg_restore`,
+  restarts, and prints the resulting alembic revision so you can confirm
+  it matches the image on disk.
+
 - Redis: not authoritative; loss just empties queues and rate-limit
   counters. RDB snapshots in the bind mount are sufficient.
 - `platform_data` volume: contains repo checkouts — rebuildable from
@@ -135,6 +170,24 @@ credentials (which is what you would have to do anyway).
   line; forward it from the proxy so user-visible ids match the logs.
 - `/api/v1/health/ready` returns per-dependency status; wire into your
   load balancer's drain logic.
+- Prometheus metrics at `/metrics`. Spin up the optional monitoring
+  stack with:
+
+  ```bash
+  docker compose -f docker-compose.yml -f docker-compose.monitoring.yml \
+    --profile monitoring up -d
+  ```
+
+  Grafana at `http://<host>:3000` (admin/admin by default — change via
+  `GRAFANA_ADMIN_PASSWORD`), dashboard *Mnemos Overview* pre-provisioned.
+- Baseline metrics to alert on:
+
+  | Metric | Alert when |
+  |---|---|
+  | `rate(mnemos_http_requests_total{status="5xx"}[5m])` | > 0.5 rps for 10m |
+  | `histogram_quantile(0.95, …_duration_seconds_bucket[5m])` | > 2s for 10m |
+  | `increase(mnemos_rate_limited_total[1h])` | > 100 / h |
+  | `absent(mnemos_http_requests_total)` | for 5m (scrape failure) |
 
 ## 9. Rate limits
 

@@ -1,6 +1,5 @@
 """Policy enforcement (AWR consent, maintenance windows, sensitive tables)."""
 
-from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest

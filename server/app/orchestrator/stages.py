@@ -28,7 +28,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import SessionLocal
 from app.models.stages import AnalysisStage

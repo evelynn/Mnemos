@@ -22,6 +22,7 @@ from app.config import get_settings
 from app.dashboard.router import router as dashboard_router
 from app.obs import configure_logging
 from app.obs.errors import install as install_error_handlers
+from app.obs.metrics import PrometheusMiddleware, metrics_endpoint
 from app.obs.middleware import RequestContextMiddleware
 from app.orchestrator.redis_pool import close_redis
 from app.runtime_receiver import router as otlp_router
@@ -50,8 +51,10 @@ def create_app() -> FastAPI:
     # Order matters — RequestContextMiddleware runs first so the request_id
     # is available to AuditMiddleware and all handlers downstream.
     app.add_middleware(AuditMiddleware)
+    app.add_middleware(PrometheusMiddleware)
     app.add_middleware(RequestContextMiddleware)
 
+    app.add_route("/metrics", metrics_endpoint, methods=["GET"])
     app.include_router(health_api.router)
     app.include_router(auth_api.router)
     app.include_router(secrets_api.router)
