@@ -8,4 +8,16 @@
     <p class="muted">Loading…</p>
   </div>
 </section>
+<section>
+  <h2>Project Databases</h2>
+  <p class="muted">
+    Per-project DB bindings carry <code>sensitive_tables</code>,
+    <code>masking_rules</code>, <code>allow_awr</code>, and
+    <code>maintenance_windows</code> (spec §12.2). Manage them via
+    <code>/api/v1/projects/{project_id}/dbs</code>.
+  </p>
+  <div hx-get="/api/v1/projects" hx-trigger="load" hx-swap="innerHTML" id="project-dbs-projects">
+    <p class="muted">Loading projects…</p>
+  </div>
+</section>
 {% endblock %}

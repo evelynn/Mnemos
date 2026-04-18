@@ -13,6 +13,7 @@ from app.api import data as data_api
 from app.api import diffs as diffs_api
 from app.api import findings as findings_api
 from app.api import plans as plans_api
+from app.api import project_dbs as project_dbs_api
 from app.api import projects as projects_api
 from app.api import secrets as secrets_api
 from app.api import webhooks as webhooks_api
@@ -46,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_api.router)
     app.include_router(secrets_api.router)
     app.include_router(projects_api.router)
+    app.include_router(project_dbs_api.router)
     app.include_router(analysis_api.router)
     app.include_router(artifacts_api.router)
     app.include_router(data_api.router)

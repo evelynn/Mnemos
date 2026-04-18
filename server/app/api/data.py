@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
 from app.data_sampler import MaskingEngine, compute_column_stats, mask_rows
+from app.data_sampler.project_db import resolve_project_db, sensitive_tables_hit
 from app.db import get_session
 from app.models.graph import Node
 from app.models.samples import DataQueryLog, DataSample
@@ -183,7 +184,17 @@ async def refresh_sample(
             status_code=403, detail="sensitive_entity_sample_disallowed"
         )
 
-    masked_rows, _col_flags, any_masked = mask_rows(body.columns, body.rows)
+    # Resolve per-project-DB masking overrides when the entity advertises
+    # its DB component id (spec §12.2). Absence falls back to defaults so
+    # projects without explicit bindings still mask PII.
+    db_component = (entity.data or {}).get("component_id")
+    engine: MaskingEngine | None = None
+    if db_component:
+        pdb = await resolve_project_db(db, project_id, db_component)
+        if pdb is not None:
+            engine = MaskingEngine.from_project_db(pdb.masking_rules)
+
+    masked_rows, _col_flags, any_masked = mask_rows(body.columns, body.rows, engine)
     stats = compute_column_stats(body.columns, masked_rows)
 
     sample = DataSample(
@@ -242,7 +253,25 @@ async def query_data(
     if not body.sql.strip().lower().startswith("select"):
         raise HTTPException(status_code=400, detail="only_select_allowed")
 
-    masked_rows, _flags, any_masked = mask_rows(body.columns, body.rows)
+    # Per-project-DB policy: block sensitive tables and apply masking
+    # overrides (spec §12.2, §14.2). No row means the platform falls back
+    # to defaults — callers are expected to register DBs before first use.
+    pdb = await resolve_project_db(db, project_id, body.db_component_id)
+    engine: MaskingEngine | None = None
+    if pdb is not None:
+        hit = sensitive_tables_hit(body.sql, pdb.sensitive_tables)
+        if hit is not None:
+            await audit_record(
+                actor=f"user:{user.id}",
+                action="data.sensitive_table_blocked",
+                target=body.db_component_id,
+                project_id=project_id,
+                details={"table": hit, "purpose": body.purpose},
+            )
+            raise HTTPException(status_code=403, detail="sensitive_table_blocked")
+        engine = MaskingEngine.from_project_db(pdb.masking_rules)
+
+    masked_rows, _flags, any_masked = mask_rows(body.columns, body.rows, engine)
 
     log = DataQueryLog(
         project_id=project_id,
