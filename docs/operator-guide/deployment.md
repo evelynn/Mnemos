@@ -212,7 +212,65 @@ Rollbacks: re-deploy the previous image tag; migrations support
 `alembic downgrade <revision>` but review each migration's downgrade
 path in advance.
 
-## 11. Troubleshooting
+## 11. Multi-tenancy (Phase C — opt-in)
+
+Single-host deployments stay in the ``default`` organisation and nothing
+changes. To partition the platform across multiple tenants:
+
+```bash
+# 1. Create an additional org.
+curl -X POST https://.../api/v1/organizations \
+  -H 'content-type: application/json' \
+  -d '{"slug":"team-red","display_name":"Team Red"}'
+
+# 2. Provision users with organization_id scoped to that org (via the
+#    /api/v1/users CRUD — see api/users.py).
+```
+
+**Known scope**: the Phase-C foundation ships the ``organizations``
+table, ``same_org()``/``require_project_org()`` helpers, and the org
+column on ``projects`` and ``users``. The retrofit of every existing
+endpoint to enforce the check is tracked in
+``app/auth/org_scope.py`` docstring — mechanical work, one ``Depends``
+per route. Until that retrofit lands, treat the org boundary as
+best-effort: audits show cross-org access but the API does not yet
+block it on every route.
+
+## 12. OIDC / SSO (Phase C)
+
+Set these env vars (leave empty to disable and fall back to local
+password auth):
+
+```env
+OIDC_ISSUER=https://login.example.com/auth/realms/corp
+OIDC_CLIENT_ID=mnemos
+OIDC_CLIENT_SECRET=…
+OIDC_REDIRECT_URI=https://mnemos.example.com/api/v1/auth/oidc/callback
+OIDC_SCOPES="openid email profile"
+```
+
+Login flow: ``GET /api/v1/auth/oidc/login`` → IdP → callback lands at
+``/api/v1/auth/oidc/callback``. First-time users are provisioned as
+``role=viewer`` in the ``default`` org; an admin elevates them.
+
+## 13. KMS backend
+
+``KMS_BACKEND=local`` (default) uses ``FERNET_KEY`` from env.
+``KMS_BACKEND=aws`` with ``KMS_KEY_ARN=arn:aws:kms:…`` switches to
+envelope encryption via AWS KMS — install the ``boto3`` dependency in
+the platform image and grant the container role ``kms:GenerateDataKey``
+on the referenced key.
+
+## 14. GDPR endpoints
+
+Admin-only. Available at ``/api/v1/gdpr/users/{user_id}``:
+
+- ``GET …/export`` → JSON dump of user record, API keys, audit entries.
+- ``DELETE …`` → deletes the user + rewrites audit entries so the
+  actor field becomes ``redacted:<uuid>`` (forensic chain preserved,
+  identifiable form removed).
+
+## 15. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|

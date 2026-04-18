@@ -22,6 +22,18 @@ class Settings(BaseSettings):
     session_cookie_name: str = Field(default="mnemos_session")
     session_max_age_sec: int = Field(default=60 * 60 * 24 * 7)
 
+    # OIDC / SSO (Phase C-2). Unset by default -> local auth only.
+    oidc_issuer: str = Field(default="")
+    oidc_client_id: str = Field(default="")
+    oidc_client_secret: str = Field(default="")
+    oidc_redirect_uri: str = Field(default="")
+    oidc_scopes: str = Field(default="openid email profile")
+
+    # KMS backend selector (Phase C-3): "local" uses env FERNET_KEY,
+    # "aws" uses AWS KMS DEK-wrapping (requires kms_key_arn).
+    kms_backend: str = Field(default="local")
+    kms_key_arn: str = Field(default="")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
