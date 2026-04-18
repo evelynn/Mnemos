@@ -4,14 +4,15 @@ Why a plugin? Operators care deeply about how the Data Encryption Key
 (the Fernet key that wraps every stored secret) is stored. The
 Phase-A/B default — reading ``FERNET_KEY`` from env — is fine for
 single-host deployments behind a hardened host, but a larger org wants
-an HSM-backed KMS so the DEK never lives on disk or in env files.
+an external KMS so the DEK never lives on disk or in env files.
 
 This module exposes:
 
 - ``KmsBackend`` protocol
-- ``LocalFernetKms``   — reads ``FERNET_KEY``; the existing behaviour
-- ``AwsKmsEnvelopeKms`` — wraps/unwraps the DEK with AWS KMS and caches
-  the unwrapped DEK in memory
+- ``LocalFernetKms``  — reads ``FERNET_KEY``; the existing behaviour.
+- ``VaultKmsBackend`` — fetches the DEK from HashiCorp Vault's KV-v2
+  engine; picked for self-hosted deployments because Vault itself is
+  self-hostable and carries no cloud dependency.
 
 Selection via ``KMS_BACKEND`` env var (default ``local``). Consumers
 should call ``get_kms()`` instead of hard-coding Fernet.
@@ -26,6 +27,7 @@ import logging
 import os
 from typing import Protocol
 
+import httpx
 from cryptography.fernet import Fernet
 
 from app.config import get_settings
@@ -68,56 +70,77 @@ class LocalFernetKms:
         return self._fernet.decrypt(ciphertext)
 
 
-class AwsKmsEnvelopeKms:
-    """AWS KMS envelope-encryption backend.
+class VaultKmsBackend:
+    """HashiCorp Vault KV-v2 backed DEK.
 
-    The first call generates a data key via ``kms:GenerateDataKey`` and
-    caches the plaintext DEK in memory for subsequent calls. The wrapped
-    (ciphertext) DEK is stored alongside every secret so rewrap / rotation
-    can be done without a platform restart.
+    Fetches a single Fernet key at startup via the Vault HTTP API and
+    caches it for the process lifetime. Vault is chosen (over AWS KMS)
+    because it is self-hostable on the same network as the Mnemos
+    stack, so deployments stay air-gappable when that is a requirement.
 
-    The actual import of ``boto3`` is deferred so the platform can boot
-    without the package when ``KMS_BACKEND=local``.
+    Env vars:
+    - ``VAULT_ADDR``       e.g. http://vault:8200
+    - ``VAULT_TOKEN``      periodic token with read on the KV path
+    - ``VAULT_KV_PATH``    e.g. secret/data/mnemos/kms  (KV v2 layout)
+    - ``VAULT_KV_KEY``     json key holding the base64 Fernet key
+                           (default: ``fernet_key``)
+
+    For token renewal / AppRole auth, wrap this class with an operator-
+    side sidecar that refreshes ``VAULT_TOKEN`` — deliberately out of
+    scope here to keep the core backend narrow.
     """
 
     def __init__(self) -> None:
-        s = get_settings()
-        if not s.kms_key_arn:
-            raise RuntimeError("kms: AWS backend selected but KMS_KEY_ARN is empty")
-        self._key_arn = s.kms_key_arn
-        self._client = None
-        self._cached_dek: bytes | None = None
+        self._addr = os.getenv("VAULT_ADDR", "").rstrip("/")
+        self._token = os.getenv("VAULT_TOKEN", "")
+        self._kv_path = os.getenv("VAULT_KV_PATH", "")
+        self._kv_key = os.getenv("VAULT_KV_KEY", "fernet_key")
+        if not (self._addr and self._token and self._kv_path):
+            raise RuntimeError(
+                "kms: Vault backend selected but VAULT_ADDR/VAULT_TOKEN/VAULT_KV_PATH missing"
+            )
+        self._fernet = Fernet(self._fetch_key())
 
-    def _kms(self):
-        if self._client is None:
-            import boto3  # type: ignore[import-not-found]
+    def _fetch_key(self) -> bytes:
+        url = f"{self._addr}/v1/{self._kv_path.lstrip('/')}"
+        try:
+            r = httpx.get(
+                url,
+                headers={"X-Vault-Token": self._token},
+                timeout=5.0,
+            )
+            r.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"kms: vault fetch failed: {exc}") from exc
 
-            self._client = boto3.client("kms")
-        return self._client
-
-    def _dek(self) -> bytes:
-        if self._cached_dek is not None:
-            return self._cached_dek
-        resp = self._kms().generate_data_key(KeyId=self._key_arn, KeySpec="AES_256")
-        # Turn the 32-byte AES key into a Fernet key (urlsafe base64, 32 bytes).
-        self._cached_dek = base64.urlsafe_b64encode(resp["Plaintext"])
-        return self._cached_dek
+        # KV v2 returns ``{"data": {"data": {<key>: <value>}, "metadata": ...}}``.
+        payload = r.json()
+        try:
+            value = payload["data"]["data"][self._kv_key]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError(
+                f"kms: vault payload missing data.data.{self._kv_key}"
+            ) from exc
+        if not isinstance(value, str):
+            raise RuntimeError("kms: vault DEK must be a string")
+        return value.encode()
 
     def encrypt(self, plaintext: bytes) -> bytes:
-        return Fernet(self._dek()).encrypt(plaintext)
+        return self._fernet.encrypt(plaintext)
 
     def decrypt(self, ciphertext: bytes) -> bytes:
-        return Fernet(self._dek()).decrypt(ciphertext)
+        return self._fernet.decrypt(ciphertext)
 
 
 @functools.lru_cache(maxsize=1)
 def get_kms() -> KmsBackend:
     """Return the configured KMS backend (cached singleton)."""
     backend = os.getenv("KMS_BACKEND", get_settings().kms_backend).lower()
-    if backend == "aws":
-        logger.info("kms: using AWS KMS envelope backend")
-        return AwsKmsEnvelopeKms()
+    if backend == "vault":
+        logger.info("kms: using HashiCorp Vault backend")
+        return VaultKmsBackend()
     if backend != "local":
         logger.warning("kms: unknown backend %r, falling back to local", backend)
     logger.info("kms: using local Fernet backend")
     return LocalFernetKms()
+

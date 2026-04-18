@@ -14,12 +14,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.org_scope import require_project_org
 from app.auth.rbac import require_admin
 from app.db import get_session
 from app.models.auth import User
 from app.models.projects import ProjectDB
 
-router = APIRouter(prefix="/api/v1/projects/{project_id}/dbs", tags=["project_dbs"])
+router = APIRouter(
+    prefix="/api/v1/projects/{project_id}/dbs",
+    tags=["project_dbs"],
+    # Every route here targets a single project; the org-scope check
+    # happens once at the router level rather than on each endpoint.
+    dependencies=[Depends(require_project_org())],
+)
 
 DBKind = Literal["mssql", "oracle"]
 

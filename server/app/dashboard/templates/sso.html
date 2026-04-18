@@ -1,0 +1,62 @@
+{% extends "_layout.html" %}
+{% block title %}SSO / OIDC — Mnemos{% endblock %}
+{% block content %}
+<header class="page-head"><h1>SSO / OIDC</h1></header>
+
+<section class="hint">
+  <p class="muted">
+    OIDC is configured via environment variables on the platform
+    container so credentials never land in the database. Toggle a
+    restart after changing <code>.env</code>.
+  </p>
+</section>
+
+<section>
+  <h2>Runtime status</h2>
+  <button onclick="loadStatus()" class="primary">Refresh</button>
+  <div id="status-box"><p class="muted">Click refresh.</p></div>
+</section>
+
+<section>
+  <h2>Required env vars</h2>
+  <pre class="muted">OIDC_ISSUER=https://login.example.com/auth/realms/corp
+OIDC_CLIENT_ID=mnemos
+OIDC_CLIENT_SECRET=...
+OIDC_REDIRECT_URI=https://mnemos.example.com/api/v1/auth/oidc/callback
+OIDC_SCOPES="openid email profile"
+</pre>
+  <p class="muted">
+    Callback route: <code>/api/v1/auth/oidc/callback</code>.
+    Login trigger: <code>/api/v1/auth/oidc/login</code>.
+  </p>
+</section>
+
+<section>
+  <h2>Test the flow</h2>
+  <p class="muted">
+    Open the login URL in a new tab — you'll be redirected to your IdP
+    and back. First-time users are provisioned as <code>viewer</code>
+    in the <code>default</code> organisation; promote them from the
+    user management tab.
+  </p>
+  <a class="primary" href="/api/v1/auth/oidc/login" target="_blank" rel="noopener">
+    Open /api/v1/auth/oidc/login
+  </a>
+</section>
+
+<script>
+async function loadStatus() {
+  // The callback endpoint returns 501 when OIDC is disabled; the login
+  // redirects (302) when enabled. We probe both to give an at-a-glance
+  // "is it configured" signal without exposing the secret.
+  let state = "unknown";
+  try {
+    const r = await fetch("/api/v1/auth/oidc/callback?code=probe&state=probe", {redirect: "manual"});
+    if (r.status === 501) state = "disabled";
+    else if (r.status === 400) state = "enabled (state rejected — expected)";
+    else state = `HTTP ${r.status}`;
+  } catch (e) { state = `error: ${e}`; }
+  document.getElementById("status-box").innerHTML = `<p><strong>OIDC state:</strong> <code>${state}</code></p>`;
+}
+</script>
+{% endblock %}

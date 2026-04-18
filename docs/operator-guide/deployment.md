@@ -255,11 +255,32 @@ Login flow: ``GET /api/v1/auth/oidc/login`` → IdP → callback lands at
 
 ## 13. KMS backend
 
-``KMS_BACKEND=local`` (default) uses ``FERNET_KEY`` from env.
-``KMS_BACKEND=aws`` with ``KMS_KEY_ARN=arn:aws:kms:…`` switches to
-envelope encryption via AWS KMS — install the ``boto3`` dependency in
-the platform image and grant the container role ``kms:GenerateDataKey``
-on the referenced key.
+``KMS_BACKEND=local`` (default) reads ``FERNET_KEY`` from env — fine for
+single-host deployments behind a hardened host.
+
+``KMS_BACKEND=vault`` fetches the DEK from a self-hosted HashiCorp Vault
+KV-v2 store at startup. Vault (not a cloud KMS) is the chosen external
+option so the platform stays air-gappable. Env vars:
+
+```env
+KMS_BACKEND=vault
+VAULT_ADDR=http://vault:8200
+VAULT_TOKEN=<periodic token or AppRole-issued token>
+VAULT_KV_PATH=secret/data/mnemos/kms
+# optional; defaults to "fernet_key"
+VAULT_KV_KEY=fernet_key
+```
+
+Populate the key once:
+
+```bash
+vault kv put secret/mnemos/kms \
+  fernet_key="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+```
+
+Token renewal and AppRole login are deliberately left to an operator
+sidecar — Mnemos only reads the DEK at startup, so a short-lived token
+is acceptable as long as the sidecar refreshes it before restarts.
 
 ## 14. GDPR endpoints
 

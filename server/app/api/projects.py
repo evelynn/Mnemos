@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.org_scope import require_project_org
 from app.auth.rbac import require_admin
 from app.db import get_session
 from app.models.auth import User
@@ -59,9 +60,18 @@ def _to_out(p: Project) -> ProjectOut:
 
 @router.get("")
 async def list_projects(
-    _: CurrentUser, db: AsyncSession = Depends(get_session)
+    user: CurrentUser, db: AsyncSession = Depends(get_session)
 ) -> list[ProjectOut]:
-    result = await db.execute(select(Project).order_by(Project.created_at.desc()))
+    # Scope the list to the caller's organisation. Pre-migration rows
+    # (organization_id NULL) remain visible so single-tenant deployments
+    # keep working without any manual migration step.
+    stmt = select(Project).order_by(Project.created_at.desc())
+    if user.organization_id is not None:
+        stmt = stmt.where(
+            (Project.organization_id == user.organization_id)
+            | (Project.organization_id.is_(None))
+        )
+    result = await db.execute(stmt)
     return [_to_out(p) for p in result.scalars().all()]
 
 
@@ -77,6 +87,9 @@ async def create_project(
         gitlab_url=str(body.gitlab_url),
         default_branch=body.default_branch,
         languages=list(body.languages),
+        # Inherit org from the creator so the tenancy boundary is set
+        # at row-birth; cross-org admins can reassign via PATCH.
+        organization_id=user.organization_id,
     )
     db.add(project)
     await db.commit()
@@ -91,7 +104,7 @@ async def create_project(
     return _to_out(project)
 
 
-@router.get("/{project_id}")
+@router.get("/{project_id}", dependencies=[Depends(require_project_org())])
 async def get_project(
     project_id: uuid.UUID,
     _: CurrentUser,
@@ -105,7 +118,7 @@ async def get_project(
     return _to_out(project)
 
 
-@router.patch("/{project_id}")
+@router.patch("/{project_id}", dependencies=[Depends(require_project_org())])
 async def update_project(
     project_id: uuid.UUID,
     body: ProjectUpdate,
@@ -134,7 +147,11 @@ async def update_project(
     return _to_out(project)
 
 
-@router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{project_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_project_org())],
+)
 async def delete_project(
     project_id: uuid.UUID,
     db: AsyncSession = Depends(get_session),

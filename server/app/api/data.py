@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.org_scope import require_project_org
 from app.auth.rbac import require_operator
 from app.data_sampler import MaskingEngine, compute_column_stats, mask_rows
 from app.data_sampler.project_db import (
@@ -26,7 +27,9 @@ from app.models.samples import DataQueryLog, DataSample
 from app.safety.ratelimit import actor_key, enforce as rl_enforce
 
 router = APIRouter(
-    prefix="/api/v1/projects/{project_id}/data_entities", tags=["data"]
+    prefix="/api/v1/projects/{project_id}/data_entities",
+    tags=["data"],
+    dependencies=[Depends(require_project_org())],
 )
 
 
@@ -237,7 +240,11 @@ async def refresh_sample(
     }
 
 
-query_router = APIRouter(prefix="/api/v1/projects/{project_id}/data", tags=["data"])
+query_router = APIRouter(
+    prefix="/api/v1/projects/{project_id}/data",
+    tags=["data"],
+    dependencies=[Depends(require_project_org())],
+)
 
 
 class QueryRequest(BaseModel):

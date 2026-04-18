@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.org_scope import require_project_org
 from app.db import get_session
 from app.mcp.queries import impact_analysis
 from app.models.plans import Plan
@@ -69,7 +70,10 @@ def _out(plan: Plan) -> PlanOut:
     )
 
 
-@router.post("/api/v1/projects/{project_id}/plans")
+@router.post(
+    "/api/v1/projects/{project_id}/plans",
+    dependencies=[Depends(require_project_org())],
+)
 async def submit_plan(
     project_id: uuid.UUID,
     body: PlanSubmit,
@@ -109,7 +113,10 @@ async def submit_plan(
     return _out(plan)
 
 
-@router.get("/api/v1/projects/{project_id}/plans")
+@router.get(
+    "/api/v1/projects/{project_id}/plans",
+    dependencies=[Depends(require_project_org())],
+)
 async def list_plans(
     project_id: uuid.UUID,
     _: CurrentUser,

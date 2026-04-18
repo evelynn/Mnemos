@@ -30,8 +30,9 @@ class Settings(BaseSettings):
     oidc_scopes: str = Field(default="openid email profile")
 
     # KMS backend selector (Phase C-3): "local" uses env FERNET_KEY,
-    # "aws" uses AWS KMS DEK-wrapping (requires kms_key_arn).
+    # "vault" fetches the DEK from HashiCorp Vault KV-v2 at startup.
     kms_backend: str = Field(default="local")
+    # Retained for forward-compatibility; unused by the current backends.
     kms_key_arn: str = Field(default="")
 
 

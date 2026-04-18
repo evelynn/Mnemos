@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.org_scope import require_project_org
 from app.db import get_session
 from app.merge.findings import run_all
 from app.models.findings import Finding
@@ -48,7 +49,10 @@ def _out(f: Finding) -> FindingOut:
     )
 
 
-@router.get("/api/v1/projects/{project_id}/findings")
+@router.get(
+    "/api/v1/projects/{project_id}/findings",
+    dependencies=[Depends(require_project_org())],
+)
 async def list_findings(
     project_id: uuid.UUID,
     _: CurrentUser,
@@ -99,7 +103,10 @@ async def patch_finding(
     return _out(f)
 
 
-@router.post("/api/v1/projects/{project_id}/findings/rebuild")
+@router.post(
+    "/api/v1/projects/{project_id}/findings/rebuild",
+    dependencies=[Depends(require_project_org())],
+)
 async def rebuild_findings(
     project_id: uuid.UUID,
     user: CurrentUser,

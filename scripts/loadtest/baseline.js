@@ -15,9 +15,18 @@
 import http from "k6/http";
 import { check, sleep } from "k6";
 import { Trend, Counter } from "k6/metrics";
+import { loginOnce, authCookie } from "./login.js";
 
 const BASE = __ENV.BASE_URL || "http://localhost:8080";
+// Legacy fallback: a raw session cookie can still be supplied via
+// MNEMOS_SESSION. Newer runs should set MNEMOS_USERNAME/MNEMOS_PASSWORD
+// so setup() handles the login flow itself.
 const SESSION = __ENV.MNEMOS_SESSION || "";
+
+export function setup() {
+  if (SESSION) return { cookie: SESSION };
+  return loginOnce();
+}
 
 export const options = {
   scenarios: {
@@ -63,10 +72,11 @@ export function healthTraffic() {
   sleep(0.1);
 }
 
-export function queryTraffic() {
-  const headers = SESSION
-    ? { Cookie: `mnemos_session=${SESSION}`, "Content-Type": "application/json" }
-    : { "Content-Type": "application/json" };
+export function queryTraffic(data) {
+  const headers = {
+    "Content-Type": "application/json",
+    ...authCookie(data),
+  };
 
   const body = JSON.stringify({
     db_component_id: "db.mssql.LoadTest",

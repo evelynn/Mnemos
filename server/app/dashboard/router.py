@@ -119,6 +119,9 @@ async def tab_page(
         "findings",
         "audit",
         "settings",
+        "organizations",
+        "gdpr",
+        "sso",
     }
     if tab not in valid:
         raise HTTPException(status_code=404)

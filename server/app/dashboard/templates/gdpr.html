@@ -1,0 +1,61 @@
+{% extends "_layout.html" %}
+{% block title %}GDPR tools — Mnemos{% endblock %}
+{% block content %}
+<header class="page-head"><h1>GDPR tools</h1></header>
+<section class="hint">
+  <p class="muted">
+    Supervisory-authority-ready right-to-access and right-to-erasure. Every
+    action emits a distinct audit entry (<code>gdpr.export</code> /
+    <code>gdpr.erase</code>) so the forensic chain survives even after
+    the subject user row is removed.
+  </p>
+</section>
+
+<section>
+  <h2>Export user data</h2>
+  <form onsubmit="return doExport(event)">
+    <label>User ID<input type="text" name="user_id" required placeholder="uuid" /></label>
+    <button type="submit" class="primary">Export as JSON</button>
+  </form>
+  <details>
+    <summary>Response</summary>
+    <pre id="export-result" class="muted" style="max-height: 24rem; overflow: auto;"></pre>
+  </details>
+</section>
+
+<section>
+  <h2>Erase user</h2>
+  <p class="muted">
+    Deletes the user + API keys, rewrites audit entries so the actor
+    field becomes <code>redacted:&lt;uuid&gt;</code>. You cannot delete
+    yourself — an admin locking their own session mid-flight would be
+    catastrophic.
+  </p>
+  <form onsubmit="return doErase(event)">
+    <label>User ID<input type="text" name="user_id" required placeholder="uuid" /></label>
+    <button type="submit" style="background:#c62828;color:#fff;">Erase</button>
+  </form>
+  <pre id="erase-result" class="muted"></pre>
+</section>
+
+<script>
+async function doExport(ev) {
+  ev.preventDefault();
+  const uid = new FormData(ev.target).get("user_id").trim();
+  const r = await fetch(`/api/v1/gdpr/users/${uid}/export`);
+  const body = await r.text();
+  document.getElementById("export-result").textContent =
+    `HTTP ${r.status}\n\n` + (r.ok ? JSON.stringify(JSON.parse(body), null, 2) : body);
+  return false;
+}
+
+async function doErase(ev) {
+  ev.preventDefault();
+  const uid = new FormData(ev.target).get("user_id").trim();
+  if (!confirm(`Erase user ${uid}? This cannot be undone.`)) return false;
+  const r = await fetch(`/api/v1/gdpr/users/${uid}`, {method: "DELETE"});
+  document.getElementById("erase-result").textContent = `HTTP ${r.status}\n${await r.text()}`;
+  return false;
+}
+</script>
+{% endblock %}

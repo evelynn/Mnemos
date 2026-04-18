@@ -7,10 +7,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.artifacts import build_agents_md, build_mcp_config
 from app.auth.deps import CurrentUser
+from app.auth.org_scope import require_project_org
 from app.db import get_session
 from app.models.projects import Project
 
-router = APIRouter(prefix="/api/v1/projects/{project_id}/artifacts", tags=["artifacts"])
+router = APIRouter(
+    prefix="/api/v1/projects/{project_id}/artifacts",
+    tags=["artifacts"],
+    dependencies=[Depends(require_project_org())],
+)
 
 
 async def _require_project(project_id: uuid.UUID, db: AsyncSession) -> Project:

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.org_scope import require_project_org
 from app.db import get_session
 from app.models.graph import AnalysisRun, Node
 from app.models.projects import Project
@@ -61,6 +62,7 @@ def _to_out(r: AnalysisRun) -> AnalysisRunOut:
 @router.post(
     "/projects/{project_id}/analyze",
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_project_org())],
 )
 async def trigger_analysis(
     project_id: uuid.UUID,
@@ -122,7 +124,10 @@ async def get_run(
     return _to_out(run)
 
 
-@router.get("/projects/{project_id}/analysis_runs")
+@router.get(
+    "/projects/{project_id}/analysis_runs",
+    dependencies=[Depends(require_project_org())],
+)
 async def list_runs(
     project_id: uuid.UUID,
     _: CurrentUser,
@@ -216,7 +221,10 @@ async def get_run_stages(
     ]
 
 
-@router.get("/projects/{project_id}/graph/stats")
+@router.get(
+    "/projects/{project_id}/graph/stats",
+    dependencies=[Depends(require_project_org())],
+)
 async def graph_stats(
     project_id: uuid.UUID,
     _: CurrentUser,
@@ -231,7 +239,10 @@ async def graph_stats(
     return {"nodes_current": int(result.scalar() or 0)}
 
 
-@router.get("/projects/{project_id}/graph/search")
+@router.get(
+    "/projects/{project_id}/graph/search",
+    dependencies=[Depends(require_project_org())],
+)
 async def graph_search(
     project_id: uuid.UUID,
     _: CurrentUser,
