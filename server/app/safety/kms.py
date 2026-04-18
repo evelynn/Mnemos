@@ -55,9 +55,20 @@ class LocalFernetKms:
         if s.fernet_key:
             key = s.fernet_key.encode()
         else:
+            # Refusing-to-start in production beats silently encrypting
+            # with a SECRET_KEY-derived key that changes on image rebuild
+            # and renders every stored secret unrecoverable.
+            if (s.mnemos_env or "").lower() == "production":
+                raise RuntimeError(
+                    "kms: FERNET_KEY is required when MNEMOS_ENV=production. "
+                    "Generate one with "
+                    "`python -c 'from cryptography.fernet import Fernet; "
+                    "print(Fernet.generate_key().decode())'`."
+                )
             logger.warning(
                 "kms: FERNET_KEY not set, deriving DEK from SECRET_KEY — "
-                "only safe for local development"
+                "only safe for local development (MNEMOS_ENV=%s)",
+                s.mnemos_env,
             )
             digest = hashlib.sha256(s.secret_key.encode()).digest()
             key = base64.urlsafe_b64encode(digest)

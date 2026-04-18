@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.findings import Finding
-from app.models.graph import Edge
+from app.models.graph import Edge, Node
 
 
 async def _upsert_finding(
@@ -157,12 +157,148 @@ async def detect_dead_paths(
     return len(rows)
 
 
+async def detect_schema_mismatches(
+    session: AsyncSession, project_id: uuid.UUID
+) -> int:
+    """Code references a table/entity that the live DB schema doesn't expose.
+
+    READS / WRITES edges land in the graph from analyser ``data_access``
+    runs; ``DataEntity`` nodes land from ``live_schema`` runs. When the
+    edge target id is not currently a valid DataEntity, the code is
+    talking to something the DB doesn't have — usually a renamed table,
+    a stale schema reference, or a dropped object.
+    """
+    edge_rows = (
+        await session.execute(
+            select(Edge).where(
+                Edge.project_id == project_id,
+                Edge.kind.in_(("READS", "WRITES")),
+                Edge.valid_to.is_(None),
+            )
+        )
+    ).scalars().all()
+    if not edge_rows:
+        return 0
+
+    target_ids = {e.target_id for e in edge_rows}
+    valid_entities = {
+        nid
+        for nid, in (
+            await session.execute(
+                select(Node.id).where(
+                    Node.project_id == project_id,
+                    Node.kind == "DataEntity",
+                    Node.valid_to.is_(None),
+                    Node.id.in_(target_ids),
+                )
+            )
+        ).all()
+    }
+
+    count = 0
+    for edge in edge_rows:
+        if edge.target_id in valid_entities:
+            continue
+        await _upsert_finding(
+            session,
+            project_id=project_id,
+            kind="schema_mismatch",
+            severity="warning",
+            subject_edge_id=edge.id,
+            detail={
+                "source": edge.source_id,
+                "missing_target": edge.target_id,
+                "edge_kind": edge.kind,
+            },
+        )
+        count += 1
+    return count
+
+
+async def detect_opaque_failing_components(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    *,
+    error_ratio_threshold: float = 0.1,
+) -> int:
+    """Opaque components (binaries / external services) whose calls error
+    out at a high rate.
+
+    Looks at CALLS edges whose target is a Node with ``kind=Component``
+    and ``data.opacity in {"opaque","binary"}``; aggregates the runtime
+    error counts attached to each edge and flags components whose
+    error / total ratio exceeds ``error_ratio_threshold``.
+    """
+    opaque_ids = {
+        nid
+        for nid, in (
+            await session.execute(
+                select(Node.id).where(
+                    Node.project_id == project_id,
+                    Node.kind == "Component",
+                    Node.valid_to.is_(None),
+                    Node.data["opacity"].astext.in_(("opaque", "binary")),
+                )
+            )
+        ).all()
+    }
+    if not opaque_ids:
+        return 0
+
+    rows = (
+        await session.execute(
+            select(Edge).where(
+                Edge.project_id == project_id,
+                Edge.kind == "CALLS",
+                Edge.valid_to.is_(None),
+                Edge.target_id.in_(opaque_ids),
+            )
+        )
+    ).scalars().all()
+
+    by_target: dict[str, dict[str, int]] = {}
+    for e in rows:
+        d = e.data or {}
+        try:
+            errors = int(d.get("runtime_errors", 0))
+            total = int(d.get("runtime_calls", 0))
+        except (TypeError, ValueError):
+            continue
+        if total == 0:
+            continue
+        agg = by_target.setdefault(e.target_id, {"errors": 0, "total": 0})
+        agg["errors"] += errors
+        agg["total"] += total
+
+    count = 0
+    for target_id, agg in by_target.items():
+        ratio = agg["errors"] / max(agg["total"], 1)
+        if ratio < error_ratio_threshold:
+            continue
+        await _upsert_finding(
+            session,
+            project_id=project_id,
+            kind="opaque_component_failing",
+            severity="warning",
+            subject_node_id=target_id,
+            detail={
+                "errors": agg["errors"],
+                "calls": agg["total"],
+                "error_ratio": round(ratio, 4),
+            },
+        )
+        count += 1
+    return count
+
+
 async def run_all(session: AsyncSession, project_id: uuid.UUID) -> dict[str, int]:
     stats = {
         "duplicate_endpoints": await detect_duplicate_endpoints(session, project_id),
         "unverified_claims": await detect_unverified_claims(session, project_id),
         "dynamic_calls": await detect_dynamic_calls(session, project_id),
         "dead_paths": await detect_dead_paths(session, project_id),
+        "schema_mismatches": await detect_schema_mismatches(session, project_id),
+        "opaque_failing": await detect_opaque_failing_components(session, project_id),
     }
     await session.commit()
     return stats

@@ -86,6 +86,83 @@ async def _discovery() -> dict[str, Any]:
     return data
 
 
+_JWKS_CACHE: dict[str, tuple[float, dict]] = {}
+_JWKS_TTL_SEC = 3600
+
+
+async def _jwks(client: httpx.AsyncClient, discovery: dict) -> dict:
+    """Fetch and cache the IdP JWKS (rotates per ``_JWKS_TTL_SEC``)."""
+    url = discovery.get("jwks_uri")
+    if not url:
+        raise HTTPException(status_code=500, detail="oidc_no_jwks_uri")
+    now = time.time()
+    cached = _JWKS_CACHE.get(url)
+    if cached and now - cached[0] < _JWKS_TTL_SEC:
+        return cached[1]
+    r = await client.get(url, timeout=5.0)
+    r.raise_for_status()
+    data = r.json()
+    _JWKS_CACHE[url] = (now, data)
+    return data
+
+
+async def _verify_id_token(
+    client: httpx.AsyncClient,
+    discovery: dict,
+    id_token: str,
+    s,
+) -> dict:
+    """Verify the id_token signature against the IdP JWKS and return claims.
+
+    Validates: signature, issuer match, audience match, exp/iat skew.
+    """
+    import jwt
+    from jwt.exceptions import InvalidTokenError
+
+    jwks_data = await _jwks(client, discovery)
+    try:
+        unverified_header = jwt.get_unverified_header(id_token)
+    except InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail=f"id_token_malformed: {exc}")
+
+    kid = unverified_header.get("kid")
+    matching = next(
+        (k for k in jwks_data.get("keys", []) if k.get("kid") == kid),
+        None,
+    )
+    if matching is None and len(jwks_data.get("keys", [])) == 1:
+        matching = jwks_data["keys"][0]
+    if matching is None:
+        raise HTTPException(status_code=401, detail="id_token_unknown_kid")
+
+    alg = matching.get("alg") or unverified_header.get("alg") or "RS256"
+    kty = (matching.get("kty") or "").upper()
+    try:
+        if kty == "RSA":
+            public_key = jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(matching))
+        elif kty == "EC":
+            public_key = jwt.algorithms.ECAlgorithm.from_jwk(json.dumps(matching))
+        else:
+            raise HTTPException(
+                status_code=401, detail=f"id_token_unsupported_kty: {kty}"
+            )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=401, detail=f"id_token_jwk_invalid: {exc}")
+
+    try:
+        claims = jwt.decode(
+            id_token,
+            public_key,
+            algorithms=[alg],
+            audience=s.oidc_client_id,
+            issuer=discovery.get("issuer", s.oidc_issuer),
+            leeway=30,
+        )
+    except InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail=f"id_token_invalid: {exc}")
+    return claims
+
+
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
 
@@ -169,24 +246,28 @@ async def callback(
             raise HTTPException(status_code=401, detail="token_exchange_failed")
         tokens = token_response.json()
 
+        # Verify the id_token signature against the IdP JWKS BEFORE we
+        # trust any claim. Without this step a compromised IdP host or a
+        # MitM on the issuer-issued token could spoof an arbitrary user.
+        id_token = tokens.get("id_token")
+        if not id_token:
+            raise HTTPException(status_code=401, detail="no_id_token")
+        claims = await _verify_id_token(client, discovery, id_token, s)
+
+        # Optional userinfo enrichment — preferred for richer profile
+        # data, but we trust id_token claims as the authoritative
+        # identity now that the signature is validated.
         userinfo_endpoint = discovery.get("userinfo_endpoint")
-        claims: dict[str, Any] = {}
         if userinfo_endpoint and tokens.get("access_token"):
             ui = await client.get(
                 userinfo_endpoint,
                 headers={"Authorization": f"Bearer {tokens['access_token']}"},
             )
             if ui.status_code == 200:
-                claims = ui.json()
-        if not claims:
-            # Fallback: decode id_token payload WITHOUT signature verification.
-            # Safe here because we just got the id_token over TLS directly from
-            # the token endpoint — same trust boundary as the access_token.
-            id_token = tokens.get("id_token", "")
-            parts = id_token.split(".")
-            if len(parts) == 3:
-                pad = "=" * (-len(parts[1]) % 4)
-                claims = json.loads(base64.urlsafe_b64decode(parts[1] + pad))
+                # Merge userinfo on top of verified id_token claims; do
+                # not allow userinfo to override the verified ``sub``.
+                merged = {**ui.json(), **{"sub": claims.get("sub")}}
+                claims = {**claims, **merged}
 
     username = (claims.get("preferred_username") or claims.get("email")
                 or claims.get("sub"))
@@ -226,7 +307,7 @@ async def callback(
         max_age=s.session_max_age_sec,
         httponly=True,
         samesite="lax",
-        secure=False,  # flip to True in production behind TLS
+        secure=s.session_cookie_secure,
         path="/",
     )
     return {"id": str(user.id), "username": user.username, "role": user.role}

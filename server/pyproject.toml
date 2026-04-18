@@ -28,6 +28,7 @@ dependencies = [
     "anthropic>=0.34",
     "mcp>=1.0",
     "prometheus-client>=0.20",
+    "pyjwt[crypto]>=2.9",
 ]
 
 [project.optional-dependencies]

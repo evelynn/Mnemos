@@ -55,7 +55,7 @@ async def login(
         max_age=_settings.session_max_age_sec,
         httponly=True,
         samesite="lax",
-        secure=False,
+        secure=_settings.session_cookie_secure,
         path="/",
     )
     return UserOut(id=str(user.id), username=user.username, role=user.role)

@@ -212,6 +212,57 @@ Rollbacks: re-deploy the previous image tag; migrations support
 `alembic downgrade <revision>` but review each migration's downgrade
 path in advance.
 
+## 10b. Analyzer binaries
+
+The platform spawns one subprocess per language per analysis stage:
+``ggoss-csharp``, ``ggoss-ts``, ``ggoss-sql-mssql``, ``ggoss-sql-oracle``,
+``ggoss-binary-dotnet``. Source under ``analyzers/`` builds each into a
+container image; the platform expects the binaries on **PATH** inside
+the platform container.
+
+Two supported deployment modes:
+
+### Mode A — Bake binaries into the platform image (recommended)
+
+Add a multi-stage build to ``server/Dockerfile`` that copies the
+pre-built analyzer binaries into ``/usr/local/bin/`` of the platform
+image:
+
+```dockerfile
+# example fragment
+FROM mnemos/ggoss-csharp:latest      AS analyzer-cs
+FROM mnemos/ggoss-ts:latest          AS analyzer-ts
+FROM mnemos/ggoss-sql-mssql:latest   AS analyzer-mssql
+FROM mnemos/ggoss-sql-oracle:latest  AS analyzer-oracle
+
+FROM python:3.12-slim
+COPY --from=analyzer-cs     /out/ggoss-csharp        /usr/local/bin/
+COPY --from=analyzer-ts     /out/ggoss-ts            /usr/local/bin/
+COPY --from=analyzer-mssql  /out/ggoss-sql-mssql     /usr/local/bin/
+COPY --from=analyzer-oracle /out/ggoss-sql-oracle    /usr/local/bin/
+# ...rest of platform Dockerfile unchanged
+```
+
+Pre-build images with `docker compose --profile analyzers build` (the
+profile is set in docker-compose.yml so the analyzer images stay out of
+the default `up` set).
+
+### Mode B — Sidecar containers via Docker socket
+
+If you can't (or don't want to) bake binaries in, expose
+``/var/run/docker.sock`` to the platform container and replace
+``AnalyzerRunner`` with a thin wrapper that does
+``docker run --rm mnemos/ggoss-csharp:latest <verb> <path>``.
+This trades startup overhead per stage for an isolated execution
+boundary. Hook point: ``server/app/analyzers/runner.py``.
+
+### Verifying
+
+After the bring-up steps above, the worker logs should show
+``spawning analyzer: ggoss-csharp symbols /work`` lines per stage. If
+you see ``stage skipped reason=no_analyzer`` instead, the binary isn't
+on PATH inside the worker container.
+
 ## 11. Multi-tenancy (Phase C — opt-in)
 
 Single-host deployments stay in the ``default`` organisation and nothing

@@ -24,7 +24,7 @@ from prometheus_client import (
     multiprocess,
 )
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
+from starlette.requests import Request  # noqa: F401  used in metrics_endpoint signature
 from starlette.responses import Response
 
 http_requests_total = Counter(
@@ -89,14 +89,27 @@ def _route_template(request: Request) -> str:
     return request.url.path
 
 
-async def metrics_endpoint() -> Response:
+async def metrics_endpoint(request: "Request") -> Response:
     """Serve the Prometheus scrape endpoint.
+
+    Authentication: when ``METRICS_BEARER_TOKEN`` is set, requests must
+    present ``Authorization: Bearer <token>``. Empty (default) leaves
+    the endpoint open — only safe when /metrics is locked down at the
+    reverse proxy or only reachable from the monitoring network.
 
     Supports multiprocess (uvicorn --workers N) when the
     ``PROMETHEUS_MULTIPROC_DIR`` env var is set — otherwise falls back
     to the process-local default registry.
     """
     import os
+
+    from app.config import get_settings
+
+    expected = get_settings().metrics_bearer_token
+    if expected:
+        provided = request.headers.get("authorization", "")
+        if provided != f"Bearer {expected}":
+            return Response(status_code=401, content=b"unauthorized")
 
     if os.getenv("PROMETHEUS_MULTIPROC_DIR"):
         registry = CollectorRegistry()

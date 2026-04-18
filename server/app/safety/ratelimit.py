@@ -55,8 +55,24 @@ async def enforce(
 
     if int(count) > limit:
         # Scope is usually in ``key`` as the second segment ``rl:<scope>:<actor>``.
-        scope = key.split(":", 2)[1] if ":" in key else "unknown"
+        parts = key.split(":", 3)
+        scope = parts[1] if len(parts) > 1 else "unknown"
+        actor = parts[2] if len(parts) > 2 else "unknown"
         rate_limited_total.labels(scope=scope).inc()
+        # Audit ledger entry so abuse investigations can see the rejected
+        # attempts that Prometheus only counts in aggregate. Best-effort —
+        # never let an audit failure mask the rate-limit decision.
+        try:
+            from app.audit.logger import record as audit_record
+
+            await audit_record(
+                actor=actor,
+                action="rate_limit.blocked",
+                target=scope,
+                details={"limit": limit, "window_sec": window_sec},
+            )
+        except Exception:
+            pass
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="rate_limited",
