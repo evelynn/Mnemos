@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.rbac import require_admin
 from app.db import get_session
+from app.models.auth import User
 from app.models.projects import Project
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
@@ -135,8 +137,8 @@ async def update_project(
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(
     project_id: uuid.UUID,
-    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_admin),
 ) -> None:
     result = await db.execute(delete(Project).where(Project.id == project_id))
     if result.rowcount == 0:

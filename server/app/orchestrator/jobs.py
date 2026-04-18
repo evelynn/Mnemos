@@ -8,7 +8,9 @@ Design rationale: ``docs/analysis-strategy.md``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -328,12 +330,38 @@ async def run_ingest(
         await bus.publish(run_id, {"event": "run_failed", "error": str(exc)})
 
 
+_HEARTBEAT_KEY = "mnemos:worker:heartbeat"
+_HEARTBEAT_INTERVAL_SEC = 15
+
+
+async def _heartbeat_loop(ctx: dict) -> None:
+    """Writes ``now()`` to a redis key every N seconds so the platform's
+    ``/health/ready`` endpoint can flag a dead worker.
+    """
+    from app.orchestrator.redis_pool import get_redis
+
+    redis = await get_redis()
+    try:
+        while True:
+            await redis.set(_HEARTBEAT_KEY, str(time.time()), ex=_HEARTBEAT_INTERVAL_SEC * 4)
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_SEC)
+    except asyncio.CancelledError:
+        return
+
+
 async def _startup(ctx: dict) -> None:
     ctx["progress"] = ProgressBus()
+    ctx["heartbeat_task"] = asyncio.create_task(_heartbeat_loop(ctx))
 
 
 async def _shutdown(ctx: dict) -> None:
-    pass
+    task = ctx.get("heartbeat_task")
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 class WorkerSettings:

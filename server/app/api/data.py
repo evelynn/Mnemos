@@ -4,18 +4,27 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.rbac import require_operator
 from app.data_sampler import MaskingEngine, compute_column_stats, mask_rows
-from app.data_sampler.project_db import resolve_project_db, sensitive_tables_hit
+from app.data_sampler.project_db import (
+    PolicyViolation,
+    enforce_policy,
+    requires_awr,
+    resolve_project_db,
+    sensitive_tables_hit,
+)
 from app.db import get_session
+from app.models.auth import User
 from app.models.graph import Node
 from app.models.samples import DataQueryLog, DataSample
+from app.safety.ratelimit import actor_key, enforce as rl_enforce
 
 router = APIRouter(
     prefix="/api/v1/projects/{project_id}/data_entities", tags=["data"]
@@ -159,8 +168,12 @@ async def refresh_sample(
     entity_id: str,
     body: SampleIngest,
     user: CurrentUser,
+    request: Request,
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    # Samples hit the source DB via the analyzer, so keep them bounded.
+    request.state.user = user
+    await rl_enforce(actor_key(request, "data.sample"), limit=20, window_sec=60)
     """Ingest a freshly-captured raw sample.
 
     The caller (analyzer runner / manual trigger) supplies pre-fetched rows;
@@ -241,9 +254,14 @@ class QueryRequest(BaseModel):
 async def query_data(
     project_id: uuid.UUID,
     body: QueryRequest,
-    user: CurrentUser,
+    request: Request,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_operator),
 ) -> dict[str, Any]:
+    # 30 queries per minute per user: the landing zone is fronting
+    # production DBs, so even operators need a ceiling.
+    request.state.user = user
+    await rl_enforce(actor_key(request, "data.query"), limit=30, window_sec=60)
     """Accept a pre-executed read-only query result, mask it, and log it.
 
     The actual SELECT is run by the analyzer container (ggoss-sql-mssql /
@@ -253,22 +271,26 @@ async def query_data(
     if not body.sql.strip().lower().startswith("select"):
         raise HTTPException(status_code=400, detail="only_select_allowed")
 
-    # Per-project-DB policy: block sensitive tables and apply masking
-    # overrides (spec §12.2, §14.2). No row means the platform falls back
-    # to defaults — callers are expected to register DBs before first use.
+    # Per-project-DB policy: block sensitive tables, enforce AWR consent
+    # and maintenance windows, and apply masking overrides
+    # (spec §7.4, §12.2, §14.2). No row means the platform falls back to
+    # defaults — operators are expected to register DBs before first use.
     pdb = await resolve_project_db(db, project_id, body.db_component_id)
     engine: MaskingEngine | None = None
+    awr_needed = requires_awr(body.sql)
+    try:
+        enforce_policy(pdb, awr_required=awr_needed, sql=body.sql)
+    except PolicyViolation as exc:
+        await audit_record(
+            actor=f"user:{user.id}",
+            action=f"data.{exc.code}",
+            target=body.db_component_id,
+            project_id=project_id,
+            details={"purpose": body.purpose, "awr": awr_needed},
+        )
+        status_code = 423 if exc.code == "outside_maintenance_window" else 403
+        raise HTTPException(status_code=status_code, detail=exc.code)
     if pdb is not None:
-        hit = sensitive_tables_hit(body.sql, pdb.sensitive_tables)
-        if hit is not None:
-            await audit_record(
-                actor=f"user:{user.id}",
-                action="data.sensitive_table_blocked",
-                target=body.db_component_id,
-                project_id=project_id,
-                details={"table": hit, "purpose": body.purpose},
-            )
-            raise HTTPException(status_code=403, detail="sensitive_table_blocked")
         engine = MaskingEngine.from_project_db(pdb.masking_rules)
 
     masked_rows, _flags, any_masked = mask_rows(body.columns, body.rows, engine)

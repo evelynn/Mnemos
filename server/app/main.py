@@ -2,7 +2,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import analysis as analysis_api
@@ -12,6 +11,7 @@ from app.api import auth as auth_api
 from app.api import data as data_api
 from app.api import diffs as diffs_api
 from app.api import findings as findings_api
+from app.api import health as health_api
 from app.api import plans as plans_api
 from app.api import project_dbs as project_dbs_api
 from app.api import projects as projects_api
@@ -20,6 +20,10 @@ from app.api import webhooks as webhooks_api
 from app.audit.middleware import AuditMiddleware
 from app.config import get_settings
 from app.dashboard.router import router as dashboard_router
+from app.obs import configure_logging
+from app.obs.errors import install as install_error_handlers
+from app.obs.middleware import RequestContextMiddleware
+from app.orchestrator.redis_pool import close_redis
 from app.runtime_receiver import router as otlp_router
 
 _STATIC_DIR = Path(__file__).parent / "dashboard" / "static"
@@ -28,22 +32,27 @@ _STATIC_DIR = Path(__file__).parent / "dashboard" / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
+    # Flush cached singletons so SIGTERM shutdown stays clean.
+    await close_redis()
 
 
 def create_app() -> FastAPI:
-    get_settings()
+    settings = get_settings()
+    configure_logging(settings.log_level)
+
     app = FastAPI(
         title="Mnemos Platform",
         version="0.1.0",
         lifespan=lifespan,
     )
+    install_error_handlers(app)
 
-    @app.get("/api/v1/health")
-    async def health() -> JSONResponse:
-        return JSONResponse({"status": "ok"})
-
+    # Order matters — RequestContextMiddleware runs first so the request_id
+    # is available to AuditMiddleware and all handlers downstream.
     app.add_middleware(AuditMiddleware)
+    app.add_middleware(RequestContextMiddleware)
 
+    app.include_router(health_api.router)
     app.include_router(auth_api.router)
     app.include_router(secrets_api.router)
     app.include_router(projects_api.router)

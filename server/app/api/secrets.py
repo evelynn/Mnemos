@@ -10,9 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.rbac import require_admin
 from app.db import get_session
-from app.models.auth import Secret
+from app.models.auth import Secret, User
 from app.safety.crypto import decrypt, encrypt
+from app.safety.probe import probe_tcp
 
 router = APIRouter(prefix="/api/v1/secrets", tags=["secrets"])
 
@@ -67,8 +69,8 @@ async def list_secrets(
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_secret(
     body: SecretCreate,
-    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_admin),
 ) -> SecretOut:
     ciphertext, iv = encrypt(body.value)
     secret = Secret(
@@ -96,8 +98,8 @@ async def create_secret(
 async def update_secret(
     secret_id: uuid.UUID,
     body: SecretUpdate,
-    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_admin),
 ) -> SecretOut:
     secret = (
         await db.execute(select(Secret).where(Secret.id == secret_id))
@@ -125,8 +127,8 @@ async def update_secret(
 @router.delete("/{secret_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_secret(
     secret_id: uuid.UUID,
-    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_admin),
 ) -> None:
     result = await db.execute(delete(Secret).where(Secret.id == secret_id))
     if result.rowcount == 0:
@@ -140,13 +142,15 @@ async def delete_secret(
 @router.post("/{secret_id}/test")
 async def test_secret(
     secret_id: uuid.UUID,
-    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_admin),
 ) -> SecretTestResult:
-    """Phase-1 placeholder test: only verifies that the secret decrypts.
+    """Verify the secret is readable and, for DB secrets, TCP-reachable.
 
-    Live DB connection probes are wired in TKT covered in Week 4 alongside
-    the SQL analyzers, when the ``ggoss-sql-mssql`` connector lands.
+    Full driver-level authentication runs inside the analyzer container
+    on the first ``live_schema`` call (spec §7.3/§7.4 keeps the platform
+    process isolated from production DBs). This endpoint catches the
+    common misconfigurations (bad host, wrong port, firewall) up front.
     """
     secret = (
         await db.execute(select(Secret).where(Secret.id == secret_id))
@@ -154,12 +158,33 @@ async def test_secret(
     if secret is None:
         raise HTTPException(status_code=404, detail="not_found")
     try:
-        decrypt(secret.ciphertext, secret.iv)
-        ok = True
-        message = "secret_decrypts_ok"
+        plaintext = decrypt(secret.ciphertext, secret.iv)
     except Exception as exc:  # noqa: BLE001
         ok = False
         message = f"decrypt_failed: {exc.__class__.__name__}"
+        now = datetime.utcnow()
+        await db.execute(
+            update(Secret)
+            .where(Secret.id == secret_id)
+            .values(last_tested_at=now, last_test_result=message)
+        )
+        await db.commit()
+        return SecretTestResult(ok=ok, message=message, tested_at=now)
+
+    if secret.kind == "db_connection":
+        # Connection strings may include either mssql:// or oracle:// scheme,
+        # or driver-specific ADO/EasyConnect forms. ``probe_tcp`` tries both.
+        kind_hint = "mssql" if "mssql" in plaintext.lower() or "sqlserver" in plaintext.lower() else "oracle"
+        result = await probe_tcp(kind_hint, plaintext)
+        ok = result.ok
+        message = (
+            f"{result.message} ({result.host}:{result.port})"
+            if result.host
+            else result.message
+        )
+    else:
+        ok = True
+        message = "secret_decrypts_ok"
     now = datetime.utcnow()
     await db.execute(
         update(Secret)

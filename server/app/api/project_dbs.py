@@ -14,7 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.rbac import require_admin
 from app.db import get_session
+from app.models.auth import User
 from app.models.projects import ProjectDB
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}/dbs", tags=["project_dbs"])
@@ -90,8 +92,8 @@ async def list_project_dbs(
 async def create_project_db(
     project_id: uuid.UUID,
     body: ProjectDBCreate,
-    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_admin),
 ) -> ProjectDBOut:
     row = ProjectDB(
         project_id=project_id,
@@ -145,8 +147,8 @@ async def update_project_db(
     project_id: uuid.UUID,
     db_id: uuid.UUID,
     body: ProjectDBUpdate,
-    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_admin),
 ) -> ProjectDBOut:
     row = (
         await db.execute(
@@ -186,8 +188,8 @@ async def update_project_db(
 async def delete_project_db(
     project_id: uuid.UUID,
     db_id: uuid.UUID,
-    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_admin),
 ) -> None:
     result = await db.execute(
         delete(ProjectDB).where(
