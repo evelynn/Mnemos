@@ -64,7 +64,6 @@ def _unchanged(prev: Summary | None, evidence: list[dict[str, Any]]) -> bool:
     """True if the previous summary's evidence hash matches the new evidence."""
     if prev is None or not prev.claims:
         return False
-    existing = prev.open_questions or []  # reuse unused column? no — use marker claim
     prev_hash = None
     for c in prev.claims:
         if isinstance(c, dict) and c.get("claim") == _HASH_KEY:

@@ -13,6 +13,12 @@
       <a href="/findings" class="{% if active_tab == 'findings' %}active{% endif %}">Findings</a>
       <a href="/audit" class="{% if active_tab == 'audit' %}active{% endif %}">Audit</a>
       <a href="/settings" class="{% if active_tab == 'settings' %}active{% endif %}">Settings</a>
+      {% if user.role == 'admin' %}
+      <div class="nav-section muted">Admin</div>
+      <a href="/organizations" class="{% if active_tab == 'organizations' %}active{% endif %}">Organizations</a>
+      <a href="/sso" class="{% if active_tab == 'sso' %}active{% endif %}">SSO / OIDC</a>
+      <a href="/gdpr" class="{% if active_tab == 'gdpr' %}active{% endif %}">GDPR tools</a>
+      {% endif %}
     </nav>
     <form method="post" action="/logout" class="logout-form">
       <span class="muted">{{ user.username }}</span>

@@ -1,0 +1,100 @@
+"""Shared pytest fixtures.
+
+Splits the suite into two tiers so unit tests stay trivially runnable:
+- Tier 1 (default): pure-function tests, no fixtures, no services.
+- Tier 2 (marked ``integration``): spin up a real Postgres + Redis (from
+  docker-compose or the CI service containers) and drive the FastAPI app
+  through ``httpx.AsyncClient``. Each test runs inside its own savepoint
+  so side effects don't leak between cases.
+
+Run only unit tests: ``pytest -m "not integration"`` (default in CI if
+Postgres is unavailable).
+Run everything:    ``pytest``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import uuid
+from collections.abc import AsyncIterator
+
+import pytest
+import pytest_asyncio
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip ``integration`` tests when DATABASE_URL isn't reachable.
+
+    Keeps ``pytest`` green on a laptop with nothing running.
+    """
+    if os.getenv("MNEMOS_SKIP_INTEGRATION") == "1":
+        skip_marker = pytest.mark.skip(reason="MNEMOS_SKIP_INTEGRATION=1")
+        for item in items:
+            if "integration" in item.keywords:
+                item.add_marker(skip_marker)
+
+
+@pytest.fixture(scope="session")
+def event_loop():
+    """Session-scoped loop so async fixtures can share resources."""
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
+
+
+@pytest_asyncio.fixture
+async def db_session() -> AsyncIterator:
+    """Open a SAVEPOINT-wrapped session and roll it back on teardown.
+
+    Every integration test that wants to touch the database should use
+    this fixture rather than ``app.db.SessionLocal`` directly — the
+    wrapper keeps tests isolated.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db import SessionLocal, engine
+
+    async with engine.connect() as connection:
+        trans = await connection.begin()
+        async_session = AsyncSession(bind=connection, expire_on_commit=False)
+        try:
+            yield async_session
+        finally:
+            await async_session.close()
+            await trans.rollback()
+
+    # Silence SQLAlchemy warnings about unclosed resources in CI.
+    _ = SessionLocal
+
+
+@pytest_asyncio.fixture
+async def http_client():
+    """Provide an ``httpx.AsyncClient`` bound to the FastAPI app."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.main import app
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        yield client
+
+
+@pytest_asyncio.fixture
+async def admin_user(db_session):
+    """Create a throwaway admin user and yield it.
+
+    The outer SAVEPOINT rollback removes the row at teardown.
+    """
+    from app.auth.passwords import hash_password
+    from app.models.auth import User
+
+    user = User(
+        username=f"admin-{uuid.uuid4().hex[:8]}",
+        password_hash=hash_password("pw-test-123456"),
+        role="admin",
+    )
+    db_session.add(user)
+    await db_session.flush()
+    return user

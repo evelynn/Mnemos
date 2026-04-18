@@ -8,7 +8,9 @@ Design rationale: ``docs/analysis-strategy.md``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -206,6 +208,113 @@ async def _run_analyzer_stage(
         stage.set_stats({k: totals.get(k, 0) for k in ("symbols", "edges", "contracts", "data_entities")})
 
 
+async def _run_db_live_schema_stages(
+    bus: ProgressBus,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    position: int,
+    totals: dict[str, int],
+) -> int:
+    """One ``live_schema`` stage per registered ProjectDB.
+
+    Each ProjectDB row carries a ``kind`` (mssql/oracle) which selects
+    the matching analyzer binary. The plaintext connection string is
+    decrypted from the linked Secret and passed via ``--conn-ref`` so
+    the analyzer (not the platform) opens the DB connection — the
+    spec §7.3/§7.4 isolation invariant.
+    """
+    from app.data_sampler.maintenance import is_within_windows
+    from app.models.projects import ProjectDB
+    from app.models.auth import Secret
+    from app.safety.crypto import decrypt
+    from sqlalchemy import select
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ProjectDB).where(ProjectDB.project_id == project_id)
+        )
+        pdbs = result.scalars().all()
+
+    for pdb in pdbs:
+        position += 1
+        # Honour the per-DB maintenance window if one is configured;
+        # the spec's "DMV-heavy verbs only at quiet hours" guarantee.
+        if not is_within_windows(list(pdb.maintenance_windows or [])):
+            async with StageTracker(
+                bus, run_id, project_id,
+                f"live_schema:{pdb.kind}:{pdb.display_name}",
+                language=pdb.kind, position=position,
+            ) as stage:
+                stage.set_stats({"skipped": True, "reason": "outside_maintenance_window"})
+            continue
+
+        runner = runner_for(pdb.kind)
+        if runner is None:
+            async with StageTracker(
+                bus, run_id, project_id,
+                f"live_schema:{pdb.kind}:{pdb.display_name}",
+                language=pdb.kind, position=position,
+            ) as stage:
+                stage.set_stats({"skipped": True, "reason": "no_analyzer"})
+            continue
+
+        # Decrypt the connection string out-of-band; never log it.
+        conn = None
+        if pdb.secret_id is not None:
+            async with SessionLocal() as session:
+                secret = (
+                    await session.execute(
+                        select(Secret).where(Secret.id == pdb.secret_id)
+                    )
+                ).scalar_one_or_none()
+                if secret is not None:
+                    try:
+                        conn = decrypt(secret.ciphertext, secret.iv)
+                    except Exception:
+                        conn = None
+        if conn is None:
+            async with StageTracker(
+                bus, run_id, project_id,
+                f"live_schema:{pdb.kind}:{pdb.display_name}",
+                language=pdb.kind, position=position,
+            ) as stage:
+                stage.set_stats({"skipped": True, "reason": "no_secret_or_decrypt_failed"})
+            continue
+
+        async with StageTracker(
+            bus, run_id, project_id,
+            f"live_schema:{pdb.kind}:{pdb.display_name}",
+            language=pdb.kind, position=position, time_budget_sec=900,
+        ) as stage:
+            accept = _VERB_ACCEPT.get("live_schema", set())
+            async with SessionLocal() as session:
+                # Pass the connection string via env, not argv, so
+                # ``ps``/process listings never expose the credential.
+                async for rec in runner.run(
+                    "live_schema",
+                    pdb.component_id,
+                    env={"MNEMOS_DB_CONN": conn},
+                ):
+                    if rec.stream == "stderr":
+                        totals["errors"] += 1
+                        continue
+                    before = sum(totals.values())
+                    await _record_payload(
+                        session,
+                        project_id=project_id,
+                        payload=rec.payload,
+                        accept_kinds=accept,
+                        totals=totals,
+                    )
+                    after = sum(totals.values())
+                    if after > before:
+                        await stage.increment(after - before)
+                await session.commit()
+            stage.set_stats({"data_entities": totals.get("data_entities", 0)})
+
+    return position
+
+
 async def run_ingest(
     ctx: dict,
     project_id_str: str,
@@ -250,6 +359,13 @@ async def run_ingest(
                     await _run_analyzer_stage(
                         bus, project_id, run_id, language, verb, path, position, totals
                     )
+
+            # Stage L0-DB: live database schema for every registered
+            # ProjectDB. Skipped silently when no DBs are bound to the
+            # project so single-language projects still work.
+            position = await _run_db_live_schema_stages(
+                bus, project_id, run_id, position, totals
+            )
 
             # Stage: Findings reconciliation.
             position += 1
@@ -313,6 +429,12 @@ async def run_ingest(
             project_id=project_id,
             details=totals,
         )
+        try:
+            from app.obs.metrics import analysis_runs_total
+
+            analysis_runs_total.labels(status="completed").inc()
+        except Exception:
+            pass
         await bus.publish(run_id, {"event": "run_completed", **totals})
     except Exception as exc:  # noqa: BLE001
         log.exception("run_ingest failed")
@@ -325,15 +447,47 @@ async def run_ingest(
                 error_log=str(exc),
                 stats=totals,
             )
+        try:
+            from app.obs.metrics import analysis_runs_total
+
+            analysis_runs_total.labels(status="failed").inc()
+        except Exception:
+            pass
         await bus.publish(run_id, {"event": "run_failed", "error": str(exc)})
+
+
+_HEARTBEAT_KEY = "mnemos:worker:heartbeat"
+_HEARTBEAT_INTERVAL_SEC = 15
+
+
+async def _heartbeat_loop(ctx: dict) -> None:
+    """Writes ``now()`` to a redis key every N seconds so the platform's
+    ``/health/ready`` endpoint can flag a dead worker.
+    """
+    from app.orchestrator.redis_pool import get_redis
+
+    redis = await get_redis()
+    try:
+        while True:
+            await redis.set(_HEARTBEAT_KEY, str(time.time()), ex=_HEARTBEAT_INTERVAL_SEC * 4)
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_SEC)
+    except asyncio.CancelledError:
+        return
 
 
 async def _startup(ctx: dict) -> None:
     ctx["progress"] = ProgressBus()
+    ctx["heartbeat_task"] = asyncio.create_task(_heartbeat_loop(ctx))
 
 
 async def _shutdown(ctx: dict) -> None:
-    pass
+    task = ctx.get("heartbeat_task")
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 class WorkerSettings:

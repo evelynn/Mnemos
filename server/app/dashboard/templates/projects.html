@@ -2,7 +2,78 @@
 {% block title %}Projects — Mnemos{% endblock %}
 {% block content %}
 <header class="page-head"><h1>Projects</h1></header>
-<div hx-get="/api/v1/projects" hx-trigger="load" hx-swap="innerHTML" id="projects-list">
-  <p class="muted">Loading projects…</p>
-</div>
+
+<section>
+  <h2>Register project</h2>
+  <form onsubmit="return createProject(event)">
+    <label>Name<input type="text" name="name" required /></label>
+    <label>GitLab project ID<input type="number" name="gitlab_project_id" required min="1" /></label>
+    <label>GitLab URL<input type="url" name="gitlab_url" required placeholder="https://gitlab.example.com/group/repo" /></label>
+    <label>Default branch<input type="text" name="default_branch" value="main" /></label>
+    <label>Languages
+      <select name="languages" multiple required size="2">
+        <option value="csharp">csharp</option>
+        <option value="typescript">typescript</option>
+      </select>
+    </label>
+    <button type="submit" class="primary">Create</button>
+  </form>
+  <pre id="create-result" class="muted"></pre>
+</section>
+
+<section>
+  <h2>Projects in your organisation</h2>
+  <button class="primary" onclick="loadProjects()">Refresh</button>
+  <div id="projects-list"><p class="muted">Click refresh.</p></div>
+</section>
+
+<script>
+async function createProject(ev) {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const langs = fd.getAll("languages");
+  const r = await fetch("/api/v1/projects", {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({
+      name: fd.get("name"),
+      gitlab_project_id: parseInt(fd.get("gitlab_project_id"), 10),
+      gitlab_url: fd.get("gitlab_url"),
+      default_branch: fd.get("default_branch") || "main",
+      languages: langs,
+    }),
+  });
+  document.getElementById("create-result").textContent = `HTTP ${r.status}\n${await r.text()}`;
+  if (r.ok) { ev.target.reset(); loadProjects(); }
+  return false;
+}
+
+async function loadProjects() {
+  const r = await fetch("/api/v1/projects");
+  const out = document.getElementById("projects-list");
+  if (!r.ok) {
+    out.innerHTML = `<p class="error">HTTP ${r.status}</p>`;
+    return;
+  }
+  const rows = await r.json();
+  if (!rows.length) {
+    out.innerHTML = '<p class="muted">No projects in your organisation.</p>';
+    return;
+  }
+  let html = '<table class="data"><thead><tr><th>Name</th><th>Languages</th><th>Branch</th><th>ID</th><th></th></tr></thead><tbody>';
+  for (const p of rows) {
+    html += `<tr>
+      <td>${p.name}</td>
+      <td>${(p.languages || []).join(", ")}</td>
+      <td><code>${p.default_branch}</code></td>
+      <td><code class="muted">${p.id}</code></td>
+      <td><a href="/analysis?project=${p.id}">Analyse</a></td>
+    </tr>`;
+  }
+  html += "</tbody></table>";
+  out.innerHTML = html;
+}
+
+loadProjects();
+</script>
 {% endblock %}

@@ -10,10 +10,52 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.org_scope import same_org
+from app.auth.rbac import require_operator
 from app.db import get_session
 from app.gitlab_client.mr import create_mr_from_worktree
+from app.models.auth import User
 from app.models.plans import DiffSubmission, Plan
+from app.models.projects import Project
 from app.safety.review import run_pipeline
+
+
+async def _resolve_plan_in_user_org(
+    db: AsyncSession, plan_id: uuid.UUID, user
+) -> Plan:
+    """Return the plan iff it sits in the caller's organisation.
+
+    Raises 404 (not 403) on mismatch so we don't leak plan-id existence
+    across tenants. Used by every diffs endpoint that touches a plan_id
+    or a submission_id, since submissions inherit their plan's org.
+    """
+    plan = (
+        await db.execute(select(Plan).where(Plan.id == plan_id))
+    ).scalar_one_or_none()
+    if plan is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    project_org = (
+        await db.execute(
+            select(Project.organization_id).where(Project.id == plan.project_id)
+        )
+    ).scalar_one_or_none()
+    if not same_org(user, project_org):
+        raise HTTPException(status_code=404, detail="not_found")
+    return plan
+
+
+async def _resolve_submission_in_user_org(
+    db: AsyncSession, submission_id: uuid.UUID, user
+) -> tuple[DiffSubmission, Plan]:
+    submission = (
+        await db.execute(
+            select(DiffSubmission).where(DiffSubmission.id == submission_id)
+        )
+    ).scalar_one_or_none()
+    if submission is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    plan = await _resolve_plan_in_user_org(db, submission.plan_id, user)
+    return submission, plan
 
 router = APIRouter(tags=["diffs"])
 
@@ -62,9 +104,7 @@ async def submit_diff(
     user: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> DiffOut:
-    plan = (await db.execute(select(Plan).where(Plan.id == body.plan_id))).scalar_one_or_none()
-    if plan is None:
-        raise HTTPException(status_code=404, detail="plan_not_found")
+    plan = await _resolve_plan_in_user_org(db, body.plan_id, user)
 
     report = await run_pipeline(
         db,
@@ -102,14 +142,10 @@ async def submit_diff(
 @router.get("/api/v1/diff_submissions/{submission_id}")
 async def get_submission(
     submission_id: uuid.UUID,
-    _: CurrentUser,
+    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> DiffOut:
-    submission = (
-        await db.execute(select(DiffSubmission).where(DiffSubmission.id == submission_id))
-    ).scalar_one_or_none()
-    if submission is None:
-        raise HTTPException(status_code=404, detail="not_found")
+    submission, _plan = await _resolve_submission_in_user_org(db, submission_id, user)
     return _out(submission)
 
 
@@ -121,19 +157,14 @@ class ApproveBody(BaseModel):
 @router.post("/api/v1/diff_submissions/{submission_id}/approve")
 async def approve_submission(
     submission_id: uuid.UUID,
-    user: CurrentUser,
     body: ApproveBody | None = None,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_operator),
 ) -> DiffOut:
-    submission = (
-        await db.execute(select(DiffSubmission).where(DiffSubmission.id == submission_id))
-    ).scalar_one_or_none()
-    if submission is None:
-        raise HTTPException(status_code=404, detail="not_found")
-    plan = (
-        await db.execute(select(Plan).where(Plan.id == submission.plan_id))
-    ).scalar_one_or_none()
-    if plan is None or plan.worktree_path is None:
+    # Approval kicks off a GitLab MR — operator role minimum so a
+    # viewer can't push code into the source repo.
+    submission, plan = await _resolve_submission_in_user_org(db, submission_id, user)
+    if plan.worktree_path is None:
         raise HTTPException(status_code=400, detail="plan_or_worktree_missing")
 
     findings = submission.auto_review_findings or {}
@@ -187,14 +218,10 @@ async def approve_submission(
 @router.post("/api/v1/diff_submissions/{submission_id}/reject")
 async def reject_submission(
     submission_id: uuid.UUID,
-    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_operator),
 ) -> DiffOut:
-    submission = (
-        await db.execute(select(DiffSubmission).where(DiffSubmission.id == submission_id))
-    ).scalar_one_or_none()
-    if submission is None:
-        raise HTTPException(status_code=404, detail="not_found")
+    submission, _plan = await _resolve_submission_in_user_org(db, submission_id, user)
     submission.status = "rejected"
     submission.approved_at = datetime.utcnow()
     submission.approved_by = f"user:{user.id}"

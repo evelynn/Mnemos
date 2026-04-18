@@ -18,6 +18,12 @@
     <label>Project ID<input type="text" name="project_id" required placeholder="uuid" /></label>
     <label>Source path<input type="text" name="source_path" required value="/work" /></label>
     <label>Git SHA<input type="text" name="git_sha" value="HEAD" /></label>
+    <label>Scope
+      <select name="scope">
+        <option value="full" selected>full (L0 extract + findings + L1–L3)</option>
+        <option value="continuation">continuation (skip L0; summaries only)</option>
+      </select>
+    </label>
     <button type="submit" class="primary">Start analysis</button>
   </form>
   <pre id="trigger-result" class="muted"></pre>
@@ -72,7 +78,7 @@ async function triggerRun(ev) {
     headers: {"content-type": "application/json"},
     body: JSON.stringify({
       git_sha: fd.get("git_sha"),
-      scope: "full",
+      scope: fd.get("scope") || "full",
       source_path: fd.get("source_path"),
     }),
   });

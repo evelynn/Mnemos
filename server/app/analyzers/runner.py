@@ -44,17 +44,28 @@ class AnalyzerRunner:
         *,
         extra_args: list[str] | None = None,
         cwd: str | Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> AsyncIterator[RunRecord]:
         args = [self.binary, verb, str(path)]
         if extra_args:
             args.extend(extra_args)
 
-        log.info("spawning analyzer: %s", " ".join(args))
+        # Log the binary + verb + path but never extra_args, since the
+        # caller may put credentials there (DB live_schema --conn-ref).
+        log.info("spawning analyzer: %s %s %s", self.binary, verb, str(path))
+
+        proc_env = None
+        if env is not None:
+            import os as _os
+
+            proc_env = {**_os.environ, **env}
+
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd) if cwd else None,
+            env=proc_env,
         )
 
         async def _drain(stream: asyncio.StreamReader | None, tag: str):

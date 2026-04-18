@@ -1,0 +1,68 @@
+{
+  "title": "Mnemos Overview",
+  "uid": "mnemos-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "HTTP traffic (rps, by status bucket)",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(mnemos_http_requests_total[1m]))",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Error rate (5xx, per minute)",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(rate(mnemos_http_requests_total{status=\"5xx\"}[1m]))",
+          "legendFormat": "5xx rps"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Latency (p50 / p95 / p99, seconds)",
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(mnemos_http_request_duration_seconds_bucket[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(mnemos_http_request_duration_seconds_bucket[5m])))", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(mnemos_http_request_duration_seconds_bucket[5m])))", "legendFormat": "p99"}
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Rate limiter rejections (last 1h)",
+      "gridPos": {"x": 12, "y": 8, "w": 6, "h": 8},
+      "targets": [
+        {"expr": "sum(increase(mnemos_rate_limited_total[1h]))"}
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Analysis runs completed (last 24h)",
+      "gridPos": {"x": 18, "y": 8, "w": 6, "h": 8},
+      "targets": [
+        {"expr": "sum by (status) (increase(mnemos_analysis_runs_total[24h]))", "legendFormat": "{{status}}"}
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
+    }
+  ]
+}

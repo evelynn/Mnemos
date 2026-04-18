@@ -70,7 +70,7 @@ async def login_submit(
         max_age=_settings.session_max_age_sec,
         httponly=True,
         samesite="lax",
-        secure=False,
+        secure=_settings.session_cookie_secure,
         path="/",
     )
     return redirect
@@ -119,6 +119,9 @@ async def tab_page(
         "findings",
         "audit",
         "settings",
+        "organizations",
+        "gdpr",
+        "sso",
     }
     if tab not in valid:
         raise HTTPException(status_code=404)

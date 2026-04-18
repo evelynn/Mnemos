@@ -4,20 +4,32 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.org_scope import require_project_org
+from app.auth.rbac import require_operator
 from app.data_sampler import MaskingEngine, compute_column_stats, mask_rows
+from app.data_sampler.project_db import (
+    PolicyViolation,
+    enforce_policy,
+    requires_awr,
+    resolve_project_db,
+)
 from app.db import get_session
+from app.models.auth import User
 from app.models.graph import Node
 from app.models.samples import DataQueryLog, DataSample
+from app.safety.ratelimit import actor_key, enforce as rl_enforce
 
 router = APIRouter(
-    prefix="/api/v1/projects/{project_id}/data_entities", tags=["data"]
+    prefix="/api/v1/projects/{project_id}/data_entities",
+    tags=["data"],
+    dependencies=[Depends(require_project_org())],
 )
 
 
@@ -158,6 +170,7 @@ async def refresh_sample(
     entity_id: str,
     body: SampleIngest,
     user: CurrentUser,
+    request: Request,
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """Ingest a freshly-captured raw sample.
@@ -166,6 +179,9 @@ async def refresh_sample(
     the platform performs masking and stat computation server-side so raw
     values never linger in storage.
     """
+    # Samples hit the source DB via the analyzer, so keep them bounded.
+    request.state.user = user
+    await rl_enforce(actor_key(request, "data.sample"), limit=20, window_sec=60)
     entity = (
         await db.execute(
             select(Node).where(
@@ -183,7 +199,17 @@ async def refresh_sample(
             status_code=403, detail="sensitive_entity_sample_disallowed"
         )
 
-    masked_rows, _col_flags, any_masked = mask_rows(body.columns, body.rows)
+    # Resolve per-project-DB masking overrides when the entity advertises
+    # its DB component id (spec §12.2). Absence falls back to defaults so
+    # projects without explicit bindings still mask PII.
+    db_component = (entity.data or {}).get("component_id")
+    engine: MaskingEngine | None = None
+    if db_component:
+        pdb = await resolve_project_db(db, project_id, db_component)
+        if pdb is not None:
+            engine = MaskingEngine.from_project_db(pdb.masking_rules)
+
+    masked_rows, _col_flags, any_masked = mask_rows(body.columns, body.rows, engine)
     stats = compute_column_stats(body.columns, masked_rows)
 
     sample = DataSample(
@@ -214,7 +240,11 @@ async def refresh_sample(
     }
 
 
-query_router = APIRouter(prefix="/api/v1/projects/{project_id}/data", tags=["data"])
+query_router = APIRouter(
+    prefix="/api/v1/projects/{project_id}/data",
+    tags=["data"],
+    dependencies=[Depends(require_project_org())],
+)
 
 
 class QueryRequest(BaseModel):
@@ -230,8 +260,9 @@ class QueryRequest(BaseModel):
 async def query_data(
     project_id: uuid.UUID,
     body: QueryRequest,
-    user: CurrentUser,
+    request: Request,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_operator),
 ) -> dict[str, Any]:
     """Accept a pre-executed read-only query result, mask it, and log it.
 
@@ -239,10 +270,36 @@ async def query_data(
     ggoss-sql-oracle ``query``) so the platform's own process stays isolated
     from production DBs; this endpoint is the guarded landing zone.
     """
+    # 30 queries per minute per user: the landing zone is fronting
+    # production DBs, so even operators need a ceiling.
+    request.state.user = user
+    await rl_enforce(actor_key(request, "data.query"), limit=30, window_sec=60)
     if not body.sql.strip().lower().startswith("select"):
         raise HTTPException(status_code=400, detail="only_select_allowed")
 
-    masked_rows, _flags, any_masked = mask_rows(body.columns, body.rows)
+    # Per-project-DB policy: block sensitive tables, enforce AWR consent
+    # and maintenance windows, and apply masking overrides
+    # (spec §7.4, §12.2, §14.2). No row means the platform falls back to
+    # defaults — operators are expected to register DBs before first use.
+    pdb = await resolve_project_db(db, project_id, body.db_component_id)
+    engine: MaskingEngine | None = None
+    awr_needed = requires_awr(body.sql)
+    try:
+        enforce_policy(pdb, awr_required=awr_needed, sql=body.sql)
+    except PolicyViolation as exc:
+        await audit_record(
+            actor=f"user:{user.id}",
+            action=f"data.{exc.code}",
+            target=body.db_component_id,
+            project_id=project_id,
+            details={"purpose": body.purpose, "awr": awr_needed},
+        )
+        status_code = 423 if exc.code == "outside_maintenance_window" else 403
+        raise HTTPException(status_code=status_code, detail=exc.code)
+    if pdb is not None:
+        engine = MaskingEngine.from_project_db(pdb.masking_rules)
+
+    masked_rows, _flags, any_masked = mask_rows(body.columns, body.rows, engine)
 
     log = DataQueryLog(
         project_id=project_id,
