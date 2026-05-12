@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
-from typing import Literal
+from datetime import datetime, timezone
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -16,9 +16,11 @@ from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
 from app.auth.org_scope import require_project_org
 from app.auth.rbac import require_admin
+from app.data_sampler.probe import ProbeResult, probe_via_analyzer
 from app.db import get_session
-from app.models.auth import User
+from app.models.auth import Secret, User
 from app.models.projects import ProjectDB
+from app.safety.crypto import decrypt
 
 router = APIRouter(
     prefix="/api/v1/projects/{project_id}/dbs",
@@ -62,6 +64,9 @@ class ProjectDBOut(BaseModel):
     sensitive_tables: list[str]
     masking_rules: dict
     maintenance_windows: list[str]
+    last_probe_at: datetime | None
+    last_probe_result: dict | None
+    disabled_at: datetime | None
     created_at: datetime
 
 
@@ -77,8 +82,52 @@ def _to_out(row: ProjectDB) -> ProjectDBOut:
         sensitive_tables=list(row.sensitive_tables or []),
         masking_rules=dict(row.masking_rules or {}),
         maintenance_windows=list(row.maintenance_windows or []),
+        last_probe_at=row.last_probe_at,
+        last_probe_result=dict(row.last_probe_result or {}) if row.last_probe_result else None,
+        disabled_at=row.disabled_at,
         created_at=row.created_at,
     )
+
+
+async def _resolve_conn_ref(db: AsyncSession, secret_id: uuid.UUID | None) -> str | None:
+    """Decrypt the linked Secret without ever holding the plaintext on the row.
+
+    Returns ``None`` if no secret is wired up or decryption fails — the
+    probe handler then surfaces an explicit ``secret_unavailable`` error
+    instead of silently degrading to "deferred".
+    """
+    if secret_id is None:
+        return None
+    secret = (
+        await db.execute(select(Secret).where(Secret.id == secret_id))
+    ).scalar_one_or_none()
+    if secret is None:
+        return None
+    try:
+        return decrypt(secret.ciphertext, secret.iv)
+    except Exception:
+        return None
+
+
+async def _probe_or_412(
+    db: AsyncSession, kind: str, secret_id: uuid.UUID | None
+) -> ProbeResult:
+    """Run a read-only probe and translate any unsafe result into HTTP 412."""
+    conn = await _resolve_conn_ref(db, secret_id)
+    if conn is None:
+        raise HTTPException(
+            status_code=412,
+            detail={"code": "secret_unavailable",
+                    "message": "no usable secret to probe — wire a secret first"},
+        )
+    result = await probe_via_analyzer(kind, conn)
+    if not result.is_acceptable():
+        # Surface enough info to debug, but never the connection string.
+        raise HTTPException(
+            status_code=412,
+            detail={"code": "probe_failed", "result": result.as_jsonable()},
+        )
+    return result
 
 
 @router.get("")
@@ -102,6 +151,13 @@ async def create_project_db(
     db: AsyncSession = Depends(get_session),
     user: User = Depends(require_admin),
 ) -> ProjectDBOut:
+    # Spec §2.5 / §2.8: confirm the credential is read-only *before*
+    # we accept the binding. The probe interrogates the live DB via the
+    # analyzer subprocess (the platform itself never opens a connection
+    # to the project DB) and refuses with 412 if write access cannot
+    # be ruled out. A 24-hour cache window for the result is enforced
+    # by the orchestrator, not here.
+    probe = await _probe_or_412(db, body.kind, body.secret_id)
     row = ProjectDB(
         project_id=project_id,
         kind=body.kind,
@@ -112,6 +168,8 @@ async def create_project_db(
         sensitive_tables=body.sensitive_tables,
         masking_rules=body.masking_rules,
         maintenance_windows=body.maintenance_windows,
+        last_probe_at=datetime.now(tz=timezone.utc),
+        last_probe_result=probe.as_jsonable(),
     )
     db.add(row)
     try:
@@ -125,9 +183,61 @@ async def create_project_db(
         action="project_db.create",
         target=str(row.id),
         project_id=project_id,
-        details={"component_id": row.component_id, "kind": row.kind},
+        details={
+            "component_id": row.component_id,
+            "kind": row.kind,
+            "probe_status": probe.status,
+            "probe_latency_ms": probe.latency_ms,
+        },
     )
     return _to_out(row)
+
+
+@router.post("/{db_id}/probe")
+async def reprobe_project_db(
+    project_id: uuid.UUID,
+    db_id: uuid.UUID,
+    db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_admin),
+) -> dict[str, Any]:
+    """Refresh the read-only probe and persist the new result.
+
+    Used by the daily ``probe_recheck`` cron job (PR-4) and by operators
+    after rotating credentials. Marks the binding as disabled when the
+    new probe cannot confirm read-only access.
+    """
+    row = (
+        await db.execute(
+            select(ProjectDB).where(
+                ProjectDB.id == db_id, ProjectDB.project_id == project_id
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    conn = await _resolve_conn_ref(db, row.secret_id)
+    if conn is None:
+        raise HTTPException(
+            status_code=412,
+            detail={"code": "secret_unavailable"},
+        )
+    result = await probe_via_analyzer(row.kind, conn)
+    row.last_probe_at = datetime.now(tz=timezone.utc)
+    row.last_probe_result = result.as_jsonable()
+    if not result.is_acceptable() and row.disabled_at is None:
+        row.disabled_at = row.last_probe_at
+    await db.commit()
+    await audit_record(
+        actor=f"user:{user.id}",
+        action="project_db.probe",
+        target=str(row.id),
+        project_id=project_id,
+        details={
+            "status": result.status,
+            "disabled_at": row.disabled_at.isoformat() if row.disabled_at else None,
+        },
+    )
+    return {"status": result.status, "result": result.as_jsonable()}
 
 
 @router.get("/{db_id}")
