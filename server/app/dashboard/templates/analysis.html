@@ -99,13 +99,24 @@ async function loadRuns(ev) {
   let html = '<table class="data"><thead><tr><th>ID</th><th>Status</th><th>Triggered by</th><th>Git SHA</th><th>Started</th><th>Stats</th><th></th></tr></thead><tbody>';
   for (const r of rows) {
     const stats = r.stats ? JSON.stringify(r.stats) : "";
+    // Tell webhook-driven runs apart from manual ones at a glance —
+    // the audit team flagged the missing distinction in the 3rd round.
+    const tb = String(r.triggered_by || "");
+    let badge;
+    if (tb.startsWith("webhook:")) {
+      badge = `<span class="badge webhook" title="${escapeHtml(tb)}">🔗 webhook</span>`;
+    } else if (tb.startsWith("user:")) {
+      badge = `<span class="badge user" title="${escapeHtml(tb)}">👤 ${escapeHtml(tb.slice(5, 13))}…</span>`;
+    } else {
+      badge = `<span class="badge">${escapeHtml(tb)}</span>`;
+    }
     html += `<tr>
       <td><code>${r.id}</code></td>
       <td><span class="badge ${r.status}">${r.status}</span></td>
-      <td>${r.triggered_by}</td>
-      <td>${r.git_sha}</td>
+      <td>${badge}</td>
+      <td><code>${escapeHtml((r.git_sha || "").slice(0, 12))}</code></td>
       <td>${r.started_at || ""}</td>
-      <td><pre>${stats}</pre></td>
+      <td><pre class="code">${escapeHtml(stats)}</pre></td>
       <td><button onclick="monitorId('${r.id}')">Monitor</button></td>
     </tr>`;
   }
@@ -148,6 +159,17 @@ async function monitor() {
       const ev = JSON.parse(e.data);
       if (ev.event && ev.event.startsWith("stage_")) {
         await refreshStages(id);
+      }
+      // Surface terminal failure as an assertive toast — the operator
+      // gets a notification even if they've scrolled away from the
+      // pipeline area. 3rd-round audit (시나리오 3 M-5).
+      if (ev.event === "run_failed") {
+        MnemosUI.showToast(
+          `Analysis run failed: ${ev.error || "(no detail)"}`,
+          "error",
+        );
+      } else if (ev.event === "run_completed") {
+        MnemosUI.showToast("Analysis run completed.", "success");
       }
     } catch {}
   });

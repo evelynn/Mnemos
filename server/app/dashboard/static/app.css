@@ -155,6 +155,10 @@ dialog.modal .token-block code {
 }
 dialog.modal .countdown { font-variant-numeric: tabular-nums; }
 
+/* Source-of-truth badge for analysis runs — webhook vs user-triggered. */
+.badge.webhook { background: #d9e6ff; color: #0a3b8c; }
+.badge.user    { background: #e6f4ea; color: #145a1f; }
+
 /* Non-color status cues so colour-blind users get the same signal as
    everyone else. The verdict text is still color-coded but now carries
    a leading glyph too. */
