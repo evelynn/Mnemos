@@ -25,7 +25,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
-from sqlalchemy import select, text, update
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = logging.getLogger(__name__)

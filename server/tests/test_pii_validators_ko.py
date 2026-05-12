@@ -92,7 +92,9 @@ def test_luhn_rejects_short_or_long():
 
 def test_license_format_accepts_canonical():
     assert is_valid_korean_drivers_license("11-23-456789-01")
-    assert is_valid_korean_drivers_license("11234567890123")  # no hyphens
+    # AA(2) + YY(2) + NNNNNN(6) + CC(2) = 12 digits when hyphens are
+    # stripped — the previous expectation of 14 digits was a typo.
+    assert is_valid_korean_drivers_license("112345678901")
 
 
 def test_license_format_rejects_bad_region():

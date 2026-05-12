@@ -22,8 +22,17 @@ def test_email_values_get_replaced():
 
 
 def test_rrn_and_phone_are_masked():
+    # PR-5 introduced ``[PHONE_KR]`` for Korean mobile prefixes (more
+    # specific than the generic ``[PHONE]``); PR-11 made ``[RRN]``
+    # conditional on the checksum and falls back to
+    # ``[UNVERIFIED_NUMERIC_ID]`` otherwise. The value below is
+    # checksum-invalid (the audit team's "1234567" tail is just
+    # decorative), which is the realistic operator-typed-by-hand case.
     rows, _, any_masked = mask_rows(["note"], [["call 010-1234-5678 or 900101-1234567"]])
     assert any_masked
     text = rows[0][0]
-    assert "[PHONE]" in text
-    assert "[RRN]" in text
+    assert "[PHONE_KR]" in text or "[PHONE]" in text
+    # Either a verified RRN or an UNVERIFIED placeholder — but never the
+    # raw digits in the clear.
+    assert "[RRN]" in text or "[UNVERIFIED_NUMERIC_ID]" in text
+    assert "900101-1234567" not in text

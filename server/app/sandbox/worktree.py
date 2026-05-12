@@ -132,11 +132,16 @@ async def compute_diff(plan_id: uuid.UUID) -> str:
     dst = worktree_path(plan_id)
     if not dst.exists():
         return ""
+    # A fallback (no-mirror) worktree is just an empty directory and is
+    # not a git repo; running ``git diff`` there prints the usage banner
+    # to stderr. Match the original "empty diff" contract instead of
+    # leaking the git CLI noise back to callers.
+    if not await _is_git_repo(dst):
+        return ""
     rc, stdout, stderr = await _run_git("diff", "--no-color", cwd=dst)
     if rc != 0:
-        # The previous implementation silently returned an empty diff
-        # on failure; we keep that contract but surface the stderr on
-        # the (rare) error path so an operator can see what broke.
+        # Real git failure path — surface stderr so an operator can
+        # see what broke. Empty stderr stays empty.
         return stderr.decode(errors="replace") if stderr else ""
     return stdout.decode("utf-8", errors="replace")
 

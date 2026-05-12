@@ -8,17 +8,22 @@ mock each counter and assert the relevant code path triggers it.
 
 from __future__ import annotations
 
-import importlib
-
 import pytest
 
 
 @pytest.fixture
 def metrics_module():
-    """Reset prometheus_client globals between tests so counts are local."""
+    """Return the singleton metrics module.
+
+    We deliberately *don't* ``importlib.reload`` here: prometheus_client
+    registers metric objects in a process-global ``CollectorRegistry``,
+    and reloading re-runs the module body which raises
+    ``ValueError: Duplicated timeseries`` against the still-registered
+    originals. Tests share the same registry; counters are additive,
+    not isolated.
+    """
     from app.obs import metrics
 
-    importlib.reload(metrics)
     return metrics
 
 
@@ -67,3 +72,4 @@ def test_break_glass_action_label_values(metrics_module):
     """All three documented actions must be valid label values."""
     for action in ("issued", "consumed", "expired"):
         metrics_module.break_glass_grants_total.labels(action=action).inc()
+

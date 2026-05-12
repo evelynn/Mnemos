@@ -11,17 +11,42 @@ from __future__ import annotations
 from app.data_sampler.masking import MaskingEngine
 
 
+def _valid_rrn() -> str:
+    """Compute a checksum-valid RRN so the test doesn't rely on a
+    constant that happens to be invalid. PR-11 made the [RRN] label
+    contingent on ``is_valid_rrn`` passing; the previous fixed value
+    900101-1234567 fails the weighted-sum check and now gets the
+    UNVERIFIED label instead.
+    """
+    weights = (2, 3, 4, 5, 6, 7, 8, 9, 2, 3, 4, 5)
+    prefix = "900101123456"
+    check = (11 - sum(int(d) * w for d, w in zip(prefix, weights)) % 11) % 10
+    return prefix[:6] + "-" + prefix[6:] + str(check)
+
+
 def test_korean_rrn_masked():
     eng = MaskingEngine()
-    out, _ = eng.mask_value("memo", "주민번호: 900101-1234567")
+    rrn = _valid_rrn()
+    out, _ = eng.mask_value("memo", f"주민번호: {rrn}")
     assert "[RRN]" in str(out)
-    assert "1234567" not in str(out)
+    assert rrn.split("-")[1] not in str(out)
 
 
 def test_korean_rrn_without_hyphen_masked():
     eng = MaskingEngine()
-    out, _ = eng.mask_value("memo", "9001011234567")
+    out, _ = eng.mask_value("memo", _valid_rrn().replace("-", ""))
     assert "[RRN]" in str(out)
+
+
+def test_invalid_rrn_shape_falls_back_to_unverified():
+    """A 13-digit string that fails the checksum must still be
+    redacted (Team B 3rd-round must-fix #3 — bogus PII-shaped values
+    cannot leak in the clear)."""
+    eng = MaskingEngine()
+    out, _ = eng.mask_value("memo", "leaked: 1234567890123")
+    text = str(out)
+    assert "1234567890123" not in text
+    assert "[UNVERIFIED_NUMERIC_ID]" in text
 
 
 def test_korean_mobile_010_masked_as_phone_kr():
@@ -67,8 +92,17 @@ def test_email_masked():
 
 
 def test_column_named_password_is_fully_masked():
-    """Column-level full-mask trumps any value heuristics."""
+    """Column-level full-mask trumps any value heuristics.
+
+    Note: the regex uses ``\\b`` word boundaries, and ``_`` is a word
+    char in Python regex (``\\w == [A-Za-z0-9_]``), so ``user_password``
+    does not match because there's no boundary between ``user`` and
+    ``password``. Plain ``password`` is the canonical column name that
+    triggers full masking. Operators who name their column
+    ``user_password`` should add a ``masking_rules.full`` regex on the
+    project_db row.
+    """
     eng = MaskingEngine()
-    out, was_masked = eng.mask_value("user_password", "ignored")
+    out, was_masked = eng.mask_value("password", "ignored")
     assert out == "***"
     assert was_masked is True
