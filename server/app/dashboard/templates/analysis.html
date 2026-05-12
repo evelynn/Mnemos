@@ -126,7 +126,8 @@ async function loadRuns(ev) {
   }
   const out = document.getElementById("runs");
   if (!Array.isArray(rows) || rows.length === 0) {
-    out.innerHTML = '<p class="muted">No runs yet.</p>';
+    out.innerHTML = '<p class="muted" data-i18n="No runs yet.">No runs yet.</p>';
+    MnemosUI.applyI18n(out);
     return false;
   }
   let html = '<table class="data"><thead><tr><th>ID</th><th>Status</th><th>Triggered by</th><th>Git SHA</th><th>Started</th><th>Stats</th><th></th></tr></thead><tbody>';

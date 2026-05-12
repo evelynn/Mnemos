@@ -131,7 +131,10 @@ ships. Helper text and toasts are the highest-leverage starting points.
 
 ## P2-4 — Relative timestamps
 
-**Status**: deferred.
+**Status**: shipped in PR-20. ``MnemosUI.relativeTime(iso)`` +
+``MnemosUI.hydrateRelativeTimes(scope)`` walk every
+``<time data-ts="…">`` element via ``Intl.RelativeTimeFormat``;
+auto-refresh every 60 s.
 
 Every dashboard page renders raw ISO 8601 (`r.started_at`). Operators
 want "3 minutes ago" / "yesterday" at a glance. Plan:
@@ -146,70 +149,75 @@ want "3 minutes ago" / "yesterday" at a glance. Plan:
 
 ## P2-5 — Colour-blind status glyphs on analysis badges
 
-`app.css` already adds `✓ ⚠ ⛔` glyphs to verdict pills (PR-9). The
-same treatment needs to land on the `.badge.{queued,running,completed,
-failed,cancelled}` set used by the analysis tab. Round 6 audit A4.
+**Status**: shipped in PR-20. Every ``.badge.{queued,running,
+completed,failed,cancelled,disabled,critical,high,medium,low,info}``
+carries a distinct ``::before`` glyph; ``.sse-status.{live,
+disconnected}`` likewise. The verdict pills already had this from
+PR-9.
 
 ---
 
-## P2-6 — Large-result pagination in `data.html`
+## P2-6 — Large-result pagination
 
-When `q-max-rows` is left blank we ship up to 10 000 rows back at
-once and render every one of them into a `<table>`. Operators with
-real-world workloads will need:
-
-* Server: cursor-paginated `/data/query` (or a streaming variant).
-* UI: virtual scroll table — vanilla JS is enough; no framework.
-
-Round 5 audit E3.
+**Status**: client-side shipped in PR-24. ``data.html`` and
+``findings.html`` both render 100 rows per page via a
+DocumentFragment-based ``_show*Page`` cursor. A real
+server-side cursor for ``/data/query`` is the follow-up work that
+stays open; the client-side fix unblocks every operator who hits
+the existing 10 000-row clamp.
 
 ---
 
 ## P2-7 — Dashboard drill-down
 
-Each stat / metric card lights up red/yellow but most have no link to
-the contextual list. "Failed runs (24h): 3" should go to a
-pre-filtered `/analysis?status=failed&since=24h`. Round 6 audit A3.
+**Status**: shipped in PR-22. Every actionable stat / metric card on
+the dashboard is now an ``<a class="stat-card stat-link">`` with
+the matching query string baked in; landing pages
+(``findings.html``, ``analysis.html``, ``audit.html``,
+``diffs.html``, ``settings.html``) auto-apply the filter and, where
+appropriate, auto-dispatch the search.
 
 ---
 
 ## P2-8 — SSE status badge across tabs
 
-The `#sse-status` live/disconnected pill only renders on
-`/analysis`. An operator with the platform open on `/findings` won't
-know their monitoring stream went away. Cross-tab notification via
-`BroadcastChannel("mnemos-sse")` was sketched in round 5; needs the
-companion listener in `_layout.html` and a sticky strip at the top
-of the content area. Round 6 audit A4, S2.
+**Status**: shipped in PR-23. ``BroadcastChannel("mnemos-sse")``
+publishes ``live``/``disconnected``/``idle`` from
+``analysis.html`` and a sticky ``#sse-cross-tab-strip`` in
+``_layout.html`` reveals on every other tab when the state is
+disconnected. Graceful fallback when ``BroadcastChannel`` is
+unavailable (older WebViews).
 
 ---
 
 ## P2-9 — Auto-progression of the onboarding card
 
-`#onboarding-card` lists three steps but does not move the user
-through them — register → analyse → review is a manual click chain.
-Plan:
-
-* Store step state in `sessionStorage` keyed by the active project.
-* After project register, redirect with `?onboard=1` so analysis tab
-  highlights the "Trigger run" form.
-* After first run finishes, the dashboard onboarding card hides
-  permanently for that user.
-
-Round 6 audit S5 / B1.
+**Status**: shipped in PR-21. Step state lives in
+``sessionStorage["mnemos_onboarding_step{1,2,3}_done"]``;
+``projects.html`` marks step 1 on a successful create + reveals an
+inline CTA pointing at ``/analysis?project=<id>&onboard=1``;
+``analysis.html`` pre-fills the run form and marks step 2 on a
+successful trigger; ``findings.html`` marks step 3 when at least one
+row renders; ``dashboard.html`` updates the card's strikethroughs
+live and hides the whole card once every step is done.
 
 ---
 
 ## P2-10 — Authlib / TOTP step-up auth, DPoP
 
+**Status**: out of scope for Phase 2 too — single-operator threat
+model doesn't change between Phase 1 and Phase 2.
+
 The 2nd-round Team B report kept these on a Phase-2 list:
 
-* `pyotp` for break-glass two-eyes step-up (defends against a single
+* ``pyotp`` for break-glass two-eyes step-up (defends against a single
   operator with two OIDC identities).
 * Authlib DPoP (RFC 9449) once the platform fronts external clients.
 
-Both stay out of Phase 1 — single-operator self-host doesn't see the
-threat models these defuse.
+Both stay out — they defuse threat models that don't exist in a
+single-operator self-host deployment. If/when Mnemos starts shipping
+as multi-tenant SaaS, this becomes a Phase 3 item; until then the
+break-glass TTL grant + the audit log are sufficient.
 
 ---
 

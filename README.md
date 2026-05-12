@@ -176,15 +176,29 @@ Mnemos/
         └── phase2_backlog.md       # deferred items (OTLP Tier 2, i18n, …)
 ```
 
-## Deferred work (Phase 2 backlog)
+## Phase 2 status
+
+The 10 P2-* items the 7 self-review rounds deferred have been
+substantially shipped in PR-20 ~ PR-27:
+
+| Item | Status | Landed in |
+|------|--------|-----------|
+| P2-1 OTLP Tier 2 (trace merge) | ✓ initial | PR-25 |
+| P2-2 RuntimeObservation table | ✓ | PR-25 |
+| P2-3 Korean UI (i18n) | ✓ initial wave | PR-26 + PR-27 |
+| P2-4 Relative timestamps | ✓ | PR-20 |
+| P2-5 Colour-blind status glyphs | ✓ | PR-20 |
+| P2-6 Large-result pagination | ✓ client-side | PR-24 |
+| P2-7 Dashboard drill-down | ✓ | PR-22 |
+| P2-8 SSE cross-tab notification | ✓ | PR-23 |
+| P2-9 Onboarding auto-progression | ✓ | PR-21 |
+| P2-10 TOTP / DPoP step-up auth | out of scope | — single-operator threat model |
 
 See [`docs/operator-guide/phase2_backlog.md`](docs/operator-guide/phase2_backlog.md)
-for the items the 7 self-review rounds deliberately deferred — OTLP
-Tier 2 trace merging, Korean UI / i18n, relative-time timestamps,
-colour-blind status glyphs, large-result pagination, dashboard
-drill-down, cross-tab SSE notifications, onboarding auto-progression,
-and TOTP / DPoP step-up auth. Each entry has a P2-* identifier so
-future PRs can link to the spec instead of re-discovering it.
+for the per-item detail, the follow-up scope each shipped item still
+has open (e.g. distributed-trace assembly for P2-1, server-side
+Jinja translation for P2-3), and the explicit "out of scope entirely"
+list (multi-region, marketplace, BYO LLM, mobile).
 
 ## Delivery history (branch `claude/review-project-compliance-X8OEU`)
 
@@ -213,6 +227,26 @@ consecutive rounds raise zero new code defects.
 | 5 | PR-17 | Share-URL guest flow (`sessionStorage`-based hash stash/restore); first-run onboarding card; SSE reconnect with exponential backoff + 50% jitter + `visibilitychange`; `MNEMOS_USER_ROLE_HINT` button gating; DB-aggregate `/api/v1/health/metrics_summary` (replaces process-local Prometheus); CI builds the .NET analyzers and asserts ≥9 integration tests actually collect. |
 | 6 | PR-18 | `submit_diff` now requires operator (closed the viewer can-spam loophole); dashboard auto-redirects `#approve=…` to `/diffs`; SSE failure toast names the Monitor button explicitly; `docs/operator-guide/phase2_backlog.md` consolidates the 10 deferred items. |
 | 7 | PR-19 | Doc cleanup — README links the Phase 2 backlog and the test counts match reality (212 unit + 16 integration). Round 7 found zero code defects; the cycle terminates here. |
+
+### Phase 2 sprint (PR-20 → PR-27)
+
+After the audit cycle converged, the deferred Phase 2 items were
+implemented one-per-PR (with two pair-shipped where the changes
+touched the same files):
+
+| PRs | Phase-2 items | Headline |
+|-----|---------------|----------|
+| PR-20 | P2-4 + P2-5 | Relative timestamps via ``Intl.RelativeTimeFormat`` + colour-blind glyphs on every ``.badge.*`` and ``.sse-status.*`` state |
+| PR-21 | P2-9 | Onboarding card promoted from a static 3-step wall to a session-stored state machine that strikes through completed steps and hides itself when all three are done |
+| PR-22 | P2-7 | Every actionable stat card on the dashboard becomes an ``<a class="stat-link">`` with the matching query string; landing pages auto-apply the filter |
+| PR-23 | P2-8 | ``BroadcastChannel("mnemos-sse")`` propagates the analysis-tab SSE state to every other tab as a sticky strip |
+| PR-24 | P2-6 | Client-side chunked rendering (100 rows / page) for the data tab and findings list, eliminating the freeze on 10K-row result sets |
+| PR-25 | P2-1 + P2-2 | OTLP trace-tree assembly + ``runtime_observations`` table + ``EXPOSES``/``CALLS`` upsert into the graph |
+| PR-26 | P2-3 (initial wave) | Korean phrase book + sidebar EN / 한국어 switcher with ``data-i18n`` / ``data-i18n-placeholder`` markup convention |
+| PR-27 | P2-3 (broader rollout) | Sidebar nav and empty-state messages on the data, analysis, findings tabs picked up the ``data-i18n`` markers; ``Findings rebuild queued`` toast goes through ``MnemosUI.t`` |
+
+Test suite at the end of the sprint: **~295 passed, 16 deselected**,
+``ruff check`` clean. New deps remain at 1 (``sqlglot`` from PR-5).
 
 ## Tests
 

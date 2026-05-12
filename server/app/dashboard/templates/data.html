@@ -51,7 +51,8 @@ async function loadEntities(ev) {
   const rows = await r.json();
   const out = document.getElementById("entities");
   if (!Array.isArray(rows) || rows.length === 0) {
-    out.innerHTML = '<p class="muted">No data entities yet.</p>';
+    out.innerHTML = '<p class="muted" data-i18n="No data entities yet.">No data entities yet.</p>';
+    MnemosUI.applyI18n(out);
     return false;
   }
   let html = '<table class="data"><thead><tr><th>ID</th><th>Component</th><th>Kind</th><th>Sensitive</th><th>Certainty</th><th></th></tr></thead><tbody>';
