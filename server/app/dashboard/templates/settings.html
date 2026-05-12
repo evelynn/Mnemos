@@ -74,6 +74,7 @@
           <option value="">— none (probe will fail) —</option>
         </select>
       </label>
+      <p id="pdb-secret-hint" class="muted" style="margin:0.25rem 0 0.5rem;"></p>
       <label><input type="checkbox" id="pdb-awr" /> Allow Oracle AWR queries</label>
       <label>Sensitive tables <span class="muted">(one per line)</span>
         <textarea id="pdb-sensitive" rows="3"></textarea>
@@ -204,17 +205,51 @@ async function _populateProjectDbForm() {
       ).join("");
     }
   }
-  // Secret select — only db_connection kind.
+  // Secret select — only db_connection kind. If the operator has not
+  // created one yet, surface a hint inline rather than silently leaving
+  // a single "(none)" option — the probe will refuse to bind without
+  // a secret, so the user needs to know what to do next.
   const sr = await fetch("/api/v1/secrets");
   if (sr.ok) {
     const secrets = (await sr.json()).filter(s => s.kind === "db_connection");
     const sel = document.getElementById("pdb-secret");
     if (sel) {
-      sel.innerHTML = '<option value="">— none —</option>' + secrets.map(
-        s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.label)}</option>`
-      ).join("");
+      if (secrets.length === 0) {
+        sel.innerHTML = '<option value="">— no db_connection secrets exist —</option>';
+        const hint = document.getElementById("pdb-secret-hint");
+        if (hint) {
+          hint.innerHTML = '<strong>No db_connection secret yet.</strong> '
+            + 'Create one in the <em>Secrets</em> section above first '
+            + '(kind = <code>db_connection</code>) — registration will be refused '
+            + 'until a secret is wired up.';
+          hint.classList.add("toast", "warn");
+        }
+      } else {
+        sel.innerHTML = '<option value="">— none —</option>' + secrets.map(
+          s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.label)}</option>`
+        ).join("");
+      }
     }
   }
+}
+
+function _checkRegexLines(textareaId) {
+  // Client-side compile check so the operator notices a bad regex
+  // *before* the server silently drops it (4th-round audit C2).
+  // We do not block submit on JS/Python syntax differences — server
+  // remains authoritative — but a warning prevents the silent-drop
+  // failure mode Team B flagged.
+  const ta = document.getElementById(textareaId);
+  if (!ta) return [];
+  const bad = [];
+  ta.value.split("\n").forEach((line, idx) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    try { new RegExp(trimmed); } catch (e) {
+      bad.push({line: idx + 1, raw: trimmed, error: e.message});
+    }
+  });
+  return bad;
 }
 
 function _linesToList(textareaId) {
@@ -230,6 +265,21 @@ async function submitProjectDb(ev) {
   if (!projectId) {
     MnemosUI.showToast("Pick a project.", "warn");
     return false;
+  }
+  // Pre-validate regex lines so the operator doesn't get silent drops.
+  const badFull = _checkRegexLines("pdb-mask-full");
+  const badPart = _checkRegexLines("pdb-mask-partial");
+  if (badFull.length || badPart.length) {
+    const all = [...badFull.map(b => "[full] " + b.raw + " — " + b.error),
+                 ...badPart.map(b => "[partial] " + b.raw + " — " + b.error)];
+    MnemosUI.showToast(
+      "Invalid masking regex (server would silently skip these): "
+      + all.slice(0, 2).join("; "),
+      "warn",
+    );
+    // Continue anyway — server is authoritative, but the toast keeps
+    // the operator informed (Team B critique #9: warning-only, not
+    // a block).
   }
   const body = {
     kind: document.getElementById("pdb-kind").value,

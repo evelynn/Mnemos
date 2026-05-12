@@ -54,13 +54,35 @@ async function loadEntities(ev) {
     out.innerHTML = '<p class="muted">No data entities yet.</p>';
     return false;
   }
-  let html = '<table class="data"><thead><tr><th>ID</th><th>Kind</th><th>Sensitive</th><th>Certainty</th></tr></thead><tbody>';
+  let html = '<table class="data"><thead><tr><th>ID</th><th>Component</th><th>Kind</th><th>Sensitive</th><th>Certainty</th><th></th></tr></thead><tbody>';
   for (const r of rows) {
-    html += `<tr><td><code>${r.id}</code></td><td>${r.kind ?? ""}</td><td>${r.is_sensitive ? "yes" : "no"}</td><td>${r.certainty}</td></tr>`;
+    // Surface component_id — the value the query runner needs.
+    // Without this column the operator had no way to find it in the UI
+    // (4th-round audit, scenario 2 Critical).
+    const cid = r.component_id ?? "";
+    const useBtn = cid
+      ? `<button type="button" onclick="useComponent('${escapeHtml(cid)}')">Use in query →</button>`
+      : "";
+    html += `<tr>
+      <td><code>${escapeHtml(r.id)}</code></td>
+      <td><code>${escapeHtml(cid)}</code></td>
+      <td>${escapeHtml(r.kind ?? "")}</td>
+      <td>${r.is_sensitive ? "yes" : "no"}</td>
+      <td>${escapeHtml(r.certainty ?? "")}</td>
+      <td>${useBtn}</td>
+    </tr>`;
   }
   html += "</tbody></table>";
   out.innerHTML = html;
   return false;
+}
+
+function useComponent(cid) {
+  // One-click handoff from entities → query runner.
+  document.getElementById("q-component").value = cid;
+  document.getElementById("q-sql").focus();
+  MnemosUI.showToast("Component id copied into the SQL form below.", "success");
+  document.getElementById("query-runner").scrollIntoView({behavior: "smooth"});
 }
 
 async function loadSample() {
@@ -118,6 +140,25 @@ async function runQuery(ev) {
   if (warning) MnemosUI.showToast(warning, "warn");
 
   if (!r.ok) {
+    // The server now returns structured detail for sql_parse_failed
+    // (PR-15) — extract the friendly ``message`` and append the raw
+    // parser error in a second line for advanced users.
+    try {
+      const payload = await r.clone().json();
+      const detail = payload && payload.detail;
+      if (detail && typeof detail === "object" && detail.code === "sql_parse_failed") {
+        const head = "SQL parse failed — " + detail.message;
+        MnemosUI.showToast(head, "error");
+        // Show the raw parser error in the result area too, so the
+        // operator can copy it for a bug report.
+        document.getElementById("query-result").innerHTML =
+          '<p class="toast error" role="alert">'
+          + escapeHtml(head)
+          + '<br><small><code>' + escapeHtml(detail.parser_error || "") + '</code></small>'
+          + '</p>';
+        return false;
+      }
+    } catch (_) { /* fall through to generic */ }
     await MnemosUI.showError("Query refused", r);
     return false;
   }

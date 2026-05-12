@@ -35,7 +35,18 @@ logger = logging.getLogger(__name__)
 FULL_MASK_COLUMNS = re.compile(
     r"(?i)\b(password|token|secret|api[_-]?key|ssn|rrn)\b"
 )
-PARTIAL_MASK_COLUMNS = re.compile(r"(?i)\b(email|phone|name|address|mobile)\b")
+# English keywords use ``\b`` word boundaries; Korean keywords cannot
+# rely on ``\b`` (which is ASCII-only in CPython's stock regex
+# engine), so they are matched bare. The 4th-round audit (A5/B5)
+# pointed out that a column literally called ``주민번호`` was slipping
+# through because the previous pattern was English-only. The Korean
+# additions cover the columns most operators name in production
+# Korean DBs: 이름 (name), 주소 (address), 전화 (phone), 휴대폰 (mobile),
+# 주민 (RRN-bearing), 이메일 (email).
+PARTIAL_MASK_COLUMNS = re.compile(
+    r"(?i)(?:\b(email|phone|name|address|mobile)\b"
+    r"|이름|주소|전화|휴대폰|주민|이메일)"
+)
 
 _VALUE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "[EMAIL]"),

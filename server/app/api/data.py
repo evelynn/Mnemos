@@ -338,7 +338,20 @@ async def query_data(
         )
         raise HTTPException(status_code=400, detail=f"write_blocked:{exc.kind}")
     except Exception as exc:  # sqlglot.ParseError and friends
-        raise HTTPException(status_code=400, detail=f"sql_parse_failed: {exc}")
+        # Surface a structured detail so the dashboard can render a
+        # friendlier error than the raw sqlglot exception string —
+        # 4th-round audit (scenario 2 / C3).
+        detail = {
+            "code": "sql_parse_failed",
+            "message": (
+                "The SQL could not be parsed as a read-only SELECT. "
+                "Common causes: missing FROM clause, dialect mismatch, "
+                "or a write keyword that slipped through (INSERT/UPDATE/"
+                "DELETE/MERGE)."
+            ),
+            "parser_error": str(exc)[:300],
+        }
+        raise HTTPException(status_code=400, detail=detail)
 
     # Per-project-DB policy: block sensitive tables, enforce AWR consent
     # and maintenance windows, and apply masking overrides
