@@ -30,7 +30,7 @@
       stored verbatim in the audit log.
     </p>
     <label for="grant-rationale">Rationale (≥ 200 chars)</label>
-    <textarea id="grant-rationale" oninput="updateRationaleCounter()" required minlength="200"></textarea>
+    <textarea id="grant-rationale" required minlength="200" aria-invalid="true" autofocus></textarea>
     <p id="grant-counter" class="counter">0 / 200 chars</p>
   </div>
   <menu>
@@ -39,7 +39,7 @@
   </menu>
 </dialog>
 
-<dialog id="token-dialog" class="modal" aria-labelledby="token-title">
+<dialog id="token-dialog" class="modal" aria-labelledby="token-title" onclose="dismissTokenDialog()">
   <header><h2 id="token-title">Break-glass token issued</h2></header>
   <div class="body">
     <p class="muted">
@@ -62,7 +62,8 @@
   <div class="body">
     <p class="muted">Paste the token an admin issued for this submission.</p>
     <label for="approve-token">Token</label>
-    <input id="approve-token" type="text" autocomplete="off" spellcheck="false" />
+    <input id="approve-token" type="text" autocomplete="off" spellcheck="false"
+           oninput="this.value = this.value.trim()" />
   </div>
   <menu>
     <button type="button" onclick="MnemosUI.closeDialog('approve-dialog')">Cancel</button>
@@ -146,24 +147,29 @@ function escapeHtml(s) {
 let pendingGrantId = null;
 let pendingApproveId = null;
 let countdownTimer = null;
+let grantCounterBound = false;
+
+function bindGrantCounterOnce() {
+  if (grantCounterBound) return;
+  grantCounterBound = true;
+  // IME-safe counter: refreshes during Korean/Japanese composition so
+  // the user sees the count move, but only enables submit on
+  // compositionend (with a 300ms input fallback). See ui.js.
+  MnemosUI.bindRationaleCounter(
+    document.getElementById("grant-rationale"),
+    document.getElementById("grant-counter"),
+    document.getElementById("grant-submit"),
+    200,
+  );
+}
 
 function issueGrant(id) {
   pendingGrantId = id;
   const ta = document.getElementById("grant-rationale");
   ta.value = "";
-  updateRationaleCounter();
+  bindGrantCounterOnce();
   MnemosUI.showDialog("grant-dialog");
-  setTimeout(() => ta.focus(), 50);
-}
-
-function updateRationaleCounter() {
-  const ta = document.getElementById("grant-rationale");
-  const counter = document.getElementById("grant-counter");
-  const submit = document.getElementById("grant-submit");
-  const len = ta.value.length;
-  counter.textContent = `${len} / 200 chars`;
-  counter.classList.toggle("ok", len >= 200);
-  submit.disabled = len < 200;
+  // <textarea autofocus> handles initial focus; no setTimeout race.
 }
 
 async function submitGrant() {
@@ -189,19 +195,20 @@ async function submitGrant() {
 
 function showTokenDialog(payload) {
   document.getElementById("token-value").textContent = payload.token;
-  // Account for any clock skew between the operator's machine and the
-  // server: the API returns absolute expires_at; we compute the
-  // remaining seconds against the *client* clock once and tick down.
-  const expiresAt = new Date(payload.expires_at).getTime();
+  // Anchor the countdown against the server clock from `payload.server_now`
+  // (PR-11 added that field). A laptop clock that drifts 5 minutes no
+  // longer makes the dialog lie about how much time is left.
+  const clock = MnemosUI.clockOffsetFromPayload(payload);
+  const expiresAtClientMs = clock.toClientMs(payload.expires_at);
   const tick = () => {
-    const remaining = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+    const remaining = Math.max(0, Math.floor((expiresAtClientMs - Date.now()) / 1000));
     const m = String(Math.floor(remaining / 60)).padStart(2, "0");
     const s = String(remaining % 60).padStart(2, "0");
     document.getElementById("token-countdown").textContent = `${m}:${s}`;
     if (remaining === 0) {
       MnemosUI.closeDialog("token-dialog");
       MnemosUI.showToast("Break-glass token expired.", "warn");
-      clearInterval(countdownTimer);
+      // dialog `onclose` fires dismissTokenDialog which clears the timer.
     }
   };
   tick();
@@ -220,8 +227,13 @@ async function copyTokenToClipboard() {
 }
 
 function dismissTokenDialog() {
+  // Called both from the explicit "Close" button and from the dialog's
+  // native ``onclose`` (ESC key, backdrop click). Idempotent so a
+  // user pressing Close on an already-expired dialog doesn't double-fire.
   if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
-  MnemosUI.closeDialog("token-dialog");
+  // Avoid calling .close() if the dialog is already closed (would throw).
+  const d = document.getElementById("token-dialog");
+  if (d && d.open) d.close();
 }
 
 function approve(id, blocked) {
@@ -262,7 +274,11 @@ async function submitApproveRaw(id, token) {
 function submitApproveNoToken(id) { return submitApproveRaw(id, null); }
 async function reject(id) {
   const r = await fetch(`/api/v1/diff_submissions/${id}/reject`, {method: "POST"});
-  alert(await r.text());
+  if (!r.ok) {
+    await MnemosUI.showError("Reject failed", r);
+    return;
+  }
+  MnemosUI.showToast("Submission rejected.", "success");
 }
 </script>
 {% endblock %}

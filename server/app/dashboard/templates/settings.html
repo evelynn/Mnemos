@@ -100,7 +100,11 @@ async function loadSecrets() {
 
 async function testSecret(id) {
   const r = await fetch(`/api/v1/secrets/${id}/test`, {method: "POST"});
-  alert(`HTTP ${r.status}\n${await r.text()}`);
+  if (r.ok) {
+    MnemosUI.showToast("Secret test passed.", "success");
+  } else {
+    await MnemosUI.showError("Secret test failed", r);
+  }
   loadSecrets();
 }
 
@@ -108,7 +112,7 @@ async function deleteSecret(id, label) {
   if (!confirm(`Delete secret "${label}"?`)) return;
   const r = await fetch(`/api/v1/secrets/${id}`, {method: "DELETE"});
   if (r.ok || r.status === 204) loadSecrets();
-  else alert(`HTTP ${r.status}: ${await r.text()}`);
+  else await MnemosUI.showError("Delete failed", r);
 }
 
 async function loadProjectDbs() {

@@ -46,7 +46,8 @@ async function rebuild() {
   const pid = document.getElementById("pid").value.trim();
   if (!pid) return;
   const r = await fetch(`/api/v1/projects/${pid}/findings/rebuild`, {method: "POST"});
-  alert(await r.text());
+  if (!r.ok) { await MnemosUI.showError("Rebuild failed", r); return; }
+  MnemosUI.showToast("Findings rebuild queued.", "success");
 }
 </script>
 {% endblock %}

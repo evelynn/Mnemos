@@ -49,7 +49,8 @@ async function decide(id, s) {
     headers: {"content-type": "application/json"},
     body: JSON.stringify({status: s, feedback}),
   });
-  alert(await r.text());
+  if (!r.ok) { await MnemosUI.showError("Decision failed", r); return; }
+  MnemosUI.showToast("Plan decision recorded.", "success");
 }
 </script>
 {% endblock %}

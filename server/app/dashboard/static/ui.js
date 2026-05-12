@@ -14,20 +14,25 @@
 (function () {
   "use strict";
 
-  function ensureToastHost() {
-    var host = document.querySelector(".toast-stack");
+  function ensureToastHost(level) {
+    // Two hosts so error / warn toasts can be announced via
+    // ``aria-live="assertive"`` while routine info stays polite
+    // (Team B 3rd-round should-fix on the UI a11y front).
+    var assertive = level === "error" || level === "warn";
+    var cls = assertive ? "toast-stack toast-stack-assertive" : "toast-stack";
+    var host = document.querySelector("." + (assertive ? "toast-stack-assertive" : "toast-stack-polite"));
     if (!host) {
       host = document.createElement("div");
-      host.className = "toast-stack";
-      host.setAttribute("role", "status");
-      host.setAttribute("aria-live", "polite");
+      host.className = cls + " " + (assertive ? "toast-stack-assertive" : "toast-stack-polite");
+      host.setAttribute("role", assertive ? "alert" : "status");
+      host.setAttribute("aria-live", assertive ? "assertive" : "polite");
       document.body.appendChild(host);
     }
     return host;
   }
 
   function showToast(message, level) {
-    var host = ensureToastHost();
+    var host = ensureToastHost(level);
     var el = document.createElement("div");
     el.className = "toast " + (level || "");
     el.textContent = String(message);
@@ -195,14 +200,114 @@
     });
   }
 
+  /**
+   * Render JSON from a sibling ``<script type="application/json">``
+   * block. Safer than stuffing the value into a ``data-`` attribute
+   * (Team B 3rd-round must-fix on XSS): a ``</script>`` sequence in
+   * the data is the only thing we have to escape, and even that only
+   * if the producer didn't.
+   *
+   * Usage:
+   *   <script type="application/json" id="audit-row-42">{...}</script>
+   *   <div id="audit-row-42-render"></div>
+   *   ...
+   *   MnemosUI.renderJsonFromScript("audit-row-42", "audit-row-42-render");
+   */
+  function renderJsonFromScript(scriptId, parentId, opts) {
+    var script = document.getElementById(scriptId);
+    var parent = document.getElementById(parentId);
+    if (!script || !parent) return;
+    try {
+      var value = JSON.parse(script.textContent || "null");
+      renderJson(parent, value, opts);
+    } catch (e) {
+      parent.textContent = "[failed to parse JSON: " + e.message + "]";
+    }
+  }
+
+  /**
+   * Bind a 200-char rationale textarea + counter element. Handles the
+   * IME composition edge case Team B 3rd-round critique #6 raised:
+   * Safari and some Android keyboards don't fire ``input`` during a
+   * compose, so a Korean operator's character count would freeze.
+   *
+   * Strategy:
+   *   * Counter always reflects ``textarea.value.length`` — even during
+   *     composition, so the operator sees something move.
+   *   * Submit-button enable waits for ``compositionend`` *or* a 300 ms
+   *     idle ``input`` event (fallback for browsers that skip
+   *     compositionend on blur).
+   */
+  function bindRationaleCounter(textarea, counter, submitButton, minChars) {
+    if (!textarea || !counter) return;
+    var composing = false;
+    var idleTimer = null;
+
+    function refresh(allowEnable) {
+      var len = textarea.value.length;
+      counter.textContent = len + " / " + minChars + " chars";
+      counter.classList.toggle("ok", len >= minChars);
+      textarea.setAttribute("aria-invalid", len < minChars ? "true" : "false");
+      if (submitButton) {
+        submitButton.disabled = !(allowEnable && len >= minChars);
+      }
+    }
+
+    textarea.addEventListener("compositionstart", function () { composing = true; refresh(false); });
+    textarea.addEventListener("compositionend", function () {
+      composing = false;
+      refresh(true);
+    });
+    textarea.addEventListener("input", function () {
+      if (composing) {
+        refresh(false);
+        return;
+      }
+      // Fallback timer for environments that skip compositionend.
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(function () { refresh(true); }, 300);
+      refresh(!composing);
+    });
+    refresh(false);
+  }
+
+  /**
+   * Compute and remember the client/server clock offset from an API
+   * response payload that includes ``server_now`` (ISO 8601). Returns
+   * a function that maps a server timestamp into the *client* clock.
+   *
+   * Team B 3rd-round must-fix #4: ``expires_at - issued_at`` is just
+   * the TTL. The dialog needs to know remaining time *against the
+   * server clock*, even when the user's laptop is several minutes off.
+   */
+  function clockOffsetFromPayload(payload) {
+    var offset = 0;  // server_ms - client_ms (positive if server ahead)
+    if (payload && payload.server_now) {
+      var serverMs = new Date(payload.server_now).getTime();
+      offset = serverMs - Date.now();
+    }
+    return {
+      offset: offset,
+      // Convert a server-side ISO timestamp into the equivalent
+      // client-clock ms reading so existing setInterval logic works
+      // unchanged.
+      toClientMs: function (serverIso) {
+        return new Date(serverIso).getTime() - offset;
+      },
+    };
+  }
+
   window.MnemosUI = {
     showToast: showToast,
     showError: showError,
     renderJson: renderJson,
+    renderJsonFromScript: renderJsonFromScript,
     copyToClipboard: copyToClipboard,
     showDialog: showDialog,
     closeDialog: closeDialog,
     escapeHtml: escapeHtml,
+    bindRationaleCounter: bindRationaleCounter,
+    clockOffsetFromPayload: clockOffsetFromPayload,
   };
   // Convenience global — many existing templates already call
   // ``escapeHtml(x)`` without a namespace prefix.
