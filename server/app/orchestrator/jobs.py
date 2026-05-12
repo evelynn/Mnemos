@@ -338,6 +338,26 @@ async def run_ingest(
         ).scalar_one_or_none()
         if project is None:
             return
+        # Observe ingest lag — gap between AnalysisRun row creation
+        # (queued by webhook or `/analyze`) and worker pickup. Spec §2.7
+        # cares about end-to-end freshness; this is the single most
+        # actionable latency metric.
+        run_row = (
+            await session.execute(select(AnalysisRun).where(AnalysisRun.id == run_id))
+        ).scalar_one_or_none()
+        if run_row is not None and run_row.created_at is not None:
+            from app.obs.metrics import ingest_lag_seconds
+
+            created_aware = run_row.created_at
+            if created_aware.tzinfo is None:
+                created_aware = created_aware.replace(tzinfo=timezone.utc)
+            lag = (now - created_aware).total_seconds()
+            source = (
+                "webhook"
+                if (run_row.triggered_by or "").startswith("webhook:")
+                else "api"
+            )
+            ingest_lag_seconds.labels(source=source).observe(max(0.0, lag))
         await _set_run_status(session, run_id, status="running", started_at=now)
 
     await bus.publish(run_id, {"event": "run_started", "at": now.isoformat()})

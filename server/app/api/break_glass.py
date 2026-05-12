@@ -21,7 +21,6 @@ stored, so a database leak does not yield usable break-glass tokens.
 
 from __future__ import annotations
 
-import hashlib
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -41,7 +40,9 @@ from app.auth.rbac import require_admin
 from app.db import get_session
 from app.models.auth import User
 from app.models.plans import DiffBreakGlassGrant
+from app.obs.metrics import break_glass_grants_total
 from app.safety.review import run_pipeline
+from app.safety.tokens import hash_token
 
 router = APIRouter(tags=["break_glass"])
 
@@ -49,8 +50,10 @@ GRANT_TTL = timedelta(minutes=15)
 RATIONALE_MIN_CHARS = 200
 
 
-def _hash_token(token: str) -> str:
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+# Compatibility alias — keeps `from app.api.break_glass import _hash_token`
+# working for the (now copied-down) test suite while the canonical home
+# is `app.safety.tokens.hash_token`.
+_hash_token = hash_token
 
 
 class BreakGlassRequest(BaseModel):
@@ -69,6 +72,15 @@ class BreakGlassResponse(BaseModel):
     token: str
     expires_at: datetime
     rerun_verdict: str
+    # Server-side clock anchor for the client-side countdown. Team B
+    # 3rd-round must-fix: `expires_at - issued_at` is the TTL, but the
+    # operator may open the dialog several seconds (or minutes) after
+    # the response arrives. The client computes
+    #     offset = Date.now() - server_now_unix * 1000
+    # once and ticks down ``expires_at - (Date.now() - offset)`` so a
+    # skewed laptop clock no longer mis-reports the remaining time.
+    server_now: datetime
+    issued_at: datetime
 
 
 @router.post("/api/v1/diff_submissions/{submission_id}/break_glass_grant")
@@ -107,6 +119,7 @@ async def issue_break_glass_grant(
     submission.auto_review_findings = rerun_payload
 
     token = secrets.token_urlsafe(32)
+    break_glass_grants_total.labels(action="issued").inc()
     grant = DiffBreakGlassGrant(
         submission_id=submission.id,
         token_hash=_hash_token(token),
@@ -136,6 +149,8 @@ async def issue_break_glass_grant(
         token=token,
         expires_at=grant.expires_at,
         rerun_verdict=report.verdict,
+        server_now=datetime.now(tz=timezone.utc),
+        issued_at=grant.created_at,
     )
 
 

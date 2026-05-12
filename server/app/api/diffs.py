@@ -9,7 +9,6 @@ from sqlalchemy import text
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.break_glass import _hash_token
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
 from app.auth.org_scope import same_org
@@ -19,7 +18,9 @@ from app.gitlab_client.mr import create_mr_from_worktree
 from app.models.auth import User
 from app.models.plans import DiffSubmission, Plan
 from app.models.projects import Project
+from app.obs.metrics import break_glass_grants_total
 from app.safety.review import run_pipeline
+from app.safety.tokens import hash_token as _hash_token
 
 
 async def _resolve_plan_in_user_org(
@@ -220,6 +221,11 @@ async def approve_submission(
                 status_code=409,
                 detail="break_glass_invalid_or_self_issued_or_expired",
             )
+        # Only increment after the UPDATE confirmed a real consumption
+        # — if the row was None (expired / self-issued / wrong token) we
+        # never reach this line, so the counter cannot be juked by
+        # invalid attempts.
+        break_glass_grants_total.labels(action="consumed").inc()
         await audit_record(
             actor=approver_actor,
             action="diff.break_glass.consume",

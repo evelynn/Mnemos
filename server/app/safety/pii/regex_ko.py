@@ -140,23 +140,29 @@ class KoreanPIIRecognizer:
     paths use it to set a ``confidence`` flag on every redaction.
     """
 
-    _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-        ("RRN", re.compile(r"\b\d{6}-?\d{7}\b")),
-        ("FOREIGNER_ID", re.compile(r"\b\d{6}-?\d{7}\b")),
-        ("CARD", re.compile(r"\b(?:\d{4}[- ]?){3}\d{4}\b")),
-        ("DRIVERS_LICENSE", re.compile(r"\b\d{2}-?\d{2}-?\d{6}-?\d{2}\b")),
-    )
+    _ID_PATTERN = re.compile(r"\b\d{6}-?\d{7}\b")
+    _CARD_PATTERN = re.compile(r"\b(?:\d{4}[- ]?){3}\d{4}\b")
+    _LICENSE_PATTERN = re.compile(r"\b\d{2}-?\d{2}-?\d{6}-?\d{2}\b")
 
     def scan(self, text: str) -> list[Detection]:
+        """Return validated detections only — *not* every regex hit.
+
+        Team B 3rd-round must-fix #3: the previous if-elif structure had
+        a dead branch because RRN and FOREIGNER_ID shared the same
+        pattern. Now we sweep the ID pattern once and let either
+        validator claim the match.
+        """
         out: list[Detection] = []
-        for label, pat in self._PATTERNS:
-            for m in pat.finditer(text):
-                if label == "RRN" and is_valid_rrn(m.group(0)):
-                    out.append(Detection(label, m.span()))
-                elif label == "FOREIGNER_ID" and is_valid_foreigner_id(m.group(0)):
-                    out.append(Detection(label, m.span()))
-                elif label == "CARD" and is_valid_card_luhn(m.group(0)):
-                    out.append(Detection(label, m.span()))
-                elif label == "DRIVERS_LICENSE" and is_valid_korean_drivers_license(m.group(0)):
-                    out.append(Detection(label, m.span()))
+        for m in self._ID_PATTERN.finditer(text):
+            value = m.group(0)
+            if is_valid_rrn(value):
+                out.append(Detection("RRN", m.span()))
+            elif is_valid_foreigner_id(value):
+                out.append(Detection("FOREIGNER_ID", m.span()))
+        for m in self._CARD_PATTERN.finditer(text):
+            if is_valid_card_luhn(m.group(0)):
+                out.append(Detection("CARD", m.span()))
+        for m in self._LICENSE_PATTERN.finditer(text):
+            if is_valid_korean_drivers_license(m.group(0)):
+                out.append(Detection("DRIVERS_LICENSE", m.span()))
         return out

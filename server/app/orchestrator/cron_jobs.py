@@ -73,6 +73,13 @@ async def with_advisory_lock(
     async with session_factory() as session:
         if not await _try_acquire(session, name):
             log.debug("cron %s: another worker holds the lock", name)
+            # Lost the race for the leader role. Expected and even
+            # desirable under multi-worker deploys — surface it on the
+            # Grafana panel so an operator can confirm leader election
+            # is actually happening.
+            from app.obs.metrics import cron_lock_lost_total
+
+            cron_lock_lost_total.labels(job=name).inc()
             return None
         try:
             return await fn(session)
@@ -106,6 +113,9 @@ async def _expire_break_glass(session: AsyncSession) -> dict[str, int]:
     expired_ids = [row[0] for row in res.fetchall()]
     await session.commit()
     if expired_ids:
+        from app.obs.metrics import break_glass_grants_total
+
+        break_glass_grants_total.labels(action="expired").inc(len(expired_ids))
         log.info("break_glass_expiry: marked %d grants consumed", len(expired_ids))
     return {"expired": len(expired_ids)}
 
@@ -152,6 +162,20 @@ async def _probe_recheck_one(session: AsyncSession) -> dict[str, int]:
             row.disabled_at = row.last_probe_at
             disabled += 1
         rechecked += 1
+    # Update the disabled gauge to the current fleet-wide total, not just
+    # the delta — that's what the Grafana panel wants to show. We do this
+    # in the same session so the value is consistent with the writes above.
+    from app.models.projects import ProjectDB as _PDB
+    from app.obs.metrics import project_db_disabled
+    from sqlalchemy import func as _func
+
+    total_disabled = (
+        await session.execute(
+            select(_func.count()).select_from(_PDB).where(_PDB.disabled_at.isnot(None))
+        )
+    ).scalar() or 0
+    project_db_disabled.set(int(total_disabled))
+
     await session.commit()
     log.info("probe_recheck: rechecked=%d disabled=%d", rechecked, disabled)
     return {"rechecked": rechecked, "disabled": disabled}

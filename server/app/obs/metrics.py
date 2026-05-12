@@ -19,6 +19,7 @@ from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
     multiprocess,
@@ -50,6 +51,44 @@ rate_limited_total = Counter(
     "mnemos_rate_limited_total",
     "Requests rejected by the rate limiter by scope",
     labelnames=("scope",),
+)
+
+# Webhook -> worker pickup lag. Backs the Grafana panel added in PR-10.
+# The histogram buckets are sized for the 0-10 minute window where the
+# operator-visible "is my push being analysed?" question lives.
+ingest_lag_seconds = Histogram(
+    "mnemos_ingest_lag_seconds",
+    "Seconds between an ingest AnalysisRun being queued and the worker "
+    "picking it up",
+    labelnames=("source",),
+    buckets=(0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600),
+)
+
+# How many ProjectDB bindings the daily probe sweep has currently flagged
+# as RW (and therefore unsafe). Gauge rather than Counter so the panel
+# tracks the *current* fleet size, not cumulative disable events.
+project_db_disabled = Gauge(
+    "mnemos_project_db_disabled_total",
+    "Current count of project_db rows with disabled_at set",
+)
+
+# Tracks contention on the per-cron advisory lock. A non-zero rate is
+# expected and *desired* under a multi-worker deployment — it means the
+# leader-election story is keeping doubles out.
+cron_lock_lost_total = Counter(
+    "mnemos_cron_lock_lost_total",
+    "Cron iterations that failed to acquire the advisory lock",
+    labelnames=("job",),
+)
+
+# Break-glass workflow visibility. Three labelled actions:
+#   - "issued"   on POST /break_glass_grant success
+#   - "consumed" when the approve endpoint's atomic UPDATE returns a row
+#   - "expired"  when the cron sweep marks an unused grant as consumed
+break_glass_grants_total = Counter(
+    "mnemos_break_glass_grants_total",
+    "Break-glass grants by action (issued/consumed/expired)",
+    labelnames=("action",),
 )
 
 
