@@ -28,6 +28,11 @@ async function loadFindings(ev) {
   if (st) qs.set("status", st);
   const r = await fetch(`/api/v1/projects/${pid}/findings?${qs}`);
   const rows = await r.json();
+  // P2-9 onboarding step 3: the operator reached the findings view.
+  // Loading at least one row counts as "reviewed".
+  try {
+    if (rows.length > 0) sessionStorage.setItem("mnemos_onboarding_step3_done", "1");
+  } catch (_) {}
   const out = document.getElementById("out");
   if (!Array.isArray(rows) || rows.length === 0) {
     out.innerHTML = '<p class="muted">No findings.</p>';

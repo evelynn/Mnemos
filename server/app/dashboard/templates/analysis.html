@@ -12,6 +12,11 @@
   </p>
 </section>
 
+<div id="onboard-banner" class="onboarding-step-cta" hidden>
+  <strong>Step 2 of 3:</strong> Trigger the first analysis run. The
+  project ID is pre-filled below — just press <em>Start analysis</em>.
+</div>
+
 <section>
   <h2>Trigger run</h2>
   <form id="trigger" onsubmit="return triggerRun(event)">
@@ -82,7 +87,20 @@ async function triggerRun(ev) {
       source_path: fd.get("source_path"),
     }),
   });
-  document.getElementById("trigger-result").textContent = await resp.text();
+  const body = await resp.text();
+  document.getElementById("trigger-result").textContent = body;
+  if (resp.ok) {
+    // P2-9 onboarding auto-progression: mark step 2 done so the
+    // dashboard's first-run guide updates the next time the operator
+    // visits the home tab.
+    try { sessionStorage.setItem("mnemos_onboarding_step2_done", "1"); } catch (_) {}
+    // Auto-prefill the Monitor input with the new run id so the
+    // operator doesn't have to copy-paste it from the response blob.
+    try {
+      const j = JSON.parse(body);
+      if (j.id) document.getElementById("run-id").value = j.id;
+    } catch (_) {}
+  }
   return false;
 }
 
@@ -292,5 +310,25 @@ function renderPipeline(stages) {
   html.push('</div>');
   pipeline.innerHTML = html.join("");
 }
+
+// P2-9 onboarding auto-progression — when the operator lands here via
+// the projects-tab "Start the first analysis run →" CTA, pre-fill the
+// project ID into both forms (Trigger + Load runs) and show the
+// step-2 banner so the page makes sense without any further reading.
+(function autoOnboard() {
+  const params = new URLSearchParams(window.location.search);
+  const pid = params.get("project");
+  const onboard = params.get("onboard") === "1";
+  if (pid) {
+    const t = document.querySelector('#trigger input[name="project_id"]');
+    const rpid = document.getElementById("rpid");
+    if (t) t.value = pid;
+    if (rpid) rpid.value = pid;
+  }
+  if (onboard) {
+    const banner = document.getElementById("onboard-banner");
+    if (banner) banner.hidden = false;
+  }
+})();
 </script>
 {% endblock %}

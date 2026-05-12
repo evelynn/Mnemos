@@ -5,14 +5,13 @@
 
 <section id="onboarding-card" class="onboarding" hidden>
   <h2>Welcome to Mnemos</h2>
-  <p class="muted">
-    No projects are registered yet. Three steps to get to your first
-    finding:
+  <p class="muted" id="onb-summary">
+    Three steps to get to your first finding:
   </p>
   <ol>
-    <li><strong>Register a GitLab project</strong> — <a class="primary" href="/projects">Open Projects tab →</a></li>
-    <li><strong>Run the first analysis</strong> (L0 extraction ≈ 5 min per 10K files)</li>
-    <li><strong>Review the results</strong> in the Findings tab</li>
+    <li id="onb-step-1"><strong>Register a GitLab project</strong> — <a class="primary" href="/projects">Open Projects tab →</a></li>
+    <li id="onb-step-2"><strong>Run the first analysis</strong> (L0 extraction ≈ 5 min per 10K files)</li>
+    <li id="onb-step-3"><strong>Review the results</strong> in the Findings tab</li>
   </ol>
   <p class="muted">
     Stuck? See <code>docs/operator-guide/deployment.md</code> for the
@@ -82,6 +81,32 @@
 </style>
 
 <script>
+function updateOnboarding(projectCount) {
+  const onb = document.getElementById("onboarding-card");
+  if (!onb) return;
+  // Step 1 is done iff at least one project exists. The session
+  // storage flags from projects.html/analysis.html are advisory —
+  // the source of truth is the platform's view of the world.
+  const step1Done = projectCount > 0;
+  let step2Done = false, step3Done = false;
+  try {
+    step2Done = sessionStorage.getItem("mnemos_onboarding_step2_done") === "1";
+    step3Done = sessionStorage.getItem("mnemos_onboarding_step3_done") === "1";
+  } catch (_) {}
+  const apply = (id, done, current) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle("done", done);
+    el.classList.toggle("current", current);
+  };
+  apply("onb-step-1", step1Done, !step1Done);
+  apply("onb-step-2", step2Done, step1Done && !step2Done);
+  apply("onb-step-3", step3Done, step2Done && !step3Done);
+  // Hide the banner once every step is done — operators who finish
+  // onboarding shouldn't have to look at a tutorial forever.
+  onb.hidden = step1Done && step2Done && step3Done;
+}
+
 async function loadSummary() {
   // Projects count (scoped to caller's org).
   try {
@@ -91,8 +116,10 @@ async function loadSummary() {
     // Reveal the onboarding guide when the org has no projects.
     // Closes the 5th-round UX-Crit-1 finding: new operators saw
     // "Projects: 0" with no hint of what to do next.
-    const onb = document.getElementById("onboarding-card");
-    if (onb) onb.hidden = rows.length !== 0;
+    // P2-9 onboarding auto-progression — show the guide whenever a
+    // step is incomplete, not just when ``projects.length === 0``.
+    // The card collapses itself once all three steps are done.
+    updateOnboarding(rows.length);
 
     // Walk projects to aggregate recent runs + open findings.
     let runs = 0, findings = 0;

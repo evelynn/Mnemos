@@ -166,6 +166,26 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
 .onboarding h2 { margin: 0 0 0.4rem; font-size: 1.05rem; }
 .onboarding ol { margin: 0.3rem 0 0.4rem 1.2rem; padding: 0; }
 .onboarding li { margin: 0.2rem 0; }
+/* Highlight the step the operator should do next. */
+.onboarding li.done { color: #57606a; text-decoration: line-through; }
+.onboarding li.current { font-weight: 600; }
+
+/* Post-action CTA — the inline "next step" prompt that pops up after
+   a successful project create / analysis trigger to nudge the
+   operator into the next onboarding step. */
+.onboarding-step-cta {
+  margin-top: 0.6rem;
+  padding: 0.5rem 0.8rem;
+  background: #eef5ff;
+  border-left: 3px solid #1f6feb;
+  border-radius: 4px;
+  animation: pulse-cta 1.5s ease-in-out 2;
+}
+.onboarding-step-cta a.primary { margin-left: 0.6rem; }
+@keyframes pulse-cta {
+  0%, 100% { background: #eef5ff; }
+  50%      { background: #d6e4ff; }
+}
 
 /* Source-of-truth badge for analysis runs — webhook vs user-triggered. */
 .badge.webhook { background: #d9e6ff; color: #0a3b8c; }

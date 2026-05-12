@@ -52,7 +52,12 @@ def test_dashboard_has_onboarding_card():
 
 def test_dashboard_reveals_onboarding_when_no_projects():
     body = _read(_TPL / "dashboard.html")
-    assert 'onb.hidden = rows.length !== 0' in body
+    # PR-21 promoted the simple ``hidden = rows.length !== 0`` check
+    # into a multi-step state machine. The onboarding card now reveals
+    # whenever any step is incomplete, not just on a literally empty
+    # project list.
+    assert "updateOnboarding(rows.length)" in body
+    assert "step1Done = projectCount > 0" in body
 
 
 def test_app_css_has_onboarding_style():
