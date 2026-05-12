@@ -491,9 +491,29 @@ async def _shutdown(ctx: dict) -> None:
 
 
 class WorkerSettings:
-    """Reference configuration for ``arq server.app.orchestrator.jobs.WorkerSettings``."""
+    """Reference configuration for ``arq server.app.orchestrator.jobs.WorkerSettings``.
+
+    ``cron_jobs`` runs the periodic background work introduced in PR-4:
+    ``break_glass_expiry`` every 5 minutes, ``probe_recheck`` and
+    ``retention_purge`` once a day. Multi-worker deployments stay safe
+    because each entry holds a Postgres advisory lock for the duration
+    of its run — losers no-op.
+    """
+    from arq.cron import cron  # imported here so importing this module
+    # does not require arq when only the job functions are needed.
+
+    from app.orchestrator.cron_jobs import (
+        run_break_glass_expiry,
+        run_probe_recheck,
+        run_retention_purge,
+    )
 
     functions = [run_ingest]
+    cron_jobs = [
+        cron(run_break_glass_expiry, minute=set(range(0, 60, 5))),
+        cron(run_probe_recheck, hour={3}, minute={0}),
+        cron(run_retention_purge, hour={4}, minute={0}),
+    ]
     on_startup = _startup
     on_shutdown = _shutdown
     redis_settings = None  # populated at runtime from get_settings().redis_url
