@@ -29,7 +29,13 @@ def test_base_html_restores_hash():
     body = _read(_TPL / "base.html")
     assert "mnemos_post_login_hash" in body
     assert "sessionStorage.getItem" in body
-    assert "window.location.hash = stashed" in body
+    # PR-18 refined the restore: bare ``approve=`` hashes route to
+    # /diffs, everything else lands on whatever page the operator hit.
+    # Either restore path counts as proof the mechanism is wired up.
+    assert (
+        "window.location.hash = hash" in body
+        or "window.location.replace" in body
+    )
 
 
 # ---------------------------------------------------------------------------

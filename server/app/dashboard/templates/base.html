@@ -9,16 +9,28 @@
     <script src="/static/ui.js" defer></script>
     <script>
       // Restore a fragment that a guest operator stashed before the
-      // login redirect. Runs once on page load — the
-      // ``maybeAutoLoadFromHash`` handler in diffs.html then sees the
-      // hash and opens the approve dialog for the right submission.
-      // PR-17, 5th-round must-fix #3.
+      // login redirect, and (6th-round audit S4) route the operator
+      // to /diffs when the fragment carries an approval context — the
+      // share URL lands on the platform root after login, not /diffs
+      // directly, so a bare hash restore would leave the operator on
+      // the dashboard wondering where the approve dialog went.
       (function () {
         try {
           var stashed = sessionStorage.getItem("mnemos_post_login_hash");
-          if (stashed && !window.location.hash) {
+          if (stashed) {
             sessionStorage.removeItem("mnemos_post_login_hash");
-            window.location.hash = stashed.replace(/^#/, "");
+            var hash = stashed.replace(/^#/, "");
+            var onDiffs = window.location.pathname === "/diffs";
+            if (!onDiffs && hash.indexOf("approve=") === 0) {
+              // Send the operator straight to the diffs tab; the
+              // ``maybeAutoLoadFromHash`` handler there reads the
+              // submission/plan ids out of the fragment.
+              window.location.replace("/diffs#" + hash);
+              return;
+            }
+            if (!window.location.hash) {
+              window.location.hash = hash;
+            }
           }
         } catch (_) {}
       })();

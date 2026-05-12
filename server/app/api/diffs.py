@@ -104,9 +104,15 @@ def _out(d: DiffSubmission) -> DiffOut:
 @router.post("/api/v1/diff_submissions")
 async def submit_diff(
     body: DiffSubmit,
-    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_operator),
 ) -> DiffOut:
+    # 6th-round audit C4: previously this endpoint accepted any
+    # authenticated user (`CurrentUser`), which let a viewer post
+    # arbitrary diffs and burn ultrareview cycles. Diff submission is
+    # part of the development workflow (§2.4 — delegated to Claude
+    # Code on behalf of an operator), so operator role is the right
+    # minimum.
     plan = await _resolve_plan_in_user_org(db, body.plan_id, user)
 
     report = await run_pipeline(
