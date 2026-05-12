@@ -39,7 +39,7 @@
 </section>
 
 <section>
-  <h2>Pipeline monitor</h2>
+  <h2>Pipeline monitor <span id="sse-status" class="sse-status" hidden></span></h2>
   <label>Run ID<input type="text" id="run-id" placeholder="uuid" /></label>
   <button onclick="monitor()" class="primary">Monitor</button>
   <button onclick="stopMonitor()">Stop</button>
@@ -149,9 +149,38 @@ async function monitor() {
   document.getElementById("pipeline").innerHTML = '<p class="muted">Waiting for stage events…</p>';
 
   await refreshStages(id);
+  await openStream(id);
+}
 
+// Re-connection state for the EventSource — kept module-scoped so a
+// second monitor() call shares the same backoff budget.
+let _sseRetryCount = 0;
+const _SSE_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
+
+function _sseStatusEl() {
+  return document.getElementById("sse-status");
+}
+function _markSseStatus(state) {
+  const el = _sseStatusEl();
+  if (!el) return;
+  el.hidden = false;
+  el.classList.remove("live", "disconnected");
+  el.classList.add(state);
+  el.textContent = state === "live" ? "live" : "disconnected";
+}
+
+async function openStream(id) {
+  // Close any prior stream so a re-open doesn't leak the previous
+  // EventSource (4th-round audit + Team B 5th-round #6).
+  if (_sse) {
+    try { _sse.close(); } catch (_) {}
+    _sse = null;
+  }
+  _markSseStatus("live");
   _sse = new EventSource(`/api/v1/analysis_runs/${id}/events`);
+
   _sse.addEventListener("progress", async (e) => {
+    _sseRetryCount = 0;  // any successful event resets backoff
     const el = document.getElementById("events");
     el.textContent += e.data + "\n";
     el.scrollTop = el.scrollHeight;
@@ -160,9 +189,6 @@ async function monitor() {
       if (ev.event && ev.event.startsWith("stage_")) {
         await refreshStages(id);
       }
-      // Surface terminal failure as an assertive toast — the operator
-      // gets a notification even if they've scrolled away from the
-      // pipeline area. 3rd-round audit (시나리오 3 M-5).
       if (ev.event === "run_failed") {
         MnemosUI.showToast(
           `Analysis run failed: ${ev.error || "(no detail)"}`,
@@ -173,8 +199,52 @@ async function monitor() {
       }
     } catch {}
   });
+
+  _sse.onerror = () => {
+    _markSseStatus("disconnected");
+    // Don't churn a connection while the tab is hidden — the browser
+    // throttles us anyway and we'd just rack up failed attempts.
+    if (document.visibilityState === "hidden") {
+      return;
+    }
+    if (_sseRetryCount >= _SSE_BACKOFF_MS.length) {
+      MnemosUI.showToast(
+        "Live analysis stream disconnected — refresh to retry.",
+        "error",
+      );
+      try { _sse.close(); } catch (_) {}
+      _sse = null;
+      return;
+    }
+    // Exponential backoff + 50% jitter — prevents a thundering herd of
+    // operators all reconnecting in the same millisecond after a
+    // worker restart.
+    const base = _SSE_BACKOFF_MS[_sseRetryCount++];
+    const delay = base * (0.5 + Math.random());
+    setTimeout(() => {
+      if (document.visibilityState === "visible") openStream(id);
+    }, delay);
+  };
+
   _poll = setInterval(() => refreshStages(id), 3000);
 }
+
+// Re-open the stream when the operator switches back to a hidden tab.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && _sse && _sse.readyState === 2) {
+    const id = document.getElementById("run-id")?.value?.trim();
+    if (id) openStream(id);
+  }
+});
+
+// Tear down the stream when the operator navigates away.
+window.addEventListener("beforeunload", () => {
+  if (_sse) {
+    try { _sse.close(); } catch (_) {}
+    _sse = null;
+  }
+  if (_poll) { clearInterval(_poll); _poll = null; }
+});
 
 async function refreshStages(id) {
   try {

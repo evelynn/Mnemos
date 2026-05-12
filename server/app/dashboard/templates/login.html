@@ -21,4 +21,17 @@
     <span class="muted"> (only if an OIDC provider is configured)</span>
   </p>
 </main>
+<script>
+  // Preserve the URL fragment a share-URL operator landed on before the
+  // login redirect kicked in. We stash it in sessionStorage so the
+  // post-login redirect to /diffs can replay it via the existing
+  // ``maybeAutoLoadFromHash`` flow. Fragment-only — no token leakage.
+  (function () {
+    var h = window.location.hash || "";
+    if (h && h.length > 1) {
+      try { sessionStorage.setItem("mnemos_post_login_hash", h); } catch (_) {}
+    }
+  })();
+</script>
 {% endblock %}
+

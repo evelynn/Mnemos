@@ -142,7 +142,7 @@ function renderSubmission(s) {
     ${passHtml}
     ${mrBadge}
     <div class="actions">
-      ${verdict === 'blocked' ? `<button onclick="issueGrant('${s.id}')">Issue break-glass grant (admin)</button>` : ""}
+      ${verdict === 'blocked' && window.MNEMOS_USER_ROLE_HINT === 'admin' ? `<button onclick="issueGrant('${s.id}')">Issue break-glass grant (admin)</button>` : ""}
       <button class="primary" onclick="approve('${s.id}', ${verdict === 'blocked'})">${verdict === 'blocked' ? 'Approve with token' : 'Approve → MR'}</button>
       <button class="danger" onclick="reject('${s.id}')">Reject</button>
     </div>

@@ -3,6 +3,23 @@
 {% block content %}
 <header class="page-head"><h1>Dashboard</h1></header>
 
+<section id="onboarding-card" class="onboarding" hidden>
+  <h2>Welcome to Mnemos</h2>
+  <p class="muted">
+    No projects are registered yet. Three steps to get to your first
+    finding:
+  </p>
+  <ol>
+    <li><strong>Register a GitLab project</strong> — <a class="primary" href="/projects">Open Projects tab →</a></li>
+    <li><strong>Run the first analysis</strong> (L0 extraction ≈ 5 min per 10K files)</li>
+    <li><strong>Review the results</strong> in the Findings tab</li>
+  </ol>
+  <p class="muted">
+    Stuck? See <code>docs/operator-guide/deployment.md</code> for the
+    end-to-end walk-through.
+  </p>
+</section>
+
 <section class="summary-grid">
   <div class="stat-card">
     <h3>Projects</h3>
@@ -23,6 +40,29 @@
     <h3>Readiness</h3>
     <div class="big" id="stat-ready">…</div>
     <span class="muted" id="stat-ready-detail"></span>
+  </div>
+</section>
+
+<section class="summary-grid">
+  <div class="stat-card">
+    <h3>Break-glass active</h3>
+    <div class="big" id="stat-bg-active">…</div>
+    <span class="muted">unconsumed grants (15-min TTL)</span>
+  </div>
+  <div class="stat-card">
+    <h3>Failed runs (24h)</h3>
+    <div class="big" id="stat-runs-failed">…</div>
+    <a href="/analysis" class="muted">Investigate →</a>
+  </div>
+  <div class="stat-card">
+    <h3>Disabled DBs</h3>
+    <div class="big" id="stat-dbs-disabled">…</div>
+    <span class="muted">probe sweep verdict</span>
+  </div>
+  <div class="stat-card">
+    <h3>Webhook events (24h)</h3>
+    <div class="big" id="stat-webhooks">…</div>
+    <span class="muted">GitLab pushes ingested</span>
   </div>
 </section>
 
@@ -48,6 +88,11 @@ async function loadSummary() {
     const r = await fetch("/api/v1/projects");
     const rows = r.ok ? await r.json() : [];
     document.getElementById("stat-projects").textContent = rows.length;
+    // Reveal the onboarding guide when the org has no projects.
+    // Closes the 5th-round UX-Crit-1 finding: new operators saw
+    // "Projects: 0" with no hint of what to do next.
+    const onb = document.getElementById("onboarding-card");
+    if (onb) onb.hidden = rows.length !== 0;
 
     // Walk projects to aggregate recent runs + open findings.
     let runs = 0, findings = 0;
@@ -125,7 +170,32 @@ async function loadReady() {
   }
 }
 
+async function loadMetricsSummary() {
+  try {
+    const r = await fetch("/api/v1/health/metrics_summary");
+    if (!r.ok) return;
+    const data = await r.json();
+    const set = (id, value, warnAbove = 0, failAbove = null) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = value;
+      el.className = "big " + (
+        failAbove !== null && value > failAbove ? "fail"
+        : value > warnAbove ? "warn"
+        : "ok"
+      );
+    };
+    set("stat-bg-active", data.break_glass_active ?? 0, 0, 5);
+    set("stat-runs-failed", data.runs_last_24h_failed ?? 0, 0, 3);
+    set("stat-dbs-disabled", data.project_dbs_disabled ?? 0, 0, 1);
+    set("stat-webhooks", data.webhook_events_24h ?? 0);
+  } catch (_) {
+    // Non-fatal — the four cards just stay at "…".
+  }
+}
+
 loadReady();
 loadSummary();
+loadMetricsSummary();
 </script>
 {% endblock %}

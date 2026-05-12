@@ -70,6 +70,76 @@ async def _check_redis() -> tuple[bool, str]:
         return False, f"{exc.__class__.__name__}: {exc}"
 
 
+@router.get("/api/v1/health/metrics_summary")
+async def metrics_summary() -> JSONResponse:
+    """Dashboard-card-friendly counts pulled straight from Postgres.
+
+    The Grafana panels use Prometheus, which lives in the workers'
+    process memory — fine for a scrape backend, but if we exposed the
+    same numbers via the platform's in-process registry the worker
+    that ran the cron would see one count and every other worker
+    would see zero. Team B 5th-round must-fix #8.
+
+    Pulls a small fixed set of numbers a new operator wants to see at
+    a glance:
+      * project_dbs_disabled — bindings the daily probe sweep took
+        offline (RW credentials slipped in, etc).
+      * break_glass_active — grants that are still consumable.
+      * runs_last_24h_failed — analyses that errored out yesterday.
+      * webhook_events_24h — pushes the platform ingested.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    out: dict[str, int | str] = {
+        "project_dbs_disabled": 0,
+        "break_glass_active": 0,
+        "runs_last_24h_failed": 0,
+        "webhook_events_24h": 0,
+    }
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
+    try:
+        async with SessionLocal() as db:
+            out["project_dbs_disabled"] = (
+                await db.execute(
+                    text(
+                        "SELECT COUNT(*) FROM project_dbs WHERE disabled_at IS NOT NULL"
+                    )
+                )
+            ).scalar() or 0
+            out["break_glass_active"] = (
+                await db.execute(
+                    text(
+                        "SELECT COUNT(*) FROM diff_break_glass_grants "
+                        "WHERE consumed_at IS NULL AND expires_at > now()"
+                    )
+                )
+            ).scalar() or 0
+            out["runs_last_24h_failed"] = (
+                await db.execute(
+                    text(
+                        "SELECT COUNT(*) FROM analysis_runs "
+                        "WHERE status = 'failed' AND created_at >= :cutoff"
+                    ),
+                    {"cutoff": cutoff},
+                )
+            ).scalar() or 0
+            out["webhook_events_24h"] = (
+                await db.execute(
+                    text(
+                        "SELECT COUNT(*) FROM audit_logs "
+                        "WHERE action = 'webhook.received' AND created_at >= :cutoff"
+                    ),
+                    {"cutoff": cutoff},
+                )
+            ).scalar() or 0
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content={"status": "error", "error": f"{exc.__class__.__name__}"},
+        )
+    return JSONResponse({"status": "ok", **out})
+
+
 async def _check_worker() -> tuple[bool, str]:
     try:
         redis = await get_redis()

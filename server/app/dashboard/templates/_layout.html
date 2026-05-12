@@ -1,5 +1,13 @@
 {% extends "base.html" %}
 {% block body %}
+<script>
+  // UX-only hint — the server enforces authorisation on every
+  // admin-only endpoint with `require_admin`. Client-side this just
+  // hides buttons that would 403 anyway, so a viewer doesn't see a
+  // button labelled "(admin)" and click it just to be told no.
+  // Team B 5th-round must-fix #7 (variable rename) + comment.
+  window.MNEMOS_USER_ROLE_HINT = "{{ user.role }}";
+</script>
 <div class="layout">
   <aside class="sidebar">
     <div class="brand">Mnemos</div>

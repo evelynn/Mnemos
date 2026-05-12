@@ -7,6 +7,22 @@
     <link rel="stylesheet" href="/static/app.css" />
     <script src="https://unpkg.com/htmx.org@2.0.2"></script>
     <script src="/static/ui.js" defer></script>
+    <script>
+      // Restore a fragment that a guest operator stashed before the
+      // login redirect. Runs once on page load — the
+      // ``maybeAutoLoadFromHash`` handler in diffs.html then sees the
+      // hash and opens the approve dialog for the right submission.
+      // PR-17, 5th-round must-fix #3.
+      (function () {
+        try {
+          var stashed = sessionStorage.getItem("mnemos_post_login_hash");
+          if (stashed && !window.location.hash) {
+            sessionStorage.removeItem("mnemos_post_login_hash");
+            window.location.hash = stashed.replace(/^#/, "");
+          }
+        } catch (_) {}
+      })();
+    </script>
   </head>
   <body class="app">
     {% block body %}{% endblock %}
