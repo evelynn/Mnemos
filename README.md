@@ -145,9 +145,15 @@ Mnemos/
 │   │   ├── data_sampler/           # masking, project_db policy, maintenance
 │   │   ├── mcp/                    # MCP server (18 tools)
 │   │   ├── obs/                    # request-id, JSON logs, metrics, errors
-│   │   └── dashboard/              # Jinja templates + HTMX UI (13 tabs)
-│   ├── alembic/versions/           # migrations 0001 → 0011
-│   └── tests/                      # 60 unit + 10 integration tests
+│   │   └── dashboard/              # Jinja templates + HTMX UI
+│   │                               #   12 tabs total: 9 operator (Dashboard,
+│   │                               #   Projects, Analysis, Data, Plans,
+│   │                               #   Diffs, Findings, Audit, Settings)
+│   │                               #   + 3 admin-only (Organizations,
+│   │                               #   SSO/OIDC, GDPR tools)
+│   ├── alembic/versions/           # migrations 0001 → 0015 (see /server/alembic)
+│   └── tests/                      # pytest suite — ~65 unit + ~9 integration
+│                                   # (markers split via `pytest -m integration`)
 ├── analyzers/                      # language/DB analyzer source
 │   ├── ggoss-csharp/
 │   ├── ggoss-ts/
