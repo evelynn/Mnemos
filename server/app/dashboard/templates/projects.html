@@ -6,9 +6,9 @@
 <section>
   <h2>Register project</h2>
   <form onsubmit="return createProject(event)">
-    <label>Name<input type="text" name="name" required /></label>
+    <label>Name<input type="text" name="name" required data-i18n-placeholder="e.g. payments-core" placeholder="e.g. payments-core" /></label>
     <label>GitLab project ID<input type="number" name="gitlab_project_id" required min="1" /></label>
-    <label>GitLab URL<input type="url" name="gitlab_url" required placeholder="https://gitlab.example.com/group/repo" /></label>
+    <label>GitLab URL<input type="url" name="gitlab_url" required data-i18n-placeholder="https://gitlab.example.com/group/repo" placeholder="https://gitlab.example.com/group/repo" /></label>
     <label>Default branch<input type="text" name="default_branch" value="main" /></label>
     <label>Languages
       <select name="languages" multiple required size="2">
@@ -59,7 +59,10 @@ async function createProject(ev) {
       const payload = JSON.parse(text);
       sessionStorage.setItem("mnemos_onboarding_step1_done", payload.id || "1");
       MnemosUI.showToast(
-        `Project "${payload.name || "registered"}" created. Ready to analyse it?`,
+        MnemosUI.t(
+          'Project "$1" created. Ready to analyse it?',
+          { name: payload.name || "registered" },
+        ),
         "success",
       );
       const cta = document.getElementById("post-create-cta");

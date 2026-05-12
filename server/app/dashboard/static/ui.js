@@ -428,6 +428,120 @@
     });
   }
 
+  // ─── i18n (P2-3) ─────────────────────────────────────────────────────
+  // Tiny phrase-book layer. No build step, no library. The platform
+  // ships English as canonical and Korean as the first translation —
+  // the spec's "1인 친화" goal targets Korean operators specifically.
+  //
+  // Locale resolution priority:
+  //   1. ``localStorage["mnemos_locale"]`` (operator preference)
+  //   2. ``navigator.language`` if it starts with ``ko``
+  //   3. ``en`` fallback
+  //
+  // Each phrase is keyed by an English string so a template that
+  // hasn't been i18n-ified yet just returns its argument unchanged.
+  // This lets us migrate page by page without breaking the others.
+
+  var _phraseBookKo = {
+    // Toasts
+    "Project \"$1\" created. Ready to analyse it?":
+      "프로젝트 \"$1\"가 등록되었습니다. 분석을 시작할까요?",
+    "Analysis run completed.": "분석이 완료되었습니다.",
+    "Findings rebuild queued.": "Findings 재구축이 예약되었습니다.",
+    "Approve failed": "승인 실패",
+    "Grant refused": "권한 거부됨",
+    "Live analysis stream disconnected after 6 retries. Click the Monitor button to start a fresh stream, or reload the page to start over.":
+      "분석 스트림 연결이 6회 재시도 후 끊어졌습니다. Monitor 버튼을 다시 누르거나 페이지를 새로고침하세요.",
+    // Onboarding card
+    "Welcome to Mnemos": "Mnemos에 오신 것을 환영합니다",
+    "Register a GitLab project": "GitLab 프로젝트 등록",
+    "Run the first analysis": "첫 분석 실행",
+    "Review the results": "결과 검토",
+    // Empty / status text
+    "No analysis runs yet. Start one from the Analysis tab.":
+      "아직 분석 실행이 없습니다. Analysis 탭에서 시작하세요.",
+    "No projects in your organisation.": "조직에 등록된 프로젝트가 없습니다.",
+    "No data entities yet.": "데이터 엔티티가 없습니다.",
+    "No findings.": "결과가 없습니다.",
+    "Loading…": "로딩 중…",
+    // Placeholders
+    "e.g. payments-core": "예: payments-core",
+    "https://gitlab.example.com/group/repo": "https://gitlab.example.com/group/repo",
+    // Buttons
+    "Refresh": "새로고침",
+    "Load": "불러오기",
+    "Rebuild": "재구축",
+    "Start analysis": "분석 시작",
+    "Sign in": "로그인",
+    // SSE strip
+    "Analysis stream disconnected — open the Analysis tab to reconnect.":
+      "분석 스트림 연결 끊김 — Analysis 탭을 열어 재연결하세요.",
+  };
+
+  var _locale = null;
+  function _resolveLocale() {
+    if (_locale) return _locale;
+    try {
+      var pref = localStorage.getItem("mnemos_locale");
+      if (pref === "en" || pref === "ko") {
+        _locale = pref;
+        return _locale;
+      }
+    } catch (_) {}
+    var lang = (typeof navigator !== "undefined" && navigator.language) || "en";
+    _locale = lang.toLowerCase().startsWith("ko") ? "ko" : "en";
+    return _locale;
+  }
+
+  function setLocale(locale) {
+    if (locale !== "en" && locale !== "ko") return;
+    _locale = locale;
+    try { localStorage.setItem("mnemos_locale", locale); } catch (_) {}
+    // Re-translate any element marked ``data-i18n`` so a runtime
+    // switch updates the UI immediately without a reload.
+    applyI18n(document);
+  }
+
+  function t(key, vars) {
+    var book = _resolveLocale() === "ko" ? _phraseBookKo : null;
+    var phrase = (book && book[key]) || key;
+    if (vars && typeof vars === "object") {
+      var i = 0;
+      Object.keys(vars).forEach(function (k) {
+        i += 1;
+        phrase = phrase.split("$" + i).join(vars[k]);
+      });
+    }
+    return phrase;
+  }
+
+  function applyI18n(root) {
+    var scope = root || document;
+    var nodes = scope.querySelectorAll("[data-i18n]");
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var key = el.getAttribute("data-i18n") || el.textContent;
+      el.textContent = t(key);
+    }
+    // Placeholders.
+    var ph = scope.querySelectorAll("[data-i18n-placeholder]");
+    for (var j = 0; j < ph.length; j++) {
+      var pel = ph[j];
+      var pkey = pel.getAttribute("data-i18n-placeholder");
+      if (pkey) pel.setAttribute("placeholder", t(pkey));
+    }
+  }
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("DOMContentLoaded", function () {
+      applyI18n();
+      // Reflect chosen locale in <html lang> for screen readers.
+      try {
+        document.documentElement.lang = _resolveLocale();
+      } catch (_) {}
+    });
+  }
+
   window.MnemosUI = {
     showToast: showToast,
     showError: showError,
@@ -442,6 +556,9 @@
     relativeTime: relativeTime,
     hydrateRelativeTimes: hydrateRelativeTimes,
     publishSseState: publishSseState,
+    t: t,
+    setLocale: setLocale,
+    applyI18n: applyI18n,
   };
   // Convenience global — many existing templates already call
   // ``escapeHtml(x)`` without a namespace prefix.

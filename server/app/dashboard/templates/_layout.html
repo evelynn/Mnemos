@@ -10,7 +10,7 @@
 </script>
 <div id="sse-cross-tab-strip" hidden role="status" aria-live="polite">
   <span class="sse-status disconnected"></span>
-  <span class="sse-strip-text">Analysis stream disconnected — open the Analysis tab to reconnect.</span>
+  <span class="sse-strip-text" data-i18n="Analysis stream disconnected — open the Analysis tab to reconnect.">Analysis stream disconnected — open the Analysis tab to reconnect.</span>
 </div>
 <div class="layout">
   <aside class="sidebar">
@@ -36,9 +36,36 @@
       <span class="muted">{{ user.username }}</span>
       <button type="submit">Sign out</button>
     </form>
+    <div class="locale-switcher" role="group" aria-label="Language">
+      <button type="button" data-locale="en" class="locale-btn">EN</button>
+      <button type="button" data-locale="ko" class="locale-btn">한국어</button>
+    </div>
   </aside>
   <main class="content">
     {% block content %}{% endblock %}
   </main>
 </div>
+<script>
+  // P2-3 — locale switcher. Persists to localStorage and re-applies
+  // every ``data-i18n`` element on the page so the operator sees the
+  // change instantly without a reload.
+  document.addEventListener("DOMContentLoaded", function () {
+    var current = (function () {
+      try { return localStorage.getItem("mnemos_locale") || ""; } catch (_) { return ""; }
+    })();
+    var btns = document.querySelectorAll(".locale-btn");
+    for (var i = 0; i < btns.length; i++) {
+      var btn = btns[i];
+      if (btn.getAttribute("data-locale") === current) btn.classList.add("active");
+      btn.addEventListener("click", function (ev) {
+        var loc = ev.currentTarget.getAttribute("data-locale");
+        if (window.MnemosUI && window.MnemosUI.setLocale) {
+          window.MnemosUI.setLocale(loc);
+          for (var j = 0; j < btns.length; j++) btns[j].classList.remove("active");
+          ev.currentTarget.classList.add("active");
+        }
+      });
+    }
+  });
+</script>
 {% endblock %}

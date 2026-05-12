@@ -218,6 +218,30 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
 }
 #sse-cross-tab-strip .sse-strip-text { color: #6a4b00; }
 
+/* P2-3 — locale switcher in the sidebar. Two tiny buttons; the
+   active locale is filled, the other is the outline. */
+.locale-switcher {
+  display: flex;
+  gap: 0.3rem;
+  margin: 0.6rem 1rem 0;
+  padding-top: 0.6rem;
+  border-top: 1px solid #d0d7de;
+}
+.locale-btn {
+  flex: 1;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.3rem;
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.locale-btn.active {
+  background: #1f6feb;
+  color: #fff;
+  border-color: #1f6feb;
+}
+
 /* P2-5 — colour-blind status glyphs on analysis-run badges. The
    .verdict pills (clean/warn/blocked) already carried glyphs from
    PR-9; the .badge.* family used on analysis runs and findings did

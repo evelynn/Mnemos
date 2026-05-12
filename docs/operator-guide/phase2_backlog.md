@@ -91,7 +91,28 @@ Retention: 14 days, swept by the existing `retention_purge` cron job.
 
 ## P2-3 — Korean UI (i18n)
 
-**Status**: deferred.
+**Status**: shipped initial wave in PR-26. ``ui.js`` carries a small
+phrase-book (~30 entries covering toasts, onboarding text, empty
+states, and button labels), the sidebar gets an EN / 한국어
+switcher, and the locale persists to ``localStorage["mnemos_locale"]``
+(falls back to ``navigator.language``). Pages opt in by tagging
+elements with ``data-i18n="<english key>"`` or
+``data-i18n-placeholder="<english key>"`` — the runtime translator
+walks both attribute conventions on DOMContentLoaded and after every
+``setLocale`` call.
+
+Follow-up still open:
+
+* Per-page audit — most templates still ship hard-coded English
+  strings. The book needs to grow to cover findings.html, audit.html,
+  diffs.html, plans.html, settings.html.
+* Server-rendered Jinja strings (form labels, errors) — currently
+  English-only. A future PR can either route them through the
+  client-side translator (less ideal) or add a server-side i18n
+  layer that reads ``Accept-Language``.
+* DateTime + number formatting locale awareness — relativeTime
+  already uses ``Intl.RelativeTimeFormat`` so it picks up the
+  browser locale; other ad-hoc number formatting is still en-US.
 
 Round 4-6 audits all flagged that PII *masking* is Korea-aware (RRN
 validators, 휴대폰 prefixes, Korean column-name keywords in
