@@ -38,13 +38,59 @@ async function loadFindings(ev) {
     out.innerHTML = '<p class="muted">No findings.</p>';
     return false;
   }
-  let html = '<table class="data"><thead><tr><th>Kind</th><th>Severity</th><th>Status</th><th>Subject</th><th>Detail</th></tr></thead><tbody>';
-  for (const f of rows) {
-    html += `<tr><td>${f.kind}</td><td>${f.severity}</td><td>${f.status}</td><td><code>${f.subject_node_id ?? f.subject_edge_id ?? ""}</code></td><td><pre>${JSON.stringify(f.detail)}</pre></td></tr>`;
-  }
-  html += "</tbody></table>";
-  out.innerHTML = html;
+  // P2-6 — chunked rendering so a project with thousands of open
+  // findings doesn't freeze the browser on the first innerHTML write.
+  _renderFindingsPaginated(out, rows);
   return false;
+}
+
+const _FINDINGS_PAGE_SIZE = 100;
+
+function _renderFindingsPaginated(out, rows) {
+  const total = rows.length;
+  out.innerHTML = '<table class="data"><thead><tr><th>Kind</th><th>Severity</th>'
+    + '<th>Status</th><th>Subject</th><th>Detail</th></tr></thead>'
+    + '<tbody id="findings-tbody"></tbody></table>'
+    + '<p class="muted" id="findings-status"></p> '
+    + `<button type="button" class="primary" id="findings-more" hidden>`
+    + `Show next ${_FINDINGS_PAGE_SIZE}</button>`;
+  const tbody = document.getElementById("findings-tbody");
+  tbody.dataset.offset = "0";
+  tbody._rows = rows;
+  _showNextFindingsPage();
+}
+
+function _showNextFindingsPage() {
+  const tbody = document.getElementById("findings-tbody");
+  if (!tbody) return;
+  const rows = tbody._rows || [];
+  let offset = parseInt(tbody.dataset.offset || "0", 10);
+  const total = rows.length;
+  const next = Math.min(offset + _FINDINGS_PAGE_SIZE, total);
+  const tpl = document.createElement("template");
+  let html = "";
+  for (let i = offset; i < next; i++) {
+    const f = rows[i];
+    const sev = escapeHtml(f.severity || "info");
+    const status = escapeHtml(f.status || "open");
+    html += `<tr>`
+      + `<td>${escapeHtml(f.kind || "")}</td>`
+      + `<td><span class="badge ${sev}">${sev}</span></td>`
+      + `<td><span class="badge ${status}">${status}</span></td>`
+      + `<td><code>${escapeHtml(f.subject_node_id ?? f.subject_edge_id ?? "")}</code></td>`
+      + `<td><pre>${escapeHtml(JSON.stringify(f.detail))}</pre></td>`
+      + `</tr>`;
+  }
+  tpl.innerHTML = html;
+  tbody.appendChild(tpl.content);
+  tbody.dataset.offset = String(next);
+  const status = document.getElementById("findings-status");
+  if (status) status.textContent = `Showing ${next} of ${total} findings.`;
+  const more = document.getElementById("findings-more");
+  if (more) {
+    more.hidden = next >= total;
+    more.onclick = _showNextFindingsPage;
+  }
 }
 
 async function rebuild() {

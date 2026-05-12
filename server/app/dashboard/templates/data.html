@@ -174,16 +174,64 @@ async function runQuery(ev) {
     out.innerHTML = banner + '<p class="muted">No rows returned.</p>';
     return false;
   }
-  let html = banner + '<table class="data"><thead><tr>'
-    + cols.map(c => `<th>${escapeHtml(c)}</th>`).join("")
-    + '</tr></thead><tbody>';
-  for (const row of rows) {
-    html += '<tr>' + row.map(v => `<td>${escapeHtml(v == null ? "" : v)}</td>`).join("") + '</tr>';
-  }
-  html += '</tbody></table>';
-  if (payload.masking_applied) html += '<p class="muted">masking applied — PII tokens visible in raw SQL response only</p>';
-  out.innerHTML = html;
+  // P2-6 — pagination for large result sets. Rendering 10 000 <tr>
+  // elements in one innerHTML write is enough to freeze a Chrome
+  // worker for several seconds. The new pattern keeps the first
+  // ``_DATA_PAGE_SIZE`` rows in the DOM and reveals more on demand.
+  _renderRowsPaginated(out, banner, cols, rows, payload);
   return false;
+}
+
+const _DATA_PAGE_SIZE = 100;
+
+function _renderRowsPaginated(out, banner, cols, rows, payload) {
+  const total = rows.length;
+  // First batch ships server-rendered HTML; subsequent batches are
+  // injected by ``_showNextDataPage`` so the operator only pays the
+  // render cost they actually scroll into view.
+  const head = '<table class="data"><thead><tr>'
+    + cols.map(c => `<th>${escapeHtml(c)}</th>`).join("")
+    + '</tr></thead><tbody id="data-tbody"></tbody></table>';
+  const status = `<p class="muted" id="data-page-status"></p>`;
+  const more = `<button type="button" class="primary" id="data-page-more" hidden>Show next ${_DATA_PAGE_SIZE} rows</button>`;
+  const tail = payload.masking_applied
+    ? '<p class="muted">masking applied — PII tokens visible in raw SQL response only</p>'
+    : "";
+  out.innerHTML = banner + head + status + " " + more + tail;
+  // Stash the dataset on the dom node so the "Show next" handler
+  // doesn't need a closure that survives subsequent renders.
+  const tbody = document.getElementById("data-tbody");
+  tbody.dataset.offset = "0";
+  tbody.dataset.total = String(total);
+  tbody._rows = rows;
+  _showNextDataPage();
+}
+
+function _showNextDataPage() {
+  const tbody = document.getElementById("data-tbody");
+  if (!tbody) return;
+  const rows = tbody._rows || [];
+  let offset = parseInt(tbody.dataset.offset || "0", 10);
+  const total = rows.length;
+  const next = Math.min(offset + _DATA_PAGE_SIZE, total);
+  // Build the next slice as a DocumentFragment so we make one DOM
+  // write, not one per row.
+  const tpl = document.createElement("template");
+  let html = "";
+  for (let i = offset; i < next; i++) {
+    const r = rows[i] || [];
+    html += '<tr>' + r.map(v => `<td>${escapeHtml(v == null ? "" : v)}</td>`).join("") + '</tr>';
+  }
+  tpl.innerHTML = html;
+  tbody.appendChild(tpl.content);
+  tbody.dataset.offset = String(next);
+  const status = document.getElementById("data-page-status");
+  if (status) status.textContent = `Showing ${next} of ${total} rows.`;
+  const more = document.getElementById("data-page-more");
+  if (more) {
+    more.hidden = next >= total;
+    more.onclick = _showNextDataPage;
+  }
 }
 </script>
 {% endblock %}
