@@ -10,6 +10,67 @@ capable. See [`docs/architecture.md`](docs/architecture.md) for the delivered
 architecture and [`docs/operator-guide/deployment.md`](docs/operator-guide/deployment.md)
 for operator workflows.
 
+## 목적 (Purpose)
+
+> **운영 중인 복합 언어·복합 DB 시스템을 지속적으로 분석·축적하여, 그 축적된 지식 자산으로
+> 개발·질의응답·데이터 조회 요청을 상시 처리하는 자체 호스팅 플랫폼.**
+> *(Mnemos_spec.md §1.1)*
+
+Mnemos exists to solve three problems that plague enterprise polyglot
+systems (C# + TypeScript + Oracle/MSSQL + opaque .NET DLLs):
+
+1. **Knowledge decay** — docs go stale, expertise lives in people's heads,
+   and one-shot analyses are obsolete the moment they finish.
+2. **Operational risk** — generic AI coding tools have no concrete knowledge
+   of a specific production system and cannot be trusted with read-write
+   access to live data or `main` branches.
+3. **Data opacity** — schemas alone don't reveal what actually lives in a
+   column; safe sampling with PII masking is required.
+
+### Three first-class request types
+
+The platform's purpose is **request handling on top of accumulated knowledge**,
+not one-shot analysis. The three request types are co-equal:
+
+| Type | Example | Tooling |
+|------|---------|---------|
+| **Q&A** | "Where is the retry logic for failed payments?" | MCP `search_symbols`, `get_symbol`, graph traversal |
+| **Data lookup** | "Show me 10 sample rows from `Orders`, masked." | MCP `sample_data`, `query_data` — PII masked, audited, rate-limited |
+| **Development** | "Add caching to this endpoint." | MCP `submit_plan` → Gate A → `submit_diff` → Gate B → GitLab MR |
+
+### Non-negotiable design principles (spec §2)
+
+1. Language-neutral knowledge graph is a first-class citizen.
+2. Boundaries are joined by **contracts**, not source-to-source links.
+3. Information contributes only what it can prove — every node/edge carries a
+   `certainty` flag (`verified` / `asserted` / `inferred`).
+4. Conversation & coding loops are delegated to Claude Code; we wrap them
+   with knowledge production, safety gates, and tools.
+5. **The production system is sacred** — no direct writes to `main`,
+   no writes to operational DBs, no production deploys. Bypass switches
+   are **not** built.
+6. Bottom-up incremental analysis — no LLM call ever sees the whole
+   codebase.
+7. The platform is an always-on service, not a batch job; state is
+   restart-safe.
+8. Data access is least-privilege, masked, and audited.
+9. Every operator function is reachable from the GUI.
+10. Single-operator-friendly — Docker Compose, single Python server,
+    minimal external dependencies.
+
+### Phase 1 success criteria (spec §1.5)
+
+- Register a real C# + TS + MSSQL/Oracle system via GUI → first full analysis
+  in ≤ 8 hours.
+- After registration, run in **always-on mode** — react to git push, schema
+  changes, and runtime traces.
+- Q&A / data / dev requests all natural from Claude Code over MCP.
+- Data lookups always return PII-masked samples.
+- Dev requests pass Gate A + Gate B and land as a GitLab MR.
+- All LLM / MCP / file-write / DB / data-query operations are audit-logged.
+- The three safety isolations (source, DB, runtime) are enforced
+  automatically.
+
 ## What's in the box
 
 - **Analysis pipeline** — per-language analyzers feed a bitemporal knowledge
