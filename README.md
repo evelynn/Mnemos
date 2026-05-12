@@ -152,8 +152,9 @@ Mnemos/
 │   │                               #   + 3 admin-only (Organizations,
 │   │                               #   SSO/OIDC, GDPR tools)
 │   ├── alembic/versions/           # migrations 0001 → 0015 (see /server/alembic)
-│   └── tests/                      # pytest suite — ~65 unit + ~9 integration
-│                                   # (markers split via `pytest -m integration`)
+│   └── tests/                      # pytest suite — 212 unit + 16 integration
+│                                   # (`pytest -m "not integration"` for the
+│                                   #  unit-only run that needs no services)
 ├── analyzers/                      # language/DB analyzer source
 │   ├── ggoss-csharp/
 │   ├── ggoss-ts/
@@ -171,8 +172,19 @@ Mnemos/
     └── operator-guide/
         ├── deployment.md           # end-to-end operator runbook
         ├── performance-review.md   # load-test gates + rate-limit tuning
-        └── phase1_checklist.md
+        ├── phase1_checklist.md
+        └── phase2_backlog.md       # deferred items (OTLP Tier 2, i18n, …)
 ```
+
+## Deferred work (Phase 2 backlog)
+
+See [`docs/operator-guide/phase2_backlog.md`](docs/operator-guide/phase2_backlog.md)
+for the items the 7 self-review rounds deliberately deferred — OTLP
+Tier 2 trace merging, Korean UI / i18n, relative-time timestamps,
+colour-blind status glyphs, large-result pagination, dashboard
+drill-down, cross-tab SSE notifications, onboarding auto-progression,
+and TOTP / DPoP step-up auth. Each entry has a P2-* identifier so
+future PRs can link to the spec instead of re-discovering it.
 
 ## Delivery history (branch `claude/review-project-compliance-X8OEU`)
 
@@ -185,6 +197,22 @@ Mnemos/
 | `c6fbce9` | Phase C follow-up — Vault KMS (replacing AWS KMS), require_project_org retrofit, admin dashboard tabs, perf indexes, load-test checklist |
 | `24989d0` | Phase D — re-audit fixes (secure cookies, audit/diffs tenancy, JWKS verification) + spec analysis gaps (live_schema wiring, 6/6 findings, analyzer binary docs) |
 | `f69e51d` | UI completion — dashboard home widgets + settings CRUD real implementation |
+
+### Branch `claude/project-analysis-audit-A4rEd` — 7 self-review rounds (PR-1 → PR-18)
+
+Each "round" pairs a Team A design agent with a Team B critic agent
+that must surface ≥1 must-fix. The cycle terminates when two
+consecutive rounds raise zero new code defects.
+
+| Round | PRs | Headline change |
+|------|------|-----------------|
+| 1 | PR-1 → PR-6 | Critical-2: `override=true` removed in favour of a break-glass TTL grant; ProjectDB now refuses a binding without a metadata-only read-only probe. Plus webhook → ARQ enqueue, ARQ cron + Postgres advisory locks, SQLGlot row-cap with Korean PII baseline, real `git worktree` + read-only bind mount. |
+| 2 | PR-7 → PR-10 | DB-probe analyzer verb (mssql + oracle, metadata-only — no rolled-back DML); data-path safety net (DRY, dialect single-source, max-row clamp + RFC 7234 `Warning` header, env allowlist, `worktree_meta` JSONB); UI consolidation (focus, modal dialogs, dialog-polyfill, toast helpers, `renderJsonFromScript`); Korean PII validators (RRN / foreigner ID / Luhn / driver's licence). |
+| 3 | PR-11 → PR-14 | PII validator wired into the masking engine (no more leaking `[UNVERIFIED_*]`); four real Grafana metrics emitted from real call sites; UI a11y / IME-safe rationale counter / clock-offset-aware countdown; ProjectDB + data-query GUI forms; break-glass share-context URL (token still out-of-band). |
+| 4 | PR-15 + PR-16 | UX quick wins (component_id surfaced, regex client validation, Korean column names in `PARTIAL_MASK_COLUMNS`, friendly SQL parser errors, secret-empty hint) and a full pytest green-up (188/188). |
+| 5 | PR-17 | Share-URL guest flow (`sessionStorage`-based hash stash/restore); first-run onboarding card; SSE reconnect with exponential backoff + 50% jitter + `visibilitychange`; `MNEMOS_USER_ROLE_HINT` button gating; DB-aggregate `/api/v1/health/metrics_summary` (replaces process-local Prometheus); CI builds the .NET analyzers and asserts ≥9 integration tests actually collect. |
+| 6 | PR-18 | `submit_diff` now requires operator (closed the viewer can-spam loophole); dashboard auto-redirects `#approve=…` to `/diffs`; SSE failure toast names the Monitor button explicitly; `docs/operator-guide/phase2_backlog.md` consolidates the 10 deferred items. |
+| 7 | PR-19 | Doc cleanup — README links the Phase 2 backlog and the test counts match reality (212 unit + 16 integration). Round 7 found zero code defects; the cycle terminates here. |
 
 ## Tests
 
