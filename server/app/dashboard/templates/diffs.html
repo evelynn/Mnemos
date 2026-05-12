@@ -119,6 +119,20 @@ async function load(ev) {
   return false;
 }
 
+// P2-7 dashboard drill-down — when arriving via the "Break-glass
+// active" stat card we don't have a plan id, so fall back to the
+// org-scoped feed at /api/v1/diff_submissions?verdict=blocked.
+async function loadFiltered(verdict) {
+  const r = await fetch(`/api/v1/diff_submissions?verdict=${encodeURIComponent(verdict)}`);
+  const rows = r.ok ? await r.json() : [];
+  const out = document.getElementById("out");
+  if (!rows.length) {
+    out.innerHTML = `<p class="muted">No ${escapeHtml(verdict)} submissions in your organisation.</p>`;
+    return;
+  }
+  out.innerHTML = rows.map(renderSubmission).join("");
+}
+
 function renderSubmission(s) {
   const findings = s.auto_review_findings || {};
   const verdict = findings.verdict || "clean";
@@ -290,6 +304,15 @@ async function maybeAutoLoadFromHash() {
 }
 
 document.addEventListener("DOMContentLoaded", maybeAutoLoadFromHash);
+
+// P2-7 — ``?filter=blocked`` from the dashboard stat-card triggers
+// the org-wide feed instead of the plan-scoped one.
+document.addEventListener("DOMContentLoaded", () => {
+  const verdict = new URLSearchParams(window.location.search).get("filter");
+  if (verdict === "blocked" || verdict === "warn" || verdict === "clean") {
+    loadFiltered(verdict);
+  }
+});
 
 function dismissTokenDialog() {
   // Called both from the explicit "Close" button and from the dialog's

@@ -108,7 +108,22 @@ async function loadRuns(ev) {
   ev.preventDefault();
   const pid = document.getElementById("rpid").value.trim();
   const r = await fetch(`/api/v1/projects/${pid}/analysis_runs`);
-  const rows = await r.json();
+  let rows = await r.json();
+  // P2-7 drill-down — apply client-side ``?status=`` / ``?since=24h``
+  // filters when the dashboard sent us here with a specific question.
+  const params = new URLSearchParams(window.location.search);
+  const status = params.get("status");
+  const since = params.get("since");
+  if (Array.isArray(rows) && (status || since)) {
+    rows = rows.filter((r) => {
+      if (status && r.status !== status) return false;
+      if (since === "24h") {
+        const ts = new Date(r.started_at || r.created_at || 0).getTime();
+        if (Date.now() - ts > 24 * 3600 * 1000) return false;
+      }
+      return true;
+    });
+  }
   const out = document.getElementById("runs");
   if (!Array.isArray(rows) || rows.length === 0) {
     out.innerHTML = '<p class="muted">No runs yet.</p>';
@@ -328,6 +343,14 @@ function renderPipeline(stages) {
   if (onboard) {
     const banner = document.getElementById("onboard-banner");
     if (banner) banner.hidden = false;
+  }
+  // P2-7 drill-down — when arriving with status/since filters, the
+  // operator's intent is "show me the filtered list now". If a
+  // project id is in the URL, auto-trigger Load runs so they don't
+  // also have to click the button.
+  if (pid && (params.has("status") || params.has("since"))) {
+    const form = document.querySelector('form[onsubmit*="loadRuns"]');
+    if (form) form.dispatchEvent(new Event("submit"));
   }
 })();
 </script>

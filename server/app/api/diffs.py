@@ -291,6 +291,34 @@ async def reject_submission(
     return _out(submission)
 
 
+@router.get("/api/v1/diff_submissions")
+async def list_submissions_filtered(
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+    verdict: str | None = None,
+    limit: int = 100,
+) -> list[DiffOut]:
+    """Org-scoped diff-submission feed for the dashboard drill-downs (P2-7).
+
+    The 7-round audit's stat-card UX needed an org-wide list (the
+    operator clicks "Break-glass active: 5" without knowing which
+    plan that 5 belongs to). Filters are intentionally narrow — just
+    verdict + a cap — to keep the index path predictable.
+    """
+    stmt = (
+        select(DiffSubmission)
+        .join(Plan, Plan.id == DiffSubmission.plan_id)
+        .join(Project, Project.id == Plan.project_id)
+        .where(Project.organization_id == user.organization_id)
+        .order_by(DiffSubmission.submitted_at.desc())
+        .limit(max(1, min(limit, 500)))
+    )
+    if verdict in {"clean", "warn", "blocked"}:
+        stmt = stmt.where(DiffSubmission.verdict == verdict)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [_out(r) for r in rows]
+
+
 @router.get("/api/v1/plans/{plan_id}/submissions")
 async def list_plan_submissions(
     plan_id: uuid.UUID,

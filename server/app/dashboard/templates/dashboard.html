@@ -20,21 +20,21 @@
 </section>
 
 <section class="summary-grid">
-  <div class="stat-card">
+  <a class="stat-card stat-link" href="/projects" aria-label="Manage projects">
     <h3>Projects</h3>
     <div class="big" id="stat-projects">…</div>
-    <a href="/projects" class="muted">Manage →</a>
-  </div>
-  <div class="stat-card">
+    <span class="muted">Manage →</span>
+  </a>
+  <a class="stat-card stat-link" href="/analysis" aria-label="Open analysis runs">
     <h3>Recent runs (7d)</h3>
     <div class="big" id="stat-runs">…</div>
-    <a href="/analysis" class="muted">Open Analysis →</a>
-  </div>
-  <div class="stat-card">
+    <span class="muted">Open Analysis →</span>
+  </a>
+  <a class="stat-card stat-link" href="/findings?status=open" aria-label="Open findings list">
     <h3>Open findings</h3>
     <div class="big" id="stat-findings">…</div>
-    <a href="/findings" class="muted">Open Findings →</a>
-  </div>
+    <span class="muted">Open Findings →</span>
+  </a>
   <div class="stat-card">
     <h3>Readiness</h3>
     <div class="big" id="stat-ready">…</div>
@@ -43,26 +43,26 @@
 </section>
 
 <section class="summary-grid">
-  <div class="stat-card">
+  <a class="stat-card stat-link" href="/diffs?filter=blocked" aria-label="Diff submissions awaiting break-glass approval">
     <h3>Break-glass active</h3>
     <div class="big" id="stat-bg-active">…</div>
-    <span class="muted">unconsumed grants (15-min TTL)</span>
-  </div>
-  <div class="stat-card">
+    <span class="muted">unconsumed grants (15-min TTL) →</span>
+  </a>
+  <a class="stat-card stat-link" href="/analysis?status=failed&since=24h" aria-label="Recent failed analysis runs">
     <h3>Failed runs (24h)</h3>
     <div class="big" id="stat-runs-failed">…</div>
-    <a href="/analysis" class="muted">Investigate →</a>
-  </div>
-  <div class="stat-card">
+    <span class="muted">Investigate →</span>
+  </a>
+  <a class="stat-card stat-link" href="/settings#project-dbs" aria-label="Project DB bindings">
     <h3>Disabled DBs</h3>
     <div class="big" id="stat-dbs-disabled">…</div>
-    <span class="muted">probe sweep verdict</span>
-  </div>
-  <div class="stat-card">
+    <span class="muted">probe sweep verdict →</span>
+  </a>
+  <a class="stat-card stat-link" href="/audit?action=webhook.received" aria-label="Webhook ingest audit log">
     <h3>Webhook events (24h)</h3>
     <div class="big" id="stat-webhooks">…</div>
-    <span class="muted">GitLab pushes ingested</span>
-  </div>
+    <span class="muted">GitLab pushes ingested →</span>
+  </a>
 </section>
 
 <section>
@@ -78,6 +78,23 @@
 .stat-card .big.ok { color: #145a1f; }
 .stat-card .big.warn { color: #6a4b00; }
 .stat-card .big.fail { color: #7a1818; }
+/* P2-7 drill-down — entire card is the affordance, so make it look
+   clickable when the card is wrapped in an <a>. */
+a.stat-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.05s;
+}
+a.stat-link:hover {
+  border-color: #1f6feb;
+  box-shadow: 0 1px 4px rgba(31, 111, 235, 0.18);
+}
+a.stat-link:active { transform: translateY(1px); }
+a.stat-link:focus-visible {
+  outline: 2px solid #1f6feb;
+  outline-offset: 2px;
+}
 </style>
 
 <script>

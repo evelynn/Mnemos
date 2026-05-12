@@ -36,5 +36,21 @@ async function load(ev) {
   out.innerHTML = html;
   return false;
 }
+
+// P2-7 drill-down — pre-fill filters from the dashboard's
+// "Webhook events" stat-card link (``?action=webhook.received``) and
+// kick off the search automatically so the operator sees results
+// immediately.
+(function fromQuery() {
+  const params = new URLSearchParams(window.location.search);
+  const action = params.get("action");
+  const actor = params.get("actor");
+  if (action) document.getElementById("action").value = action;
+  if (actor) document.getElementById("actor").value = actor;
+  if (action || actor) {
+    const form = document.querySelector('form[onsubmit*="load"]');
+    if (form) form.dispatchEvent(new Event("submit"));
+  }
+})();
 </script>
 {% endblock %}

@@ -54,5 +54,15 @@ async function rebuild() {
   if (!r.ok) { await MnemosUI.showError("Rebuild failed", r); return; }
   MnemosUI.showToast("Findings rebuild queued.", "success");
 }
+
+// P2-7 dashboard drill-down — accept ``?status=open&severity=…`` so
+// the stat-card link arrives with the filter already applied.
+(function fromQuery() {
+  const params = new URLSearchParams(window.location.search);
+  const status = params.get("status");
+  const severity = params.get("severity");
+  if (status) document.getElementById("st").value = status;
+  if (severity) document.getElementById("sev").value = severity;
+})();
 </script>
 {% endblock %}
