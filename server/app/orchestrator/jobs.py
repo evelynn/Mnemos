@@ -26,6 +26,7 @@ from app.extractor.agent import Extractor
 from app.extractor.runner import summarise_l1, summarise_l2, summarise_l3
 from app.merge.contract_id import http_contract_id
 from app.merge.findings import run_all as rebuild_findings
+from app.merge.runtime import reconcile_observations
 from app.merge.writer import upsert_edge, upsert_node
 from app.models.graph import AnalysisRun
 from app.models.projects import Project
@@ -399,7 +400,29 @@ async def run_ingest(
             ) as stage:
                 async with SessionLocal() as session:
                     finding_stats = await rebuild_findings(session, project_id)
-                totals["findings"] = sum(finding_stats.values())
+                    # OTLP Tier 2 reconcile hook (P2-1) — replay
+                    # buffered runtime observations against the freshly
+                    # rebuilt edge set. Best-effort: a reconcile failure
+                    # must not fail the analysis run, since the buffer
+                    # is replayed next time around anyway.
+                    try:
+                        from app.models.projects import Project as _Project
+
+                        proj_row = await session.get(_Project, project_id)
+                        if proj_row is not None:
+                            recon = await reconcile_observations(
+                                session,
+                                project_id=project_id,
+                                organization_id=proj_row.organization_id,
+                            )
+                            finding_stats["runtime_matched"] = recon["matched"]
+                            finding_stats["runtime_unmatched"] = recon["unmatched"]
+                            await session.commit()
+                    except Exception:
+                        await session.rollback()
+                totals["findings"] = sum(
+                    v for v in finding_stats.values() if isinstance(v, int)
+                )
                 for _ in range(totals["findings"]):
                     await stage.increment()
                 stage.set_stats(finding_stats)

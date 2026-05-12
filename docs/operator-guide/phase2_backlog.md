@@ -17,7 +17,19 @@ not built yet. This file is the single index.
 
 ## P2-1 — OTLP Tier 2: trace → exercised-edge merge
 
-**Status**: deferred.
+**Status**: shipped in PR-25 (initial). The receiver now assembles a
+trace tree, infers ``EXPOSES`` vs ``CALLS`` from ``span.kind``,
+picks operation keys in the documented preference order
+(``http.route`` → ``rpc.method`` → ``db.sql.table+db.operation`` →
+``span.name``), and buffers triples in ``runtime_observations`` for
+the merge stage to reconcile. The merge call site fires after every
+``rebuild_findings`` pass.
+
+Follow-up still open: distributed-trace assembly across multiple
+receiver requests (currently a trace must arrive in one POST), and a
+richer edge-match heuristic than the ``operation``/``path``/``route``
+field probes — both are spec §7.6 work the round-5 audit explicitly
+deferred past Phase 1.
 
 **Source**: spec §7.6 "exercised edge"; commit `e892182` (PR-11) added
 metric emit but left the merge unimplemented; PR-17 commit message
@@ -49,7 +61,11 @@ positives we'd have to live with.
 
 ## P2-2 — RuntimeObservation table
 
-**Status**: deferred (depends on P2-1).
+**Status**: shipped in PR-25 (alembic migration 0016). See
+``server/app/models/runtime.py``. The UNIQUE constraint Team B asked
+for (``organization_id, service, operation, kind``) backs the
+``INSERT … ON CONFLICT DO UPDATE`` upsert path in
+``app.merge.runtime.buffer_observations``.
 
 Schema sketch:
 
