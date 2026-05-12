@@ -43,14 +43,30 @@
   <header><h2 id="token-title">Break-glass token issued</h2></header>
   <div class="body">
     <p class="muted">
-      Hand this token to a different operator. It expires in
-      <strong class="countdown" id="token-countdown">15:00</strong>
-      and is single-use. The initiator (you) cannot consume it.
+      Hand the <strong>token</strong> to a different operator out-of-band
+      (Slack DM, voice call, etc). Send the <strong>share link</strong>
+      separately — clicking it opens the approve dialog with the right
+      submission already loaded. Expires in
+      <strong class="countdown" id="token-countdown">15:00</strong>.
+      Single-use. The initiator (you) cannot consume it.
     </p>
+
+    <label class="muted">Token (carries authority — copy via secure channel)</label>
     <div class="token-block">
       <code id="token-value"></code>
       <button type="button" class="primary" onclick="copyTokenToClipboard()">Copy</button>
     </div>
+
+    <label class="muted" style="margin-top:0.8rem; display:block;">Share link (no authority — only loads the right form)</label>
+    <div class="token-block">
+      <input id="share-url" type="text" readonly />
+      <button type="button" onclick="copyShareUrl()">Copy link</button>
+    </div>
+    <p class="muted" style="font-size:0.8rem; margin:0.3rem 0 0;">
+      The link contains the submission id and a 6-char grant fingerprint
+      in the URL fragment, so it never reaches the server access log.
+      Clear your browser history after the operator confirms.
+    </p>
   </div>
   <menu>
     <button type="button" onclick="dismissTokenDialog()">Close</button>
@@ -195,6 +211,16 @@ async function submitGrant() {
 
 function showTokenDialog(payload) {
   document.getElementById("token-value").textContent = payload.token;
+  // Build the share URL — token NOT included. The fragment carries
+  // only the ids needed to land the operator on the right approve
+  // dialog; the token still travels OOB.
+  const sc = payload.share_context || {};
+  if (sc.submission_id) {
+    const u = new URL(window.location.href);
+    u.hash = `approve=${sc.submission_id}&plan=${sc.plan_id}&g=${sc.grant_id_short}`;
+    u.search = ""; // strip any query params that may be present
+    document.getElementById("share-url").value = u.toString();
+  }
   // Anchor the countdown against the server clock from `payload.server_now`
   // (PR-11 added that field). A laptop clock that drifts 5 minutes no
   // longer makes the dialog lie about how much time is left.
@@ -225,6 +251,45 @@ async function copyTokenToClipboard() {
     MnemosUI.showToast("Copy failed — select the token manually and copy with Ctrl/Cmd-C.", "warn");
   }
 }
+
+async function copyShareUrl() {
+  const url = document.getElementById("share-url").value;
+  if (!url) return;
+  const ok = await MnemosUI.copyToClipboard(url);
+  MnemosUI.showToast(
+    ok ? "Share link copied." : "Copy failed — select the URL manually.",
+    ok ? "success" : "warn",
+  );
+}
+
+// Hash router — when the operator visits a share link like
+// `/diffs#approve=<sid>&plan=<pid>`, auto-load the matching plan and
+// pre-fill the approve dialog with the submission id. Only the *token*
+// field is left empty; the operator pastes that in from the OOB channel.
+async function maybeAutoLoadFromHash() {
+  if (!window.location.hash) return;
+  const hash = window.location.hash.slice(1);
+  const params = new URLSearchParams(hash);
+  const sid = params.get("approve");
+  const pid = params.get("plan");
+  if (!sid || !pid) return;
+  const pidInput = document.getElementById("pid");
+  if (pidInput) {
+    pidInput.value = pid;
+    // Trigger the existing load() flow so submissions render.
+    await load(new Event("submit"));
+  }
+  // Now open the approve dialog for that submission.
+  pendingApproveId = sid;
+  document.getElementById("approve-token").value = "";
+  MnemosUI.showDialog("approve-dialog");
+  MnemosUI.showToast(
+    `Loaded shared approval context (submission ${sid.slice(0,8)}…). Paste the token from the OOB channel.`,
+    "success",
+  );
+}
+
+document.addEventListener("DOMContentLoaded", maybeAutoLoadFromHash);
 
 function dismissTokenDialog() {
   // Called both from the explicit "Close" button and from the dialog's

@@ -67,6 +67,21 @@ class BreakGlassRequest(BaseModel):
     )
 
 
+class ShareContext(BaseModel):
+    """Just enough context for the *consumer* to find this submission.
+
+    Does **not** carry the token. The 3rd-round scenario audit
+    pointed out that admin → operator hand-off was entirely manual
+    (Slack/email) and the operator still had to remember which plan
+    the submission belonged to. The token continues to travel
+    out-of-band; this struct lets the GUI auto-populate the rest.
+    """
+
+    submission_id: uuid.UUID
+    plan_id: uuid.UUID
+    grant_id_short: str  # sha256 prefix of the token hash (6 chars)
+
+
 class BreakGlassResponse(BaseModel):
     grant_id: uuid.UUID
     token: str
@@ -81,6 +96,7 @@ class BreakGlassResponse(BaseModel):
     # skewed laptop clock no longer mis-reports the remaining time.
     server_now: datetime
     issued_at: datetime
+    share_context: ShareContext
 
 
 @router.post("/api/v1/diff_submissions/{submission_id}/break_glass_grant")
@@ -151,6 +167,15 @@ async def issue_break_glass_grant(
         rerun_verdict=report.verdict,
         server_now=datetime.now(tz=timezone.utc),
         issued_at=grant.created_at,
+        share_context=ShareContext(
+            submission_id=submission.id,
+            plan_id=plan.id,
+            # 6-char prefix is enough to identify the grant in audit
+            # logs without exposing anything that could be used to
+            # consume it — the full token (32 bytes URL-safe) stays in
+            # the response body and goes nowhere else.
+            grant_id_short=grant.token_hash[:6],
+        ),
     )
 
 
