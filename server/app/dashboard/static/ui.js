@@ -371,6 +371,63 @@
     });
   }
 
+  // ─── SSE cross-tab status (P2-8) ─────────────────────────────────────
+  // When the Analysis tab's EventSource goes live or drops out, the
+  // operator on a different tab has no way to know. PR-17 added the
+  // ``#sse-status`` pill on /analysis only; this layer broadcasts
+  // state changes through ``BroadcastChannel("mnemos-sse")`` so a
+  // sticky strip at the top of every page can mirror them.
+  //
+  // Publisher: analysis.html's monitor()/openStream() call
+  // ``publishSseState(state)``. Subscriber: every page that loads
+  // _layout.html (which includes a hidden ``#sse-cross-tab-strip``
+  // ready to be revealed).
+
+  var _sseChannel = null;
+  function _bc() {
+    if (_sseChannel) return _sseChannel;
+    if (typeof BroadcastChannel === "undefined") return null;
+    try {
+      _sseChannel = new BroadcastChannel("mnemos-sse");
+    } catch (_) {
+      _sseChannel = null;
+    }
+    return _sseChannel;
+  }
+
+  function publishSseState(state) {
+    var ch = _bc();
+    if (!ch) return;
+    try { ch.postMessage({ state: state, at: Date.now() }); } catch (_) {}
+  }
+
+  function _applySseStrip(state) {
+    var strip = document.getElementById("sse-cross-tab-strip");
+    if (!strip) return;
+    // The strip stays hidden in two cases:
+    //   1. The current page is /analysis — the in-tab badge is
+    //      authoritative there, so a second indicator would be noise.
+    //   2. The last broadcast said "live" — a green strip on every
+    //      page would just be visual clutter.
+    var onAnalysis = window.location.pathname === "/analysis";
+    if (onAnalysis || state === "live" || state === "idle") {
+      strip.hidden = true;
+      return;
+    }
+    strip.hidden = false;
+  }
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("DOMContentLoaded", function () {
+      var ch = _bc();
+      if (!ch) return;
+      ch.onmessage = function (ev) {
+        if (!ev || !ev.data) return;
+        _applySseStrip(ev.data.state);
+      };
+    });
+  }
+
   window.MnemosUI = {
     showToast: showToast,
     showError: showError,
@@ -384,6 +441,7 @@
     clockOffsetFromPayload: clockOffsetFromPayload,
     relativeTime: relativeTime,
     hydrateRelativeTimes: hydrateRelativeTimes,
+    publishSseState: publishSseState,
   };
   // Convenience global — many existing templates already call
   // ``escapeHtml(x)`` without a namespace prefix.

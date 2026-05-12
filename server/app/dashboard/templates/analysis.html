@@ -172,6 +172,13 @@ function stopMonitor() {
   if (_sse) _sse.close();
   if (_poll) clearInterval(_poll);
   _sse = null; _poll = null;
+  // P2-8: a manual Stop clears the cross-tab strip too.
+  if (window.MnemosUI && window.MnemosUI.publishSseState) {
+    window.MnemosUI.publishSseState("idle");
+  }
+  // The in-tab badge gets hidden — no run is being watched.
+  const el = _sseStatusEl();
+  if (el) el.hidden = true;
 }
 
 async function monitor() {
@@ -196,11 +203,17 @@ function _sseStatusEl() {
 }
 function _markSseStatus(state) {
   const el = _sseStatusEl();
-  if (!el) return;
-  el.hidden = false;
-  el.classList.remove("live", "disconnected");
-  el.classList.add(state);
-  el.textContent = state === "live" ? "live" : "disconnected";
+  if (el) {
+    el.hidden = false;
+    el.classList.remove("live", "disconnected");
+    el.classList.add(state);
+    el.textContent = state === "live" ? "live" : "disconnected";
+  }
+  // P2-8 — broadcast to other tabs so the cross-tab strip can
+  // mirror the in-tab badge.
+  if (window.MnemosUI && window.MnemosUI.publishSseState) {
+    window.MnemosUI.publishSseState(state);
+  }
 }
 
 async function openStream(id) {

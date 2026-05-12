@@ -198,6 +198,26 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
 .sse-status.disconnected { background: #ffdede; color: #7a1818; }
 .sse-status.disconnected::before { content: "⚠ "; }
 
+/* P2-8 cross-tab strip — sticky thin banner at the very top of any
+   non-/analysis tab when the platform's monitoring stream is in a
+   non-live state. Distinct from a toast (which is transient) — the
+   strip persists until the stream recovers, so an operator who
+   walked away from /analysis sees the warning the moment they
+   focus a different tab. */
+#sse-cross-tab-strip {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.35rem 0.9rem;
+  background: #fff4e6;
+  border-bottom: 1px solid #f1c98a;
+  font-size: 0.85rem;
+}
+#sse-cross-tab-strip .sse-strip-text { color: #6a4b00; }
+
 /* P2-5 — colour-blind status glyphs on analysis-run badges. The
    .verdict pills (clean/warn/blocked) already carried glyphs from
    PR-9; the .badge.* family used on analysis runs and findings did
