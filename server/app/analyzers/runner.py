@@ -11,11 +11,54 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+# Subset of the platform's own env that an analyzer subprocess is
+# allowed to see. Everything outside this set is stripped so a future
+# config addition (Slack webhook URL, OIDC client secret, …) cannot
+# leak into a binary we don't fully audit. Team B 2nd-round finding A.
+_SAFE_HOST_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        # Locale / linker / glibc — analyzers genuinely need these.
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "TMPDIR",
+        # Python and .NET runtime housekeeping (PYTHONPATH intentionally
+        # omitted — we never want platform code to be importable by the
+        # analyzer subprocess).
+        "PYTHONIOENCODING",
+        "PYTHONUNBUFFERED",
+        "DOTNET_ROOT",
+        # Mnemos-controlled passthroughs.
+        "MNEMOS_DB_CONN",
+        "MNEMOS_MAX_ROWS",
+        "MNEMOS_REQUEST_ID",
+    }
+)
+
+
+def _build_env(extra: dict[str, str] | None) -> dict[str, str]:
+    """Return the env dict an analyzer subprocess sees.
+
+    Starts from the allowlisted host env, then layers caller-supplied
+    keys on top. Anything not in :data:`_SAFE_HOST_ENV_KEYS` and not
+    explicitly passed by the caller is dropped.
+    """
+    safe: dict[str, str] = {
+        k: v for k, v in os.environ.items() if k in _SAFE_HOST_ENV_KEYS
+    }
+    if extra:
+        safe.update(extra)
+    return safe
 
 
 @dataclass(frozen=True)
@@ -54,11 +97,7 @@ class AnalyzerRunner:
         # caller may put credentials there (DB live_schema --conn-ref).
         log.info("spawning analyzer: %s %s %s", self.binary, verb, str(path))
 
-        proc_env = None
-        if env is not None:
-            import os as _os
-
-            proc_env = {**_os.environ, **env}
+        proc_env = _build_env(env)
 
         proc = await asyncio.create_subprocess_exec(
             *args,

@@ -36,6 +36,12 @@ _STATIC_DIR = Path(__file__).parent / "dashboard" / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Boot-time guards. Both checks are cheap, fail-fast, and protect
+    # invariants the rest of the code already assumes — better to refuse
+    # to start than to serve traffic with a broken contract.
+    from app.safety.dialects import assert_registry_aligned
+
+    assert_registry_aligned()
     yield
     # Flush cached singletons so SIGTERM shutdown stays clean.
     await close_redis()

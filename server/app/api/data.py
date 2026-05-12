@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +24,7 @@ from app.db import get_session
 from app.models.auth import User
 from app.models.graph import Node
 from app.models.samples import DataQueryLog, DataSample
+from app.safety.dialects import SUPPORTED_DIALECTS, is_supported
 from app.safety.ratelimit import actor_key, enforce as rl_enforce
 from app.safety.sql_limit import (
     DEFAULT_MAX_ROWS,
@@ -262,11 +263,12 @@ class QueryRequest(BaseModel):
     max_rows: int | None = Field(
         default=None,
         ge=1,
-        le=DEFAULT_MAX_ROWS,
         description=(
-            "Operator-supplied row cap. Defaults to the platform max "
-            "(10 000) and is silently clamped if larger. The analyzer "
-            "applies the same cap on its fetchmany loop."
+            "Operator-supplied row cap. Values above the platform max "
+            "(10 000) are silently clamped and the response carries a "
+            "Warning header (RFC 7234) so the operator can see what we "
+            "trimmed. The analyzer honours the same cap via "
+            "MNEMOS_MAX_ROWS on its fetchmany loop."
         ),
     )
 
@@ -276,6 +278,7 @@ async def query_data(
     project_id: uuid.UUID,
     body: QueryRequest,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_session),
     user: User = Depends(require_operator),
 ) -> dict[str, Any]:
@@ -294,12 +297,36 @@ async def query_data(
     # is not sufficient — a `WITH cte AS (UPDATE ...) SELECT ...` form
     # is a SELECT shell over a write statement.
     pdb_for_dialect = await resolve_project_db(db, project_id, body.db_component_id)
-    dialect = pdb_for_dialect.kind if pdb_for_dialect is not None else "postgres"
+    if pdb_for_dialect is None or not is_supported(pdb_for_dialect.kind):
+        # Refuse to guess a dialect for an unbound or unknown kind.
+        # The previous fallback to postgres would silently mis-parse
+        # MSSQL ``TOP`` / Oracle ``FETCH FIRST`` quirks.
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "db_component_unbound_or_unsupported",
+                "component_id": body.db_component_id,
+                "supported": sorted(SUPPORTED_DIALECTS),
+            },
+        )
+
+    # Clamp the operator-supplied max_rows instead of refusing (Team B
+    # critique 1.3: UX-driven choice, audit trail tells the truth).
+    requested = body.max_rows or DEFAULT_MAX_ROWS
+    effective_cap = min(requested, DEFAULT_MAX_ROWS)
+    cap_clamped = requested > DEFAULT_MAX_ROWS
+    if cap_clamped:
+        # RFC 7234 §5.5 — Warning: 299 from a non-cache agent communicates
+        # a transformation the operator should know about.
+        response.headers["Warning"] = (
+            f'299 - "max_rows clamped from {requested} to {DEFAULT_MAX_ROWS}"'
+        )
+
     try:
         enforced = enforce_limit(
             body.sql,
-            dialect=dialect,
-            max_rows=body.max_rows or DEFAULT_MAX_ROWS,
+            dialect=pdb_for_dialect.kind,
+            max_rows=effective_cap,
         )
     except WriteStatementBlocked as exc:
         await audit_record(

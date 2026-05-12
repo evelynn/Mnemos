@@ -38,6 +38,10 @@ class PlanSubmit(BaseModel):
     tasks: list[PlanTask]
     target_component_id: str
     requester: str
+    # Optional reproducibility pin. None → worktree is created at the
+    # mirror's current HEAD; the resolved SHA is recorded in
+    # worktree_meta either way so re-runs can reference it.
+    base_sha: str | None = None
 
 
 class PlanOut(BaseModel):
@@ -98,8 +102,12 @@ async def submit_plan(
     await db.commit()
     await db.refresh(plan)
 
-    worktree = await create_worktree(plan.id, project_id)
+    worktree = await create_worktree(plan.id, project_id, base_sha=body.base_sha)
     plan.worktree_path = str(worktree)
+    plan.worktree_meta = {
+        "base_sha": body.base_sha,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
     await db.commit()
     await db.refresh(plan)
 

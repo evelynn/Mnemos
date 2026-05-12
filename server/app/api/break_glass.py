@@ -29,16 +29,18 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Re-use the canonical resolver from the diffs router. The previous
+# version of this module duplicated `_resolve_submission_in_user_org`
+# verbatim, which is the kind of drift Team B flagged — same
+# behaviour today, divergent tomorrow.
+from app.api.diffs import _resolve_submission_in_user_org
 from app.audit.logger import record as audit_record
-from app.auth.org_scope import same_org
 from app.auth.rbac import require_admin
 from app.db import get_session
 from app.models.auth import User
-from app.models.plans import DiffBreakGlassGrant, DiffSubmission, Plan
-from app.models.projects import Project
+from app.models.plans import DiffBreakGlassGrant
 from app.safety.review import run_pipeline
 
 router = APIRouter(tags=["break_glass"])
@@ -67,31 +69,6 @@ class BreakGlassResponse(BaseModel):
     token: str
     expires_at: datetime
     rerun_verdict: str
-
-
-async def _resolve_submission_in_user_org(
-    db: AsyncSession, submission_id: uuid.UUID, user: User
-) -> tuple[DiffSubmission, Plan]:
-    submission = (
-        await db.execute(
-            select(DiffSubmission).where(DiffSubmission.id == submission_id)
-        )
-    ).scalar_one_or_none()
-    if submission is None:
-        raise HTTPException(status_code=404, detail="not_found")
-    plan = (
-        await db.execute(select(Plan).where(Plan.id == submission.plan_id))
-    ).scalar_one_or_none()
-    if plan is None:
-        raise HTTPException(status_code=404, detail="not_found")
-    project_org = (
-        await db.execute(
-            select(Project.organization_id).where(Project.id == plan.project_id)
-        )
-    ).scalar_one_or_none()
-    if not same_org(user, project_org):
-        raise HTTPException(status_code=404, detail="not_found")
-    return submission, plan
 
 
 @router.post("/api/v1/diff_submissions/{submission_id}/break_glass_grant")

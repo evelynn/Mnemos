@@ -22,6 +22,12 @@ class Plan(Base):
     impact_report: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     requester: Mapped[str] = mapped_column(String, nullable=False)
     worktree_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Reproducibility hints for the worktree behind ``worktree_path``.
+    # JSONB instead of two scalar columns so we can extend (submodule
+    # SHAs, branch name, mirror URL) without another migration —
+    # Team B critique #2 against the original ``base_sha``/``head_sha``
+    # scalar pair.
+    worktree_meta: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

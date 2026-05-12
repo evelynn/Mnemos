@@ -199,13 +199,19 @@ async def probe_via_analyzer(
         return deferred_result(f"no analyzer for kind={kind!r}")
 
     started = datetime.now(tz=timezone.utc)
+    # Reuse the runner's allowlist so the probe subprocess sees the same
+    # carefully-curated env as a normal analyzer run (spec §2.8;
+    # Team B 2nd-round finding A).
+    from app.analyzers.runner import _build_env
+
+    proc_env = _build_env({"MNEMOS_DB_CONN": conn_ref})
     try:
         proc = await asyncio.create_subprocess_exec(
             binary,
             "db_probe",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={"MNEMOS_DB_CONN": conn_ref},
+            env=proc_env,
         )
     except FileNotFoundError:
         return deferred_result(f"analyzer binary not found: {binary}")
