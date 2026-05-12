@@ -6,7 +6,7 @@ const string SourceVersion = "1.0.0";
 
 if (args.Length == 0)
 {
-    Console.Error.WriteLine("usage: ggoss-sql-mssql <probe|inventory|live_schema|live_stats|sample|query|schema> [args...]");
+    Console.Error.WriteLine("usage: ggoss-sql-mssql <probe|inventory|live_schema|live_stats|sample|query|db_probe|schema> [args...]");
     return 2;
 }
 
@@ -23,6 +23,7 @@ try
         "live_stats"  => LiveStats(rest),
         "sample"      => await SampleAsync(rest),
         "query"       => await QueryAsync(rest),
+        "db_probe"    => await DbProbeAsync(rest),
         "schema"      => PrintSchema(),
         _             => Unknown(verb)
     };
@@ -213,6 +214,163 @@ static async Task<int> QueryAsync(string[] args)
         rows.Add(row!);
     }
     Emit("query_result", new { columns = cols, rows });
+    return 0;
+}
+
+static async Task<int> DbProbeAsync(string[] args)
+{
+    // Metadata-only read-only credential probe (spec §2.5, §2.8).
+    // Does NOT execute INSERT/UPDATE/DELETE — not even rolled-back ones.
+    // SQL Server captures rolled-back DML in the transaction log and may
+    // fire triggers (audit, mail) that ROLLBACK cannot undo. We never
+    // leave a trace in the live DB.
+    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+    var conn = FindConnArg(args, "--conn")
+               ?? Environment.GetEnvironmentVariable("MNEMOS_DB_CONN")
+               ?? Environment.GetEnvironmentVariable("MNEMOS_MSSQL_CONN");
+    if (string.IsNullOrWhiteSpace(conn))
+    {
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            status = "fail_connect",
+            connect_ok = false,
+            read_ok = false,
+            write_blocked = (bool?)null,
+            grants = new Dictionary<string, string[]>(),
+            facts = Array.Empty<object>(),
+            latency_ms = 0,
+            error = "missing_connection_string",
+        }));
+        return 0;
+    }
+
+    var grants = new Dictionary<string, List<string>>();
+    var facts = new List<object>();
+    var writePrivs = new HashSet<string>(new[] {
+        "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE TABLE",
+        "ALTER", "DROP TABLE", "TRUNCATE",
+    });
+
+    try
+    {
+        await using var c = new SqlConnection(conn);
+        await c.OpenAsync();
+
+        // Engine banner (metadata only).
+        await using (var cmd = new SqlCommand("SELECT @@VERSION", c) { CommandTimeout = 5 })
+        {
+            var version = (await cmd.ExecuteScalarAsync())?.ToString();
+            if (!string.IsNullOrEmpty(version))
+            {
+                facts.Add(new
+                {
+                    value = version!.Split('\n')[0].Trim(),
+                    source = "@@VERSION",
+                    confidence = "verified",
+                });
+            }
+        }
+
+        await using (var cmd = new SqlCommand("SELECT 1", c) { CommandTimeout = 5 })
+        {
+            await cmd.ExecuteScalarAsync();
+        }
+
+        // Effective permissions for the current login. ``fn_my_permissions``
+        // returns rows like (entity_name, subentity_name, permission_name,
+        // class, ...). NULL entity → server-wide; entity set → per-object.
+        const string permSql = @"
+            SELECT permission_name, ISNULL(entity_name, '') AS entity
+              FROM fn_my_permissions(NULL, 'DATABASE')";
+        await using (var cmd = new SqlCommand(permSql, c) { CommandTimeout = 10 })
+        await using (var rdr = await cmd.ExecuteReaderAsync())
+        {
+            while (await rdr.ReadAsync())
+            {
+                var permission = rdr.GetString(0).ToUpperInvariant();
+                var entity = rdr.IsDBNull(1) ? "__database__" : rdr.GetString(1);
+                if (!grants.TryGetValue(entity, out var perms))
+                {
+                    perms = new List<string>();
+                    grants[entity] = perms;
+                }
+                perms.Add(permission);
+            }
+        }
+        facts.Add(new
+        {
+            value = new { entities = grants.Count },
+            source = "fn_my_permissions",
+            confidence = "verified",
+        });
+
+        // Role membership — db_owner alone is enough to write anything.
+        await using (var cmd = new SqlCommand(
+            "SELECT name FROM sys.database_role_members rm "
+            + "JOIN sys.database_principals r ON r.principal_id = rm.role_principal_id "
+            + "WHERE rm.member_principal_id = DATABASE_PRINCIPAL_ID()", c) { CommandTimeout = 5 })
+        await using (var rdr = await cmd.ExecuteReaderAsync())
+        {
+            var roles = new List<string>();
+            while (await rdr.ReadAsync())
+                roles.Add(rdr.GetString(0));
+            if (roles.Count > 0)
+            {
+                grants["__roles__"] = roles;
+                facts.Add(new
+                {
+                    value = roles,
+                    source = "sys.database_role_members",
+                    confidence = "verified",
+                });
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        stopwatch.Stop();
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            status = "fail_connect",
+            connect_ok = false,
+            read_ok = false,
+            write_blocked = (bool?)null,
+            grants = new Dictionary<string, string[]>(),
+            facts,
+            latency_ms = (int)stopwatch.ElapsedMilliseconds,
+            error = $"connect_failed: {ex.Message}",
+        }));
+        return 0;
+    }
+
+    stopwatch.Stop();
+
+    var heldWrite = grants.Values
+        .SelectMany(p => p)
+        .Where(p => writePrivs.Contains(p) || p == "DB_OWNER")
+        .Distinct()
+        .ToList();
+    var roles = grants.TryGetValue("__roles__", out var rl) ? rl : new List<string>();
+    var writeBlocked = heldWrite.Count == 0
+                       && !roles.Any(r => r == "db_owner" || r == "db_datawriter" || r == "db_ddladmin");
+
+    facts.Add(new
+    {
+        value = writeBlocked ? "no write privileges held" : (object)heldWrite,
+        source = "verdict",
+        confidence = "verified",
+    });
+
+    Console.WriteLine(JsonSerializer.Serialize(new
+    {
+        status = writeBlocked ? "pass" : "fail_rw",
+        connect_ok = true,
+        read_ok = true,
+        write_blocked = writeBlocked,
+        grants,
+        facts,
+        latency_ms = (int)stopwatch.ElapsedMilliseconds,
+    }));
     return 0;
 }
 
