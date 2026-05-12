@@ -126,8 +126,27 @@ async function loadProjectDbs() {
   const chunks = [];
   for (const p of projects) {
     const dr = await fetch(`/api/v1/projects/${p.id}/dbs`);
-    const dbs = dr.ok ? await dr.json() : [];
     let inner;
+    if (!dr.ok) {
+      // Silent fallback to "[]" used to hide probe_failed / unauthorised
+      // responses, so an operator who just registered an RW credential
+      // saw an empty list and wondered why. Surface the status text.
+      let detail = "";
+      try {
+        const body = await dr.json();
+        detail = body && body.detail ? (typeof body.detail === "string"
+          ? body.detail
+          : JSON.stringify(body.detail)) : "";
+      } catch (_) {
+        try { detail = await dr.text(); } catch (_) { detail = ""; }
+      }
+      inner = '<p class="toast error" role="alert">Failed to load DB bindings: HTTP '
+        + dr.status + (detail ? ' — ' + escapeHtml(detail.slice(0, 200)) : '')
+        + '</p>';
+      chunks.push(`<section><h2>${escapeHtml(p.name)}</h2>${inner}</section>`);
+      continue;
+    }
+    const dbs = await dr.json();
     if (!dbs.length) {
       inner = '<p class="muted">no DBs bound</p>';
     } else {

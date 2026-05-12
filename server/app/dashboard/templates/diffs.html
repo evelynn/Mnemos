@@ -21,6 +21,55 @@
 </form>
 <div id="out"></div>
 
+<dialog id="grant-dialog" class="modal" aria-labelledby="grant-title">
+  <header><h2 id="grant-title">Issue break-glass grant</h2></header>
+  <div class="body">
+    <p class="muted">
+      Ultrareview will be re-run on the current diff. If the verdict is still
+      <strong>blocked</strong> the grant will be refused. The rationale is
+      stored verbatim in the audit log.
+    </p>
+    <label for="grant-rationale">Rationale (≥ 200 chars)</label>
+    <textarea id="grant-rationale" oninput="updateRationaleCounter()" required minlength="200"></textarea>
+    <p id="grant-counter" class="counter">0 / 200 chars</p>
+  </div>
+  <menu>
+    <button type="button" onclick="MnemosUI.closeDialog('grant-dialog')">Cancel</button>
+    <button type="button" id="grant-submit" class="primary" onclick="submitGrant()" disabled>Issue grant</button>
+  </menu>
+</dialog>
+
+<dialog id="token-dialog" class="modal" aria-labelledby="token-title">
+  <header><h2 id="token-title">Break-glass token issued</h2></header>
+  <div class="body">
+    <p class="muted">
+      Hand this token to a different operator. It expires in
+      <strong class="countdown" id="token-countdown">15:00</strong>
+      and is single-use. The initiator (you) cannot consume it.
+    </p>
+    <div class="token-block">
+      <code id="token-value"></code>
+      <button type="button" class="primary" onclick="copyTokenToClipboard()">Copy</button>
+    </div>
+  </div>
+  <menu>
+    <button type="button" onclick="dismissTokenDialog()">Close</button>
+  </menu>
+</dialog>
+
+<dialog id="approve-dialog" class="modal" aria-labelledby="approve-title">
+  <header><h2 id="approve-title">Approve with break-glass token</h2></header>
+  <div class="body">
+    <p class="muted">Paste the token an admin issued for this submission.</p>
+    <label for="approve-token">Token</label>
+    <input id="approve-token" type="text" autocomplete="off" spellcheck="false" />
+  </div>
+  <menu>
+    <button type="button" onclick="MnemosUI.closeDialog('approve-dialog')">Cancel</button>
+    <button type="button" class="primary" onclick="submitApprove()">Approve → MR</button>
+  </menu>
+</dialog>
+
 <style>
 .submission { border: 1px solid #d0d7de; border-radius: 6px; padding: 0.75rem; margin-bottom: 1rem; background: #fff; }
 .submission h3 { margin: 0 0 0.5rem; display: flex; gap: 0.5rem; align-items: center; justify-content: space-between; }
@@ -94,39 +143,123 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
 }
 
-async function issueGrant(id) {
-  const rationale = prompt("Break-glass rationale (≥200 chars). The ultrareview pipeline will be re-run before a grant is issued.");
-  if (!rationale || rationale.length < 200) {
-    alert("Rationale must be at least 200 characters.");
+let pendingGrantId = null;
+let pendingApproveId = null;
+let countdownTimer = null;
+
+function issueGrant(id) {
+  pendingGrantId = id;
+  const ta = document.getElementById("grant-rationale");
+  ta.value = "";
+  updateRationaleCounter();
+  MnemosUI.showDialog("grant-dialog");
+  setTimeout(() => ta.focus(), 50);
+}
+
+function updateRationaleCounter() {
+  const ta = document.getElementById("grant-rationale");
+  const counter = document.getElementById("grant-counter");
+  const submit = document.getElementById("grant-submit");
+  const len = ta.value.length;
+  counter.textContent = `${len} / 200 chars`;
+  counter.classList.toggle("ok", len >= 200);
+  submit.disabled = len < 200;
+}
+
+async function submitGrant() {
+  const ta = document.getElementById("grant-rationale");
+  const rationale = ta.value;
+  if (rationale.length < 200) {
+    MnemosUI.showToast("Rationale must be at least 200 characters.", "warn");
     return;
   }
-  const r = await fetch(`/api/v1/diff_submissions/${id}/break_glass_grant`, {
+  const r = await fetch(`/api/v1/diff_submissions/${pendingGrantId}/break_glass_grant`, {
     method: "POST",
     headers: {"content-type": "application/json"},
     body: JSON.stringify({rationale}),
   });
-  const payload = await r.json();
   if (!r.ok) {
-    alert("Grant refused: " + JSON.stringify(payload));
+    await MnemosUI.showError("Grant refused", r);
     return;
   }
-  prompt("Grant issued. Hand this token to a *different* user before " + payload.expires_at, payload.token);
+  const payload = await r.json();
+  MnemosUI.closeDialog("grant-dialog");
+  showTokenDialog(payload);
 }
 
-async function approve(id, blocked) {
-  let body = {};
-  if (blocked) {
-    const token = prompt("Paste break-glass token (issued by an admin who is not you):");
-    if (!token) return;
-    body = {break_glass_token: token};
+function showTokenDialog(payload) {
+  document.getElementById("token-value").textContent = payload.token;
+  // Account for any clock skew between the operator's machine and the
+  // server: the API returns absolute expires_at; we compute the
+  // remaining seconds against the *client* clock once and tick down.
+  const expiresAt = new Date(payload.expires_at).getTime();
+  const tick = () => {
+    const remaining = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+    const m = String(Math.floor(remaining / 60)).padStart(2, "0");
+    const s = String(remaining % 60).padStart(2, "0");
+    document.getElementById("token-countdown").textContent = `${m}:${s}`;
+    if (remaining === 0) {
+      MnemosUI.closeDialog("token-dialog");
+      MnemosUI.showToast("Break-glass token expired.", "warn");
+      clearInterval(countdownTimer);
+    }
+  };
+  tick();
+  countdownTimer = setInterval(tick, 1000);
+  MnemosUI.showDialog("token-dialog");
+}
+
+async function copyTokenToClipboard() {
+  const token = document.getElementById("token-value").textContent;
+  const ok = await MnemosUI.copyToClipboard(token);
+  if (ok) {
+    MnemosUI.showToast("Token copied to clipboard.", "success");
+  } else {
+    MnemosUI.showToast("Copy failed — select the token manually and copy with Ctrl/Cmd-C.", "warn");
   }
+}
+
+function dismissTokenDialog() {
+  if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+  MnemosUI.closeDialog("token-dialog");
+}
+
+function approve(id, blocked) {
+  if (!blocked) {
+    submitApprove(id, null);
+    return;
+  }
+  pendingApproveId = id;
+  document.getElementById("approve-token").value = "";
+  MnemosUI.showDialog("approve-dialog");
+  setTimeout(() => document.getElementById("approve-token").focus(), 50);
+}
+
+async function submitApprove() {
+  const token = document.getElementById("approve-token").value.trim();
+  if (!token) {
+    MnemosUI.showToast("Paste the break-glass token first.", "warn");
+    return;
+  }
+  MnemosUI.closeDialog("approve-dialog");
+  await submitApproveRaw(pendingApproveId, token);
+}
+
+async function submitApproveRaw(id, token) {
+  const body = token ? {break_glass_token: token} : {};
   const r = await fetch(`/api/v1/diff_submissions/${id}/approve`, {
     method: "POST",
     headers: {"content-type": "application/json"},
     body: JSON.stringify(body),
   });
-  alert(await r.text());
+  if (!r.ok) {
+    await MnemosUI.showError("Approve failed", r);
+    return;
+  }
+  MnemosUI.showToast("Approved — GitLab MR created.", "success");
 }
+
+function submitApproveNoToken(id) { return submitApproveRaw(id, null); }
 async function reject(id) {
   const r = await fetch(`/api/v1/diff_submissions/${id}/reject`, {method: "POST"});
   alert(await r.text());
