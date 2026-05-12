@@ -137,12 +137,13 @@ async function loadSummary() {
           <td>${r._project}</td>
           <td><span class="badge ${r.status}">${r.status}</span></td>
           <td><code>${(r.git_sha || "").slice(0, 10)}</code></td>
-          <td>${r.started_at || r.created_at || ""}</td>
+          <td>${r.started_at || r.created_at ? `<time data-ts="${r.started_at || r.created_at}">${r.started_at || r.created_at}</time>` : ""}</td>
           <td><a href="/analysis">Monitor</a></td>
         </tr>`;
       }
       html += "</tbody></table>";
       box.innerHTML = html;
+      MnemosUI.hydrateRelativeTimes(box);
     }
   } catch (e) {
     document.getElementById("stat-projects").textContent = "?";

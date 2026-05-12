@@ -174,7 +174,27 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
 /* SSE connection status. */
 .sse-status { font-size: 0.8rem; padding: 0.1rem 0.5rem; border-radius: 999px; }
 .sse-status.live { background: #dff4e0; color: #145a1f; }
+.sse-status.live::before { content: "● "; }
 .sse-status.disconnected { background: #ffdede; color: #7a1818; }
+.sse-status.disconnected::before { content: "⚠ "; }
+
+/* P2-5 — colour-blind status glyphs on analysis-run badges. The
+   .verdict pills (clean/warn/blocked) already carried glyphs from
+   PR-9; the .badge.* family used on analysis runs and findings did
+   not, so an operator with red-green colour blindness couldn't tell
+   "failed" from "completed" at a glance. */
+.badge.queued::before    { content: "◌ "; }
+.badge.running::before   { content: "▸ "; }
+.badge.completed::before { content: "✓ "; }
+.badge.failed::before    { content: "✗ "; }
+.badge.cancelled::before { content: "⊘ "; }
+.badge.disabled::before  { content: "⛔ "; }
+/* Finding-severity badges — same trick. */
+.badge.critical::before  { content: "⛔ "; }
+.badge.high::before      { content: "⚠ "; }
+.badge.medium::before    { content: "● "; }
+.badge.low::before       { content: "· "; }
+.badge.info::before      { content: "ⓘ "; }
 
 /* Non-color status cues so colour-blind users get the same signal as
    everyone else. The verdict text is still color-coded but now carries

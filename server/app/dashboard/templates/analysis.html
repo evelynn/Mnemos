@@ -115,13 +115,14 @@ async function loadRuns(ev) {
       <td><span class="badge ${r.status}">${r.status}</span></td>
       <td>${badge}</td>
       <td><code>${escapeHtml((r.git_sha || "").slice(0, 12))}</code></td>
-      <td>${r.started_at || ""}</td>
+      <td>${r.started_at ? `<time data-ts="${r.started_at}">${r.started_at}</time>` : ""}</td>
       <td><pre class="code">${escapeHtml(stats)}</pre></td>
       <td><button onclick="monitorId('${r.id}')">Monitor</button></td>
     </tr>`;
   }
   html += "</tbody></table>";
   out.innerHTML = html;
+  MnemosUI.hydrateRelativeTimes(out);
   return false;
 }
 

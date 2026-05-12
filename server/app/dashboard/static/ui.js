@@ -297,6 +297,80 @@
     };
   }
 
+  // ─── Relative time (P2-4) ────────────────────────────────────────────
+  // Phase-2 backlog item: every dashboard tab rendered ISO 8601 strings
+  // raw, which makes "how long ago was that run?" require mental
+  // arithmetic. Markup convention:
+  //
+  //     <time data-ts="2026-05-12T14:30:00Z">2026-05-12T14:30:00Z</time>
+  //
+  // ``hydrateRelativeTimes`` walks every such element, replaces the
+  // text with the locale's relative phrasing via the standard
+  // ``Intl.RelativeTimeFormat`` (no library), and parks the original
+  // ISO in ``title=`` so a hover reveals the exact moment.
+  //
+  // Tabs that build tables dynamically (analysis.html, dashboard.html,
+  // findings.html …) should call ``MnemosUI.hydrateRelativeTimes()``
+  // after they inject the rows. The initial DOMContentLoaded pass
+  // covers any server-rendered ``<time>`` elements.
+
+  function _rtfFor(locale) {
+    try {
+      return new Intl.RelativeTimeFormat(locale, { numeric: "auto" });
+    } catch (_) {
+      return new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+    }
+  }
+  var _rtfCache = null;
+
+  function relativeTime(iso, nowMs) {
+    // Returns a phrasing like "3 minutes ago" / "in 2 hours". Falls
+    // back to the input on parse failure so a malformed timestamp
+    // can't blank out a cell.
+    if (!iso) return "";
+    var t = new Date(iso).getTime();
+    if (isNaN(t)) return iso;
+    if (!_rtfCache) {
+      _rtfCache = _rtfFor(
+        (typeof navigator !== "undefined" && navigator.language) || "en",
+      );
+    }
+    var diff = t - (nowMs == null ? Date.now() : nowMs);
+    var abs = Math.abs(diff);
+    var sec = diff / 1000;
+    if (abs < 60 * 1000) return _rtfCache.format(Math.round(sec), "second");
+    var min = sec / 60;
+    if (abs < 60 * 60 * 1000) return _rtfCache.format(Math.round(min), "minute");
+    var hr = min / 60;
+    if (abs < 24 * 60 * 60 * 1000) return _rtfCache.format(Math.round(hr), "hour");
+    var day = hr / 24;
+    if (abs < 30 * 24 * 60 * 60 * 1000) return _rtfCache.format(Math.round(day), "day");
+    var mon = day / 30;
+    if (abs < 365 * 24 * 60 * 60 * 1000) return _rtfCache.format(Math.round(mon), "month");
+    return _rtfCache.format(Math.round(day / 365), "year");
+  }
+
+  function hydrateRelativeTimes(root) {
+    var scope = root || document;
+    var nodes = scope.querySelectorAll("time[data-ts]");
+    var now = Date.now();
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var iso = el.getAttribute("data-ts");
+      if (!iso) continue;
+      el.textContent = relativeTime(iso, now);
+      if (!el.title) el.title = iso;
+    }
+  }
+
+  // Re-hydrate every minute so "3 minutes ago" doesn't go stale.
+  if (typeof document !== "undefined") {
+    document.addEventListener("DOMContentLoaded", function () {
+      hydrateRelativeTimes();
+      setInterval(function () { hydrateRelativeTimes(); }, 60 * 1000);
+    });
+  }
+
   window.MnemosUI = {
     showToast: showToast,
     showError: showError,
@@ -308,6 +382,8 @@
     escapeHtml: escapeHtml,
     bindRationaleCounter: bindRationaleCounter,
     clockOffsetFromPayload: clockOffsetFromPayload,
+    relativeTime: relativeTime,
+    hydrateRelativeTimes: hydrateRelativeTimes,
   };
   // Convenience global — many existing templates already call
   // ``escapeHtml(x)`` without a namespace prefix.
