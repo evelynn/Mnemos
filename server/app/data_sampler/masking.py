@@ -24,7 +24,12 @@ PARTIAL_MASK_COLUMNS = re.compile(r"(?i)\b(email|phone|name|address|mobile)\b")
 
 _VALUE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "[EMAIL]"),
+    # Korean mobile prefixes (010/011/016/017/018/019). Matched before
+    # the more permissive PHONE pattern so the audit log shows that
+    # PII identification was specific, not generic.
+    (re.compile(r"\b01[016789]-?\d{3,4}-?\d{4}\b"), "[PHONE_KR]"),
     (re.compile(r"\b\d{2,3}-?\d{3,4}-?\d{4}\b"), "[PHONE]"),
+    # Korean RRN (Resident Registration Number): YYMMDD-NNNNNNN.
     (re.compile(r"\b\d{6}-?\d{7}\b"), "[RRN]"),
     (re.compile(r"\b(?:\d{4}[- ]?){3}\d{4}\b"), "[CARD]"),
     (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "[IP]"),

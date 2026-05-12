@@ -29,6 +29,7 @@ dependencies = [
     "mcp>=1.0",
     "prometheus-client>=0.20",
     "pyjwt[crypto]>=2.9",
+    "sqlglot>=25",
 ]
 
 [project.optional-dependencies]

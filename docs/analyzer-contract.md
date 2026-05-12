@@ -22,6 +22,22 @@ DB analyzers (`ggoss-sql-mssql`, `ggoss-sql-oracle`) extend the surface with
 `live_schema`, `live_stats`, `sample`, `query` (see §6.3 of the spec) and
 the `db_probe` verb described below.
 
+### 1.0 `query` verb hard row cap
+
+The `query` verb MUST honour the `MNEMOS_MAX_ROWS` environment variable
+(default 10 000) by setting the driver-level fetch limit before
+materialising results:
+
+* MSSQL: `cursor.arraysize = max_rows` and stop after `max_rows`
+  `fetchmany` rounds. Do not rely on `TOP n` rewriting — the platform
+  already applied LIMIT/TOP at the AST level (`safety/sql_limit.py`),
+  the driver cap is a second line of defence.
+* Oracle: `cursor.arraysize = max_rows`, `cursor.prefetchrows =
+  max_rows`. Same fetchmany discipline.
+* Excess rows are dropped silently; the analyzer reports the
+  `rows_truncated: bool` flag in its JSON envelope so the platform can
+  surface a "results truncated" indicator in the UI.
+
 ### 1.1 `db_probe` verb (DB analyzers only)
 
 Confirms a credential is read-only before the platform persists a
