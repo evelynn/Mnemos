@@ -7,8 +7,11 @@
   <p class="muted">
     Every submission runs through a multi-pass review (rules →
     contracts → data_access → impact → second_opinion → validator).
-    Critical findings block approval until an operator files an override
-    with a written rationale (audited). Philosophy: <code>docs/ultrareview.md</code>.
+    Critical findings block approval. To clear a block an admin first
+    requests a break-glass grant (which re-runs the pipeline and is
+    refused while still blocked), then a different user approves with
+    the returned token (initiator ≠ approver, 15-min TTL, single use).
+    Philosophy: <code>docs/ultrareview.md</code>.
   </p>
 </section>
 
@@ -63,7 +66,7 @@ function renderSubmission(s) {
     </details>`;
   }
   const mrBadge = s.gitlab_mr_url ? `<p><a href="${s.gitlab_mr_url}" target="_blank">MR !${s.gitlab_mr_iid}</a></p>` : "";
-  const overrideHint = verdict === "blocked" ? " — approve requires override + rationale" : "";
+  const overrideHint = verdict === "blocked" ? " — needs break-glass grant" : "";
   return `<section class="submission">
     <h3>
       <span>Task ${s.task_id} <span class="muted">${s.status}</span></span>
@@ -73,7 +76,8 @@ function renderSubmission(s) {
     ${passHtml}
     ${mrBadge}
     <div class="actions">
-      <button class="primary" onclick="approve('${s.id}', ${verdict === 'blocked'})">${verdict === 'blocked' ? 'Override + approve' : 'Approve → MR'}</button>
+      ${verdict === 'blocked' ? `<button onclick="issueGrant('${s.id}')">Issue break-glass grant (admin)</button>` : ""}
+      <button class="primary" onclick="approve('${s.id}', ${verdict === 'blocked'})">${verdict === 'blocked' ? 'Approve with token' : 'Approve → MR'}</button>
       <button class="danger" onclick="reject('${s.id}')">Reject</button>
     </div>
   </section>`;
@@ -90,15 +94,31 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
 }
 
+async function issueGrant(id) {
+  const rationale = prompt("Break-glass rationale (≥200 chars). The ultrareview pipeline will be re-run before a grant is issued.");
+  if (!rationale || rationale.length < 200) {
+    alert("Rationale must be at least 200 characters.");
+    return;
+  }
+  const r = await fetch(`/api/v1/diff_submissions/${id}/break_glass_grant`, {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({rationale}),
+  });
+  const payload = await r.json();
+  if (!r.ok) {
+    alert("Grant refused: " + JSON.stringify(payload));
+    return;
+  }
+  prompt("Grant issued. Hand this token to a *different* user before " + payload.expires_at, payload.token);
+}
+
 async function approve(id, blocked) {
   let body = {};
   if (blocked) {
-    const rationale = prompt("Override rationale (≥20 chars):");
-    if (!rationale || rationale.length < 20) {
-      alert("Rationale must be at least 20 characters.");
-      return;
-    }
-    body = {override: true, rationale};
+    const token = prompt("Paste break-glass token (issued by an admin who is not you):");
+    if (!token) return;
+    body = {break_glass_token: token};
   }
   const r = await fetch(`/api/v1/diff_submissions/${id}/approve`, {
     method: "POST",

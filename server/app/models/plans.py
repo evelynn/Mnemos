@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -56,3 +56,42 @@ class DiffSubmission(Base):
     approved_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     gitlab_mr_iid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     gitlab_mr_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
+class DiffBreakGlassGrant(Base):
+    """One-time, time-limited authorisation to approve a `blocked` diff.
+
+    Spec §2.5 requires "운영 시스템은 신성하다" — no setting may disable the
+    Gate B veto. The previous `override=true + rationale` shortcut violated
+    that. A grant exists only after an admin re-runs the ultrareview
+    pipeline and observes a non-blocked verdict, and is consumed atomically
+    by an approver who is **not** the admin who issued it (2-eyes).
+    """
+
+    __tablename__ = "diff_break_glass_grants"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    submission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("diff_submissions.id"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    issued_by: Mapped[str] = mapped_column(String, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    rerun_review_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    consumed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    consumed_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("idx_break_glass_submission_active",
+              "submission_id", "consumed_at", "expires_at"),
+    )
