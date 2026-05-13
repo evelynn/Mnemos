@@ -152,7 +152,7 @@ Mnemos/
 │   │                               #   + 3 admin-only (Organizations,
 │   │                               #   SSO/OIDC, GDPR tools)
 │   ├── alembic/versions/           # migrations 0001 → 0015 (see /server/alembic)
-│   └── tests/                      # pytest suite — 212 unit + 16 integration
+│   └── tests/                      # pytest suite — 332 unit + 16 integration
 │                                   # (`pytest -m "not integration"` for the
 │                                   #  unit-only run that needs no services)
 ├── analyzers/                      # language/DB analyzer source
@@ -184,8 +184,8 @@ substantially shipped in PR-20 ~ PR-27:
 | Item | Status | Landed in |
 |------|--------|-----------|
 | P2-1 OTLP Tier 2 (trace merge) | ✓ initial | PR-25 |
-| P2-2 RuntimeObservation table | ✓ | PR-25 |
-| P2-3 Korean UI (i18n) | ✓ initial wave | PR-26 + PR-27 |
+| P2-2 RuntimeObservation table | ✓ (incl. 14-day retention sweep) | PR-25 + PR-29 |
+| P2-3 Korean UI (i18n) | ✓ user-facing surfaces | PR-26 / PR-27 / PR-28 / PR-29 / PR-30 |
 | P2-4 Relative timestamps | ✓ | PR-20 |
 | P2-5 Colour-blind status glyphs | ✓ | PR-20 |
 | P2-6 Large-result pagination | ✓ client-side | PR-24 |
@@ -245,8 +245,38 @@ touched the same files):
 | PR-26 | P2-3 (initial wave) | Korean phrase book + sidebar EN / 한국어 switcher with ``data-i18n`` / ``data-i18n-placeholder`` markup convention |
 | PR-27 | P2-3 (broader rollout) | Sidebar nav and empty-state messages on the data, analysis, findings tabs picked up the ``data-i18n`` markers; ``Findings rebuild queued`` toast goes through ``MnemosUI.t`` |
 
-Test suite at the end of the sprint: **~295 passed, 16 deselected**,
-``ruff check`` clean. New deps remain at 1 (``sqlglot`` from PR-5).
+### Post-sprint convergence (PR-28 → PR-31)
+
+After the sprint shipped, four more self-review rounds (8 → 11) ran
+to catch anything Phase 2 had introduced. Each is a single PR.
+
+| PR | Round closed | Headline |
+|----|-------------|----------|
+| PR-28 | 8 | i18n broader rollout (every page ``<h1>`` + sidebar admin + audit timestamps), onboarding state moved from sessionStorage to localStorage (cross-tab fix), SSE state persisted to localStorage so a fresh tab can replay the last broadcast |
+| PR-29 | 9 | ``runtime_observations`` 14-day retention sweep wired into the existing ``retention_purge`` cron (PR-25 had promised the TTL but not implemented it), plus form-label CTA i18n (``Search`` / ``Load`` / ``Rebuild`` / ``Start analysis`` / ``Load runs`` / ``Load submissions``) |
+| PR-30 | 10 | 22 form labels across 9 templates now wear ``<span data-i18n>`` so the phrase-book entries PR-29 added actually fire at runtime (the audit caught the dead entries); 9 new Korean translations |
+| PR-31 | 11 | README convergence — this entry plus a "cycle closed" marker. Round 11 found Critical 0 / Major 0 / Minor 0; the audit cycle terminates with zero defects in flight. |
+
+**Final state**: 30 PRs, **332 unit + 16 integration tests**,
+``ruff check`` clean, 1 new dep (``sqlglot``), 1 new alembic
+migration (``0016_runtime_observations``), 2 new API endpoints
+(``/api/v1/health/metrics_summary``, ``/api/v1/diff_submissions``).
+spec §2 (10 of 10 principles) preserved end-to-end.
+
+### Self-review cycle summary
+
+Eleven rounds total — Phase 1's seven rounds (PR-1 → PR-19) plus
+four post-Phase-2 rounds (PR-28 → PR-31). Critical-defect count
+per round:
+
+```
+Phase 1:  2 → 4 → 8 → 2 → 2 → 1 → 0
+Phase 2+: 3 → 1 → 1 → 0     (UX-major in the 8th)
+```
+
+Two consecutive zero-defect rounds (7th and 11th) bracket the
+work; everything between landed in commits with tests that pin
+the fix.
 
 ## Tests
 
