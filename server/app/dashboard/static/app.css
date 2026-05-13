@@ -785,6 +785,33 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
   resize: vertical;
 }
 
+/* PR-44 — activity feed on the dashboard. */
+.activity-feed {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.activity-item {
+  display: grid;
+  grid-template-columns: minmax(120px, auto) 1fr auto;
+  gap: var(--sp-3);
+  align-items: center;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 0.9rem;
+}
+.activity-actor { font-weight: 600; color: var(--text); }
+.activity-action code { font-size: 0.8rem; }
+.activity-target { font-size: 0.85rem; }
+.activity-when { font-size: 0.8rem; white-space: nowrap; }
+@media (max-width: 768px) {
+  .activity-item {
+    grid-template-columns: 1fr;
+    gap: var(--sp-1);
+  }
+  .activity-when { grid-column: 1; }
+}
+
 [data-tip]:hover::after,
 [data-tip]:focus-visible::after {
   content: attr(data-tip);

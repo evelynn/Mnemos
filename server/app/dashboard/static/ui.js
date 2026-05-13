@@ -371,6 +371,48 @@
     });
   }
 
+  // ─── CSRF (PR-44, audit E1) ───────────────────────────────────────
+  //
+  // The CSRF middleware sets a ``mnemos_csrf`` cookie on every
+  // dashboard render. State-changing fetches must echo the value
+  // back in an ``X-CSRF-Token`` header. We patch ``window.fetch``
+  // here so every existing call site (and every future one) gets
+  // the header without per-call boilerplate.
+  //
+  // GET / HEAD / OPTIONS skip the header — they don't need it and
+  // adding it would force an OPTIONS preflight unnecessarily.
+
+  function _readCookie(name) {
+    var parts = (document.cookie || "").split(";");
+    for (var i = 0; i < parts.length; i++) {
+      var trimmed = parts[i].trim();
+      if (trimmed.indexOf(name + "=") === 0) {
+        return trimmed.slice(name.length + 1);
+      }
+    }
+    return "";
+  }
+
+  (function _patchFetch() {
+    if (typeof window === "undefined" || !window.fetch) return;
+    var orig = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+      init = init || {};
+      var method = (init.method || (typeof input === "string" ? "GET" : (input.method || "GET")))
+        .toString().toUpperCase();
+      if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+        return orig(input, init);
+      }
+      var token = _readCookie("mnemos_csrf");
+      if (!token) return orig(input, init);
+      init.headers = new Headers(init.headers || {});
+      if (!init.headers.has("X-CSRF-Token")) {
+        init.headers.set("X-CSRF-Token", token);
+      }
+      return orig(input, init);
+    };
+  })();
+
   // ─── Command palette (PR-42, audit C2 + D3) ──────────────────────
   //
   // ``cmd/ctrl+K`` (or ``/``) anywhere on the dashboard opens a
@@ -1088,6 +1130,9 @@
     "No comments yet.": "댓글이 없습니다.",
     "Write a comment…": "댓글 작성…",
     "Post comment": "댓글 게시",
+    "Latest analysis runs": "최근 분석 실행",
+    "Recent activity": "최근 활동",
+    "No team activity yet.": "팀 활동이 없습니다.",
     // PR-42 — command palette.
     "Search projects, jump to a tab… (cmd/ctrl+K)":
       "프로젝트 검색, 탭 이동… (cmd/ctrl+K)",

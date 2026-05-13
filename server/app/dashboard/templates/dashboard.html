@@ -66,8 +66,20 @@
 </section>
 
 <section>
-  <h2>Latest analysis runs</h2>
-  <div id="runs-box"><p class="muted">Loading…</p></div>
+  <h2 data-i18n="Latest analysis runs">Latest analysis runs</h2>
+  <div id="runs-box"><p class="muted" data-i18n="Loading…">Loading…</p></div>
+</section>
+
+<!-- PR-44 — Activity feed (audit C3). Rolls up the most recent
+     team actions so an operator opening the dashboard can see what
+     teammates have been doing without trawling the audit log. -->
+<section>
+  <h2 data-i18n="Recent activity">Recent activity</h2>
+  <div id="activity-box">
+    <div class="skeleton skeleton-card"></div>
+    <div class="skeleton skeleton-card"></div>
+    <div class="skeleton skeleton-card"></div>
+  </div>
 </section>
 
 <style>
@@ -243,8 +255,37 @@ async function loadMetricsSummary() {
   }
 }
 
+async function loadActivity() {
+  try {
+    const r = await fetch("/api/v1/audit?limit=15");
+    if (!r.ok) return;
+    const rows = await r.json();
+    const box = document.getElementById("activity-box");
+    if (!box) return;
+    if (!rows.length) {
+      box.innerHTML = '<p class="muted" data-i18n="No team activity yet.">No team activity yet.</p>';
+      MnemosUI.applyI18n(box);
+      return;
+    }
+    box.innerHTML = '<ul class="activity-feed">' + rows.slice(0, 10).map((e) => {
+      const when = e.occurred_at
+        ? `<time data-ts="${e.occurred_at}">${e.occurred_at}</time>`
+        : "";
+      const actor = e.actor || "system";
+      return `<li class="activity-item">
+        <span class="activity-actor">${escapeHtml(actor)}</span>
+        <span class="activity-action"><code>${escapeHtml(e.action)}</code></span>
+        ${e.target ? `<span class="activity-target muted">→ ${escapeHtml(String(e.target))}</span>` : ""}
+        <span class="activity-when muted">${when}</span>
+      </li>`;
+    }).join("") + "</ul>";
+    MnemosUI.hydrateRelativeTimes(box);
+  } catch (_) {}
+}
+
 loadReady();
 loadSummary();
 loadMetricsSummary();
+loadActivity();
 </script>
 {% endblock %}

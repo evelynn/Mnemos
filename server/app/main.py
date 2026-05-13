@@ -10,6 +10,7 @@ from app.api import audit as audit_api
 from app.api import auth as auth_api
 from app.api import break_glass as break_glass_api
 from app.api import comments as comments_api
+from app.api import onboarding as onboarding_api
 from app.api import data as data_api
 from app.api import diffs as diffs_api
 from app.api import findings as findings_api
@@ -23,6 +24,7 @@ from app.api import secrets as secrets_api
 from app.api import users as users_api
 from app.api import webhooks as webhooks_api
 from app.audit.middleware import AuditMiddleware
+from app.security.csrf import CSRFMiddleware
 from app.security.headers import SecurityHeadersMiddleware
 from app.auth.oidc import router as oidc_router
 from app.config import get_settings
@@ -69,6 +71,9 @@ def create_app() -> FastAPI:
     # on the outbound), so every response — error pages included —
     # picks up the hardening headers (PR-39, closes audit E6).
     app.add_middleware(SecurityHeadersMiddleware)
+    # CSRF gate is the outermost in-bound, so a forged mutation is
+    # refused before it reaches any handler (PR-44, closes audit E1).
+    app.add_middleware(CSRFMiddleware)
     app.add_middleware(RequestContextMiddleware)
 
     app.add_route("/metrics", metrics_endpoint, methods=["GET"])
@@ -90,6 +95,7 @@ def create_app() -> FastAPI:
     app.include_router(diffs_api.router)
     app.include_router(break_glass_api.router)
     app.include_router(comments_api.router)
+    app.include_router(onboarding_api.router)
     app.include_router(audit_api.router)
     app.include_router(webhooks_api.router)
     app.include_router(otlp_router)
