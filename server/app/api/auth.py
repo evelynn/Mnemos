@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
+from app.auth import brute_force
 from app.auth.deps import CurrentUser
 from app.auth.passwords import verify_password
 from app.auth.sessions import create_session, delete_session, read_session
@@ -34,10 +35,26 @@ async def login(
     response: Response,
     db: AsyncSession = Depends(get_session),
 ) -> UserOut:
+    # PR-39 — brute-force lockout. The username field is checked
+    # *before* any password verify so a locked-out attacker can't
+    # use the timing-side-channel of valid-vs-invalid password
+    # hashing to enumerate users.
+    if await brute_force.is_locked(body.username):
+        await audit_record(
+            actor="anonymous",
+            action="auth.login_blocked_lockout",
+            target=body.username,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="account_temporarily_locked",
+        )
+
     user = (
         await db.execute(select(User).where(User.username == body.username))
     ).scalar_one_or_none()
     if user is None or not verify_password(body.password, user.password_hash):
+        await brute_force.record_failure(body.username)
         await audit_record(
             actor=f"user:{user.id}" if user else "anonymous",
             action="auth.login_failed",
@@ -67,6 +84,11 @@ async def login(
 
     user.last_login_at = datetime.now(tz=_tz.utc)
     await db.commit()
+
+    # Clear the brute-force counter — a successful login means the
+    # earlier failures were almost certainly the same operator
+    # mistyping, not an attack.
+    await brute_force.clear(body.username)
 
     token = await create_session(user.id)
     await audit_record(actor=f"user:{user.id}", action="auth.login")

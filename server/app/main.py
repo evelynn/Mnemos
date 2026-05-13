@@ -22,6 +22,7 @@ from app.api import secrets as secrets_api
 from app.api import users as users_api
 from app.api import webhooks as webhooks_api
 from app.audit.middleware import AuditMiddleware
+from app.security.headers import SecurityHeadersMiddleware
 from app.auth.oidc import router as oidc_router
 from app.config import get_settings
 from app.dashboard.router import router as dashboard_router
@@ -63,6 +64,10 @@ def create_app() -> FastAPI:
     # is available to AuditMiddleware and all handlers downstream.
     app.add_middleware(AuditMiddleware)
     app.add_middleware(PrometheusMiddleware)
+    # SecurityHeadersMiddleware runs last in the inbound chain (first
+    # on the outbound), so every response — error pages included —
+    # picks up the hardening headers (PR-39, closes audit E6).
+    app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestContextMiddleware)
 
     app.add_route("/metrics", metrics_endpoint, methods=["GET"])

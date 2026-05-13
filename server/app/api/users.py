@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
-from app.auth.passwords import hash_password
+from app.auth.passwords import PasswordPolicyError, hash_password
 from app.auth.rbac import require_admin
 from app.db import get_session
 from app.models.auth import User
@@ -197,7 +197,12 @@ async def change_my_password(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="current_password_incorrect",
         )
-    user.password_hash = hash_password(body.new_password)
+    try:
+        user.password_hash = hash_password(body.new_password)
+    except PasswordPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=exc.code
+        ) from exc
     await db.commit()
     await audit_record(
         actor=f"user:{user.id}",
@@ -261,9 +266,18 @@ async def create_user(
             status_code=status.HTTP_409_CONFLICT, detail="username_taken"
         )
 
+    # ``hash_password`` runs the policy first; surface its code as a
+    # 400 with the same ``detail`` shape the GUI's showError uses.
+    try:
+        new_hash = hash_password(body.password)
+    except PasswordPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=exc.code
+        ) from exc
+
     u = User(
         username=body.username,
-        password_hash=hash_password(body.password),
+        password_hash=new_hash,
         role=body.role,
         organization_id=actor.organization_id,
         email=body.email,
