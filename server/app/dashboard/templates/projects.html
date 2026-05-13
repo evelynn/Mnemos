@@ -1,7 +1,7 @@
 {% extends "_layout.html" %}
 {% block title %}Projects — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>Projects</h1></header>
+<header class="page-head"><h1 data-i18n="Projects">Projects</h1></header>
 
 <section>
   <h2>Register project</h2>
@@ -57,7 +57,7 @@ async function createProject(ev) {
     // project in the list.
     try {
       const payload = JSON.parse(text);
-      sessionStorage.setItem("mnemos_onboarding_step1_done", payload.id || "1");
+      localStorage.setItem("mnemos_onboarding_step1_done", payload.id || "1");
       MnemosUI.showToast(
         MnemosUI.t(
           'Project "$1" created. Ready to analyse it?',

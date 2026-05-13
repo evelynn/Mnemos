@@ -396,9 +396,37 @@
   }
 
   function publishSseState(state) {
+    // 8th-round audit Critical UX-2: BroadcastChannel only delivers
+    // *future* messages, so a tab opened mid-disconnect has no way
+    // to know the stream is down. We also stash the latest state in
+    // localStorage so a fresh tab can read it on DOMContentLoaded
+    // and reveal the cross-tab strip without waiting for the next
+    // publish.
+    try {
+      localStorage.setItem(
+        "mnemos_sse_last_state",
+        JSON.stringify({ state: state, at: Date.now() }),
+      );
+    } catch (_) {}
     var ch = _bc();
     if (!ch) return;
     try { ch.postMessage({ state: state, at: Date.now() }); } catch (_) {}
+  }
+
+  function _readPersistedSseState() {
+    try {
+      var raw = localStorage.getItem("mnemos_sse_last_state");
+      if (!raw) return null;
+      var parsed = JSON.parse(raw);
+      // Stale ``disconnected`` reads (older than 30 minutes) are
+      // ignored — if the analysis tab actually closed cleanly we'd
+      // expect ``idle`` to have been written, but operators do
+      // close laptops. Don't lie to fresh tabs.
+      if (Date.now() - (parsed.at || 0) > 30 * 60 * 1000) return null;
+      return parsed.state;
+    } catch (_) {
+      return null;
+    }
   }
 
   function _applySseStrip(state) {
@@ -419,6 +447,10 @@
 
   if (typeof document !== "undefined") {
     document.addEventListener("DOMContentLoaded", function () {
+      // Replay the last state a publisher persisted so a tab opened
+      // mid-disconnect lights up its strip immediately.
+      var persisted = _readPersistedSseState();
+      if (persisted) _applySseStrip(persisted);
       var ch = _bc();
       if (!ch) return;
       ch.onmessage = function (ev) {
@@ -475,6 +507,15 @@
     "Audit": "감사",
     "Settings": "설정",
     "Dashboard": "대시보드",
+    "Audit log": "감사 로그",
+    "Plans (Gate A)": "계획 (Gate A)",
+    "Diffs (Gate B)": "변경 검토 (Gate B)",
+    "Data entities": "데이터 엔티티",
+    "Organizations": "조직",
+    "SSO / OIDC": "SSO / OIDC",
+    "GDPR tools": "GDPR 도구",
+    "Admin": "관리자",
+    "Sign out": "로그아웃",
     "Recent runs (7d)": "최근 실행 (7일)",
     "Open findings": "미해결 결과",
     "Readiness": "준비 상태",

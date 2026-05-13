@@ -1,7 +1,7 @@
 {% extends "_layout.html" %}
 {% block title %}Analysis — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>Analysis</h1></header>
+<header class="page-head"><h1 data-i18n="Analysis">Analysis</h1></header>
 
 <section class="hint">
   <p class="muted">
@@ -93,7 +93,7 @@ async function triggerRun(ev) {
     // P2-9 onboarding auto-progression: mark step 2 done so the
     // dashboard's first-run guide updates the next time the operator
     // visits the home tab.
-    try { sessionStorage.setItem("mnemos_onboarding_step2_done", "1"); } catch (_) {}
+    try { localStorage.setItem("mnemos_onboarding_step2_done", "1"); } catch (_) {}
     // Auto-prefill the Monitor input with the new run id so the
     // operator doesn't have to copy-paste it from the response blob.
     try {

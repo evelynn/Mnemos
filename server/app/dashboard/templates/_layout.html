@@ -26,15 +26,15 @@
       <a href="/audit" class="{% if active_tab == 'audit' %}active{% endif %}" data-i18n="Audit">Audit</a>
       <a href="/settings" class="{% if active_tab == 'settings' %}active{% endif %}" data-i18n="Settings">Settings</a>
       {% if user.role == 'admin' %}
-      <div class="nav-section muted">Admin</div>
-      <a href="/organizations" class="{% if active_tab == 'organizations' %}active{% endif %}">Organizations</a>
-      <a href="/sso" class="{% if active_tab == 'sso' %}active{% endif %}">SSO / OIDC</a>
-      <a href="/gdpr" class="{% if active_tab == 'gdpr' %}active{% endif %}">GDPR tools</a>
+      <div class="nav-section muted" data-i18n="Admin">Admin</div>
+      <a href="/organizations" class="{% if active_tab == 'organizations' %}active{% endif %}" data-i18n="Organizations">Organizations</a>
+      <a href="/sso" class="{% if active_tab == 'sso' %}active{% endif %}" data-i18n="SSO / OIDC">SSO / OIDC</a>
+      <a href="/gdpr" class="{% if active_tab == 'gdpr' %}active{% endif %}" data-i18n="GDPR tools">GDPR tools</a>
       {% endif %}
     </nav>
     <form method="post" action="/logout" class="logout-form">
       <span class="muted">{{ user.username }}</span>
-      <button type="submit">Sign out</button>
+      <button type="submit" data-i18n="Sign out">Sign out</button>
     </form>
     <div class="locale-switcher" role="group" aria-label="Language">
       <button type="button" data-locale="en" class="locale-btn">EN</button>

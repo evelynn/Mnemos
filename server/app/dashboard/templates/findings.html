@@ -28,10 +28,14 @@ async function loadFindings(ev) {
   if (st) qs.set("status", st);
   const r = await fetch(`/api/v1/projects/${pid}/findings?${qs}`);
   const rows = await r.json();
-  // P2-9 onboarding step 3: the operator reached the findings view.
-  // Loading at least one row counts as "reviewed".
+  // P2-9 onboarding step 3 — 8th-round audit B3: reaching the
+  // findings view *at all* (with the form filled out) counts as
+  // "reviewed". The prior ``rows.length > 0`` gate left the operator
+  // stuck on step 3 forever when an analysis genuinely produced zero
+  // findings — UX expectation said "I clicked Review, so I'm done",
+  // platform said "nothing rendered, so you aren't".
   try {
-    if (rows.length > 0) sessionStorage.setItem("mnemos_onboarding_step3_done", "1");
+    localStorage.setItem("mnemos_onboarding_step3_done", "1");
   } catch (_) {}
   const out = document.getElementById("out");
   if (!Array.isArray(rows) || rows.length === 0) {

@@ -1,7 +1,7 @@
 {% extends "_layout.html" %}
 {% block title %}Audit — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>Audit log</h1></header>
+<header class="page-head"><h1 data-i18n="Audit log">Audit log</h1></header>
 
 <form onsubmit="return load(event)">
   <label>Actor filter<input type="text" id="actor" placeholder="user:<uuid> or system" /></label>
@@ -30,10 +30,14 @@ async function load(ev) {
   }
   let html = '<table class="data"><thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th></tr></thead><tbody>';
   for (const e of rows) {
-    html += `<tr><td>${e.occurred_at}</td><td>${e.actor}</td><td>${e.action}</td><td><code>${e.target ?? ""}</code></td><td><pre>${JSON.stringify(e.details)}</pre></td></tr>`;
+    const ts = e.occurred_at
+      ? `<time data-ts="${e.occurred_at}">${e.occurred_at}</time>`
+      : "";
+    html += `<tr><td>${ts}</td><td>${e.actor}</td><td>${e.action}</td><td><code>${e.target ?? ""}</code></td><td><pre>${escapeHtml(JSON.stringify(e.details))}</pre></td></tr>`;
   }
   html += "</tbody></table>";
   out.innerHTML = html;
+  MnemosUI.hydrateRelativeTimes(out);
   return false;
 }
 

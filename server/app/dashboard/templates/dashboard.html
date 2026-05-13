@@ -1,7 +1,7 @@
 {% extends "_layout.html" %}
 {% block title %}Dashboard — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>Dashboard</h1></header>
+<header class="page-head"><h1 data-i18n="Dashboard">Dashboard</h1></header>
 
 <section id="onboarding-card" class="onboarding" hidden>
   <h2 data-i18n="Welcome to Mnemos">Welcome to Mnemos</h2>
@@ -107,8 +107,11 @@ function updateOnboarding(projectCount) {
   const step1Done = projectCount > 0;
   let step2Done = false, step3Done = false;
   try {
-    step2Done = sessionStorage.getItem("mnemos_onboarding_step2_done") === "1";
-    step3Done = sessionStorage.getItem("mnemos_onboarding_step3_done") === "1";
+    // 8th-round audit Critical UX-1: state lives in localStorage now
+    // (not sessionStorage) so opening /findings in a new tab still
+    // reflects the step on the dashboard tab that's been open.
+    step2Done = localStorage.getItem("mnemos_onboarding_step2_done") === "1";
+    step3Done = localStorage.getItem("mnemos_onboarding_step3_done") === "1";
   } catch (_) {}
   const apply = (id, done, current) => {
     const el = document.getElementById(id);
@@ -188,6 +191,7 @@ async function loadSummary() {
       html += "</tbody></table>";
       box.innerHTML = html;
       MnemosUI.hydrateRelativeTimes(box);
+      MnemosUI.applyI18n(box);
     }
   } catch (e) {
     document.getElementById("stat-projects").textContent = "?";
