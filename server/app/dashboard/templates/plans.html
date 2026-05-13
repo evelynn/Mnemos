@@ -37,9 +37,18 @@ async function load(ev) {
         <button onclick="decide('${p.id}','approve')" class="primary">Approve</button>
         <button onclick="decide('${p.id}','reject')" class="danger">Reject</button>
       </div>
+      <div data-comment-thread data-target="${p.id}" data-mount="plan:${p.id}"></div>
     </div>`;
   }
   out.innerHTML = html;
+  setTimeout(() => {
+    document.querySelectorAll('[data-mount^="plan:"]').forEach((el) => {
+      if (el._mnemosMounted) return;
+      el._mnemosMounted = true;
+      const id = el.getAttribute("data-mount").split(":")[1];
+      MnemosUI.mountCommentThread(el, "plan", id);
+    });
+  }, 0);
   return false;
 }
 async function decide(id, s) {

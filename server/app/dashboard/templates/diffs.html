@@ -117,6 +117,7 @@ async function load(ev) {
     return false;
   }
   out.innerHTML = rows.map(renderSubmission).join("");
+  setTimeout(mountSubmissionComments, 0);
   return false;
 }
 
@@ -132,6 +133,7 @@ async function loadFiltered(verdict) {
     return;
   }
   out.innerHTML = rows.map(renderSubmission).join("");
+  setTimeout(mountSubmissionComments, 0);
 }
 
 function renderSubmission(s) {
@@ -161,7 +163,20 @@ function renderSubmission(s) {
       <button class="primary" onclick="approve('${s.id}', ${verdict === 'blocked'})">${verdict === 'blocked' ? 'Approve with token' : 'Approve → MR'}</button>
       <button class="danger" onclick="reject('${s.id}')">Reject</button>
     </div>
+    <div data-comment-thread data-target="${s.id}" data-mount="diff_submission:${s.id}"></div>
   </section>`;
+}
+
+// PR-45 — mount the comment thread on every submission card after
+// the parent ``out`` has been rendered. We wait one tick so the
+// DOM nodes the helper looks for are in place.
+function mountSubmissionComments() {
+  document.querySelectorAll('[data-mount^="diff_submission:"]').forEach((el) => {
+    if (el._mnemosMounted) return;
+    el._mnemosMounted = true;
+    const id = el.getAttribute("data-mount").split(":")[1];
+    MnemosUI.mountCommentThread(el, "diff_submission", id);
+  });
 }
 
 function renderFinding(f) {

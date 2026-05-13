@@ -36,6 +36,29 @@
 </section>
 
 <section>
+  <h2 data-i18n="Or invite by token">Or invite by token</h2>
+  <p class="muted" data-i18n="Generate an invite token the recipient pastes into the /invite page. They pick their own username and password. The token expires in 7 days and can be used once.">
+    Generate an invite token the recipient pastes into the
+    /invite page. They pick their own username and password.
+    The token expires in 7 days and can be used once.
+  </p>
+  <form onsubmit="return createInvite(event)">
+    <label><span data-i18n="Email">Email</span>
+      <input id="inv-email" type="email" required maxlength="200" placeholder="newuser@example.com" />
+    </label>
+    <label><span data-i18n="Role">Role</span>
+      <select id="inv-role">
+        <option value="viewer">viewer</option>
+        <option value="operator" selected>operator</option>
+        <option value="admin">admin</option>
+      </select>
+    </label>
+    <button type="submit" class="primary" data-i18n="Generate invite link">Generate invite link</button>
+  </form>
+  <div id="invite-result" class="onboarding-step-cta" hidden></div>
+</section>
+
+<section>
   <h2 data-i18n="Members">Members</h2>
   <div class="user-controls">
     <label class="muted">
@@ -179,6 +202,31 @@ async function enableUser(userId, username) {
   if (!r.ok) { await MnemosUI.showError("Re-enable failed", r); return; }
   MnemosUI.showToast(MnemosUI.t("User re-enabled."), "success");
   loadUsers();
+}
+
+async function createInvite(ev) {
+  ev.preventDefault();
+  const body = {
+    email: document.getElementById("inv-email").value.trim(),
+    role: document.getElementById("inv-role").value,
+  };
+  const r = await fetch("/api/v1/invites", {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  const out = document.getElementById("invite-result");
+  if (!r.ok) { await MnemosUI.showError("Invite failed", r); return false; }
+  const payload = await r.json();
+  const link = `${window.location.origin}/invite#token=${encodeURIComponent(payload.token)}`;
+  out.hidden = false;
+  out.innerHTML = `<strong>${escapeHtml(payload.email)}</strong> · role <code>${escapeHtml(payload.role)}</code><br>
+    <span class="muted" data-i18n="Share this link out-of-band. It expires in 7 days.">Share this link out-of-band. It expires in 7 days.</span><br>
+    <code>${escapeHtml(link)}</code>
+    <button onclick="navigator.clipboard.writeText('${link}').then(() => MnemosUI.showToast(MnemosUI.t('Link copied.'), 'success'))" data-i18n="Copy link">Copy link</button>`;
+  MnemosUI.applyI18n(out);
+  ev.target.reset();
+  return false;
 }
 
 if (document.getElementById("users-list")) loadUsers();

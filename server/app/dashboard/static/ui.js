@@ -1119,6 +1119,37 @@
     "Role updated.": "역할이 업데이트되었습니다.",
     "User disabled.": "유저가 비활성화되었습니다.",
     "User re-enabled.": "유저가 다시 활성화되었습니다.",
+    // PR-45 — invite / reset / forgot.
+    "Forgot password?": "비밀번호 잊으셨나요?",
+    "Forgot password": "비밀번호 재설정",
+    "Reset password": "비밀번호 재설정",
+    "Request reset": "재설정 요청",
+    "Set new password": "새 비밀번호 설정",
+    "Back to sign in": "로그인으로 돌아가기",
+    "Accept invite": "초대 수락",
+    "Create account": "계정 만들기",
+    "Or invite by token": "또는 토큰으로 초대",
+    "Generate invite link": "초대 링크 생성",
+    "Copy link": "링크 복사",
+    "Link copied.": "링크가 복사되었습니다.",
+    "Password": "비밀번호",
+    "Enter your username. If an account exists, an admin will receive a reset link to share with you. The platform never sends the token by email automatically.":
+      "사용자명을 입력하세요. 계정이 존재하면 관리자가 재설정 링크를 받아 공유합니다. 플랫폼은 이메일을 자동 발송하지 않습니다.",
+    "Pick a new password. Minimum 12 characters with at least one letter and one digit.":
+      "새 비밀번호를 선택하세요. 최소 12자, 영문자 + 숫자 각 1개 이상.",
+    "Choose a username and password to finish setting up your account.":
+      "사용자명과 비밀번호를 선택하여 계정 설정을 완료하세요.",
+    "Generate an invite token the recipient pastes into the /invite page. They pick their own username and password. The token expires in 7 days and can be used once.":
+      "초대 토큰을 생성합니다. 받는 사람이 /invite 페이지에서 토큰을 붙여넣어 사용자명과 비밀번호를 직접 선택합니다. 토큰은 7일 후 만료되며 1회만 사용 가능합니다.",
+    "Share this link out-of-band. It expires in 7 days.":
+      "안전한 별도 채널로 링크를 전달하세요. 7일 후 만료됩니다.",
+    "Reset token is missing from the URL.": "URL 에 재설정 토큰이 없습니다.",
+    "Invite token is missing from the URL.": "URL 에 초대 토큰이 없습니다.",
+    "Password updated. You can now sign in with the new password.":
+      "비밀번호가 변경되었습니다. 새 비밀번호로 로그인할 수 있습니다.",
+    "Account created. Redirecting to sign in…": "계정이 생성되었습니다. 로그인 페이지로 이동합니다…",
+    "If the account exists, an admin can now retrieve a reset token from the audit log.":
+      "계정이 존재한다면 관리자가 감사 로그에서 재설정 토큰을 받을 수 있습니다.",
     // PR-41 — notification centre + responsive.
     "Notifications": "알림",
     "Clear all": "모두 지우기",

@@ -30,6 +30,31 @@ async def _user_from_cookie(token: str | None, db: AsyncSession) -> User | None:
     ).scalar_one_or_none()
 
 
+@router.get("/forgot", response_class=HTMLResponse)
+async def forgot_page(request: Request):
+    """Anonymous password-reset request landing page (PR-45)."""
+    return templates.TemplateResponse(request, "forgot.html", {})
+
+
+@router.get("/reset", response_class=HTMLResponse)
+async def reset_page(request: Request):
+    """Anonymous password-reset consume landing page (PR-45).
+
+    The token is read from the URL fragment ``#token=…`` by the
+    client-side JS — fragments aren't sent to the server, so a
+    paste of the reset URL into chat doesn't surface the token in
+    a referrer log.
+    """
+    return templates.TemplateResponse(request, "reset.html", {})
+
+
+@router.get("/invite", response_class=HTMLResponse)
+async def invite_accept_page(request: Request):
+    """Anonymous invite-acceptance landing page (PR-45). Same
+    fragment-only token convention as ``/reset``."""
+    return templates.TemplateResponse(request, "invite.html", {})
+
+
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(
     request: Request,

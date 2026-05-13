@@ -42,9 +42,19 @@ def _key(username: str) -> str:
 
 
 async def is_locked(username: str) -> bool:
-    """Return True iff the username has hit the failure ceiling."""
-    redis = await get_redis()
-    raw = await redis.get(_key(username))
+    """Return True iff the username has hit the failure ceiling.
+
+    PR-45 — Redis outages must not lock everyone *out* of the
+    platform. The 14th-round audit caught the previous version
+    raising 500 on every login when Redis was unreachable. The
+    fail-open posture is acceptable because the audit log still
+    captures the attempt and the password hash is the real gate.
+    """
+    try:
+        redis = await get_redis()
+        raw = await redis.get(_key(username))
+    except Exception:  # noqa: BLE001
+        return False
     if raw is None:
         return False
     try:
@@ -57,19 +67,28 @@ async def record_failure(username: str) -> int:
     """Increment the failure counter, set / refresh the TTL, and
     return the new count. Callers use the return value to decide
     whether to log a regular ``login_failed`` or the heavier
-    ``login_blocked_lockout`` audit event."""
-    redis = await get_redis()
-    key = _key(username)
-    count = await redis.incr(key)
-    if count == 1:
-        # First failure starts the window; subsequent INCRs don't
-        # reset the TTL so the operator can't infinitely refresh
-        # the lockout by guessing one password every 14 minutes.
-        await redis.expire(key, LOCKOUT_WINDOW_SEC)
-    return int(count)
+    ``login_blocked_lockout`` audit event.
+
+    Same fail-open posture as ``is_locked`` — a Redis outage must
+    not block logins.
+    """
+    try:
+        redis = await get_redis()
+        key = _key(username)
+        count = await redis.incr(key)
+        if count == 1:
+            await redis.expire(key, LOCKOUT_WINDOW_SEC)
+        return int(count)
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 async def clear(username: str) -> None:
-    """Successful login wipes the slate."""
-    redis = await get_redis()
-    await redis.delete(_key(username))
+    """Successful login wipes the slate. Silent on Redis error —
+    the counter will just hang around until it TTLs out (15 min).
+    """
+    try:
+        redis = await get_redis()
+        await redis.delete(_key(username))
+    except Exception:  # noqa: BLE001
+        return

@@ -46,12 +46,17 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # Path prefixes that bypass the CSRF check. Each is documented
 # inline so a future reader can audit the exemptions.
 _EXEMPT_PREFIXES = (
-    "/api/v1/auth/login",        # no session yet
+    "/api/v1/auth/login",         # no session yet
+    "/api/v1/auth/logout",        # form-encoded POST from the sidebar
+    "/api/v1/auth/reset/",        # anonymous reset flow (token is the auth)
+    "/api/v1/invites/accept",     # anonymous invite acceptance
     "/api/v1/auth/oidc/",         # OIDC redirect / callback (state-guarded)
     "/api/v1/webhooks/",          # GitLab HMAC-signed
     "/otlp/",                     # OTLP receiver
     "/metrics",                   # Prometheus scrape
     "/api/v1/health",             # liveness probe
+    "/login",                     # dashboard login form
+    "/logout",                    # dashboard logout form
 )
 
 

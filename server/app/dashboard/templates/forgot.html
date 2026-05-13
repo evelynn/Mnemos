@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Forgot password — Mnemos{% endblock %}
+{% block body %}
+<main class="login">
+  <h1>Mnemos</h1>
+  <p class="subtitle" data-i18n="Forgot password">Forgot password</p>
+  <p class="muted" data-i18n="Enter your username. If an account exists, an admin will receive a reset link to share with you. The platform never sends the token by email automatically.">
+    Enter your username. If an account exists, an admin will
+    receive a reset link to share with you. The platform never
+    sends the token by email automatically.
+  </p>
+  <form id="forgot-form" class="login-form" onsubmit="return requestReset(event)">
+    <label>
+      <span data-i18n="Username">Username</span>
+      <input type="text" name="username" autocomplete="username" required autofocus />
+    </label>
+    <button type="submit" class="primary" data-i18n="Request reset">Request reset</button>
+  </form>
+  <p id="forgot-result" class="muted" hidden></p>
+  <p class="subtitle">
+    <a href="/login" data-i18n="Back to sign in">Back to sign in</a>
+  </p>
+</main>
+<script>
+async function requestReset(ev) {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const r = await fetch("/api/v1/auth/reset/request", {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({username: fd.get("username")}),
+  });
+  const out = document.getElementById("forgot-result");
+  out.hidden = false;
+  if (r.ok) {
+    const payload = await r.json().catch(() => ({}));
+    // The platform stays transport-agnostic — an admin can copy
+    // the token from the audit log and share it through a secure
+    // side-channel. The token field is only present when the
+    // username matches an active account.
+    if (payload.token) {
+      out.innerHTML = '<strong data-i18n="Token issued. Ask an admin to send it to you, or open the reset link directly:">'
+        + 'Token issued. Ask an admin to send it to you, or open the reset link directly:</strong>'
+        + '<br><a href="/reset#token=' + encodeURIComponent(payload.token) + '">/reset#token=…</a>';
+      MnemosUI.applyI18n(out);
+    } else {
+      out.setAttribute("data-i18n", "If the account exists, an admin can now retrieve a reset token from the audit log.");
+      out.textContent = "If the account exists, an admin can now retrieve a reset token from the audit log.";
+      MnemosUI.applyI18n(out);
+    }
+  } else {
+    out.setAttribute("data-i18n", "Could not submit the request. Try again or contact an admin.");
+    out.textContent = "Could not submit the request. Try again or contact an admin.";
+    MnemosUI.applyI18n(out);
+  }
+  return false;
+}
+</script>
+{% endblock %}
