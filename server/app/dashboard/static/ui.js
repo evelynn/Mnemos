@@ -400,18 +400,90 @@
       init = init || {};
       var method = (init.method || (typeof input === "string" ? "GET" : (input.method || "GET")))
         .toString().toUpperCase();
-      if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
-        return orig(input, init);
+      // CSRF header for state-changing requests.
+      if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+        var token = _readCookie("mnemos_csrf");
+        if (token) {
+          init.headers = new Headers(init.headers || {});
+          if (!init.headers.has("X-CSRF-Token")) {
+            init.headers.set("X-CSRF-Token", token);
+          }
+        }
       }
-      var token = _readCookie("mnemos_csrf");
-      if (!token) return orig(input, init);
-      init.headers = new Headers(init.headers || {});
-      if (!init.headers.has("X-CSRF-Token")) {
-        init.headers.set("X-CSRF-Token", token);
-      }
-      return orig(input, init);
+      // PR-47 — auto-redirect on 401 so an operator whose session
+      // idled-out doesn't see a generic "HTTP 401" error and have
+      // to guess they need to sign in again. The /login and /api
+      // probes are skipped so the login page itself doesn't redirect
+      // to itself in a loop.
+      return orig(input, init).then(function (r) {
+        if (r.status === 401 && typeof window !== "undefined") {
+          var path = window.location.pathname;
+          var onAuthFlow = path === "/login" || path === "/forgot"
+            || path === "/reset" || path === "/invite";
+          if (!onAuthFlow) {
+            // One-shot toast so the operator knows what happened
+            // before the page disappears under them.
+            if (typeof showToast === "function") {
+              try {
+                showToast(
+                  typeof t === "function"
+                    ? t("Session expired. Redirecting to sign in…")
+                    : "Session expired. Redirecting to sign in…",
+                  "warn",
+                );
+              } catch (_) {}
+            }
+            // Preserve the current path so a future PR can deep-
+            // link back after re-auth.
+            try { sessionStorage.setItem("mnemos_post_login_path", path); } catch (_) {}
+            setTimeout(function () { window.location.href = "/login"; }, 600);
+          }
+        }
+        return r;
+      });
     };
   })();
+
+  // ─── CSV export (PR-47, audit F3) ─────────────────────────────────
+  //
+  // ``MnemosUI.exportCsv(rows, columns, filename)`` builds a CSV
+  // file from a JS array of records and triggers a download.
+  // Pure client-side; works on any array of plain objects.
+  //
+  // Each value is run through ``_csvCell`` which handles the four
+  // standard CSV escape cases (comma, quote, newline, leading
+  // sign/equals as a defence against CSV-injection in Excel).
+
+  function _csvCell(value) {
+    if (value === null || value === undefined) return "";
+    var s = typeof value === "object" ? JSON.stringify(value) : String(value);
+    // CSV-injection defence — Excel runs `= + - @` as formulas.
+    if (s.length && "=+-@".indexOf(s.charAt(0)) !== -1) {
+      s = "'" + s;
+    }
+    if (s.indexOf(",") !== -1 || s.indexOf('"') !== -1 || s.indexOf("\n") !== -1) {
+      s = '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+  }
+
+  function exportCsv(rows, columns, filename) {
+    columns = columns || (rows.length ? Object.keys(rows[0]) : []);
+    var header = columns.map(_csvCell).join(",");
+    var body = rows.map(function (r) {
+      return columns.map(function (c) { return _csvCell(r[c]); }).join(",");
+    }).join("\n");
+    var csv = header + "\n" + body;
+    var blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = filename || ("mnemos-export-" + Date.now() + ".csv");
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
 
   // ─── Command palette (PR-42, audit C2 + D3) ──────────────────────
   //
@@ -1150,6 +1222,12 @@
     "Account created. Redirecting to sign in…": "계정이 생성되었습니다. 로그인 페이지로 이동합니다…",
     "If the account exists, an admin can now retrieve a reset token from the audit log.":
       "계정이 존재한다면 관리자가 감사 로그에서 재설정 토큰을 받을 수 있습니다.",
+    // PR-47 — Phase 4 polish.
+    "Session expired. Redirecting to sign in…": "세션이 만료되었습니다. 로그인 페이지로 이동합니다…",
+    "Export CSV": "CSV 내보내기",
+    "Exported.": "내보냈습니다.",
+    "Nothing to export.": "내보낼 항목이 없습니다.",
+    "Enter a project ID first.": "프로젝트 ID 를 먼저 입력하세요.",
     // PR-41 — notification centre + responsive.
     "Notifications": "알림",
     "Clear all": "모두 지우기",
@@ -1315,6 +1393,7 @@
     setLocale: setLocale,
     applyI18n: applyI18n,
     icon: icon,
+    exportCsv: exportCsv,
     notify: notify,
     readNotifications: readNotifications,
     clearNotifications: clearNotifications,

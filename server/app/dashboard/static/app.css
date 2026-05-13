@@ -225,7 +225,17 @@ body.app {
   .page-head h1 { font-size: 1.3rem; }
   table.data { font-size: 0.85rem; }
 }
-.sidebar .brand { font-weight: 700; font-size: 1.1rem; margin-bottom: var(--sp-4); }
+.sidebar .brand {
+  font-weight: 700;
+  font-size: 1.1rem;
+  margin-bottom: var(--sp-4);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--sidebar-active-fg);
+}
+.brand-logo { color: var(--accent); flex-shrink: 0; }
+.brand-name { letter-spacing: 0.04em; }
 .sidebar nav { display: flex; flex-direction: column; gap: var(--sp-1); flex: 1; }
 .sidebar nav a {
   color: var(--sidebar-fg);

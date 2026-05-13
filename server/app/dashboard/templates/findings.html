@@ -13,6 +13,7 @@
   </label>
   <button class="primary" type="submit" data-i18n="Load">Load</button>
   <button type="button" onclick="rebuild()" data-i18n="Rebuild">Rebuild</button>
+  <button type="button" onclick="exportFindings()" data-i18n="Export CSV">Export CSV</button>
 </form>
 <div id="out"></div>
 
@@ -96,6 +97,39 @@ function _showNextFindingsPage() {
     more.hidden = next >= total;
     more.onclick = _showNextFindingsPage;
   }
+}
+
+async function exportFindings() {
+  const pid = document.getElementById("pid").value.trim();
+  if (!pid) {
+    MnemosUI.showToast(MnemosUI.t("Enter a project ID first."), "warn");
+    return;
+  }
+  const sev = document.getElementById("sev").value;
+  const st = document.getElementById("st").value;
+  const qs = new URLSearchParams();
+  if (sev) qs.set("severity", sev);
+  if (st) qs.set("status", st);
+  const r = await fetch(`/api/v1/projects/${pid}/findings?${qs}`);
+  if (!r.ok) { await MnemosUI.showError("Export failed", r); return; }
+  const rows = await r.json();
+  if (!rows.length) {
+    MnemosUI.showToast(MnemosUI.t("Nothing to export."), "warn");
+    return;
+  }
+  // Flatten the JSONB detail blob to its top-level keys for the
+  // CSV — full nested JSON survives in the ``detail_json`` column.
+  const flat = rows.map((f) => ({
+    id: f.id,
+    kind: f.kind,
+    severity: f.severity,
+    status: f.status,
+    subject: f.subject_node_id || f.subject_edge_id || "",
+    detail_json: JSON.stringify(f.detail),
+  }));
+  MnemosUI.exportCsv(flat, ["id", "kind", "severity", "status", "subject", "detail_json"],
+    `findings-${pid.slice(0, 8)}-${Date.now()}.csv`);
+  MnemosUI.showToast(MnemosUI.t("Exported."), "success");
 }
 
 async function rebuild() {

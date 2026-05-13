@@ -8,6 +8,7 @@
   <label><span data-i18n="Action filter">Action filter</span><input type="text" id="action" placeholder="plan.submit" /></label>
   <label><span data-i18n="Limit">Limit</span><input type="number" id="limit" value="200" min="1" max="1000" /></label>
   <button class="primary" type="submit" data-i18n="Search">Search</button>
+  <button type="button" onclick="exportAudit()" data-i18n="Export CSV">Export CSV</button>
 </form>
 <div id="out"></div>
 
@@ -39,6 +40,34 @@ async function load(ev) {
   out.innerHTML = html;
   MnemosUI.hydrateRelativeTimes(out);
   return false;
+}
+
+async function exportAudit() {
+  const qs = new URLSearchParams();
+  const actor = document.getElementById("actor").value.trim();
+  const action = document.getElementById("action").value.trim();
+  const limit = document.getElementById("limit").value || "200";
+  if (actor) qs.set("actor", actor);
+  if (action) qs.set("action", action);
+  qs.set("limit", limit);
+  const r = await fetch(`/api/v1/audit?${qs}`);
+  if (!r.ok) { await MnemosUI.showError("Export failed", r); return; }
+  const rows = await r.json();
+  if (!rows.length) {
+    MnemosUI.showToast(MnemosUI.t("Nothing to export."), "warn");
+    return;
+  }
+  const flat = rows.map((e) => ({
+    occurred_at: e.occurred_at,
+    actor: e.actor,
+    action: e.action,
+    target: e.target || "",
+    details_json: JSON.stringify(e.details || {}),
+  }));
+  MnemosUI.exportCsv(flat,
+    ["occurred_at", "actor", "action", "target", "details_json"],
+    `audit-${Date.now()}.csv`);
+  MnemosUI.showToast(MnemosUI.t("Exported."), "success");
 }
 
 // P2-7 drill-down — pre-fill filters from the dashboard's

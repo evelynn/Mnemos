@@ -120,7 +120,8 @@ def test_client_side_fetch_wrapper_attaches_token():
     assert "_readCookie(\"mnemos_csrf\")" in body
     assert 'init.headers.set("X-CSRF-Token"' in body
     # Safe methods skip the header to avoid spurious preflights.
-    assert "method === \"GET\"" in body
+    # PR-47 refactored the branch to ``method !== "GET" && method !== "HEAD" …``.
+    assert 'method !== "GET"' in body or "method === \"GET\"" in body
 
 
 # ---------------------------------------------------------------------------
