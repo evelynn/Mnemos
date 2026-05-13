@@ -1,17 +1,28 @@
 # Large-system analysis readiness
 
 A snapshot of what the platform can actually do on a real-world
-deployment, written after PR-32. Spec §1.5 — "register a real C# +
+deployment, last updated PR-37. Spec §1.5 — "register a real C# +
 TS + MSSQL/Oracle system via GUI → first full analysis in ≤ 8
 hours" — is the bar; this doc tells an operator how close we are.
+
+**Readiness estimate**: ~85-88% (PR-36). Every gap below the
+"What's *not* yet verified" header needs a staging environment
+(live Oracle/MSSQL DB, real GitLab dev server, ANTHROPIC_API_KEY) —
+not more code. The 12 e2e scenarios D1..D5 the audit pass
+identified are all closed by PR-32..PR-36.
 
 ## Headline
 
 * **End-to-end analysis pipeline**: works for the four Phase-1
   languages. C# + TypeScript + MSSQL + Oracle binaries all build
   in CI, the platform spawns them through ``AnalyzerRunner.run``,
-  and stdout/stderr are parsed as JSONL records. Confirmed by 8
-  new subprocess tests in PR-32.
+  ``_record_payload`` decodes the JSONL records and rewrites the
+  ones that need HTTP-contract-id resolution before the merge
+  writer is called. **D1 (full subprocess → upsert chain) +
+  D2 (four-language concurrent fan-out)** verified end-to-end in
+  PR-35. **D3 (sensitive_tables policy + per-DB mask + 10K
+  clamp) + D4 (break-glass workflow invariants) + D5 (cron
+  advisory-lock leader election)** verified in PR-36.
 * **L0 extract → graph upsert → L1-L3 summarise**: every leg has
   production code and unit/integration tests. Stub LLM fallback
   means a deployment without an Anthropic key still completes a

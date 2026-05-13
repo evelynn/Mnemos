@@ -257,11 +257,30 @@ to catch anything Phase 2 had introduced. Each is a single PR.
 | PR-30 | 10 | 22 form labels across 9 templates now wear ``<span data-i18n>`` so the phrase-book entries PR-29 added actually fire at runtime (the audit caught the dead entries); 9 new Korean translations |
 | PR-31 | 11 | README convergence — this entry plus a "cycle closed" marker. Round 11 found Critical 0 / Major 0 / Minor 0; the audit cycle terminates with zero defects in flight. |
 
-**Final state**: 30 PRs, **332 unit + 16 integration tests**,
-``ruff check`` clean, 1 new dep (``sqlglot``), 1 new alembic
-migration (``0016_runtime_observations``), 2 new API endpoints
-(``/api/v1/health/metrics_summary``, ``/api/v1/diff_submissions``).
-spec §2 (10 of 10 principles) preserved end-to-end.
+### Large-system readiness sprint (PR-32 → PR-37)
+
+After the audit cycle closed, the user asked: *"이 시스템이 정말로
+거대한 실제 시스템을 분석할 수 있는가?"* — does the platform
+actually deliver on spec §1.5's promise of analysing real
+multi-language mono-repos? The 12th-round audit measured the
+gap and the 13th-round close-out validates the answer.
+
+| PR | Closes | Headline |
+|----|--------|----------|
+| PR-32 | analyzer subprocess contract | Real ``AnalyzerRunner`` against fake-binary stand-ins — 4 record types, env scrubbing, partial-output preservation, stdout/stderr interleave, missing binary fail-fast |
+| PR-32 | five operator scenarios | E1-fan-out, E2-monorepo, E3-sensitive-DB, E4-failure-recovery, E5-multi-operator (12 tests) + ``docs/operator-guide/large_system_readiness.md`` |
+| PR-33 | crashed-worker recovery + MR mock | ``run_reset_stale_runs`` cron every 15 min flips stale ``status='running'`` rows to ``failed``; python-gitlab MR creation covered by 4 mock scenarios (happy, not-configured, git-fail, gitlab-fail) |
+| PR-34 | scale bounds | Synthetic stress: 10K JSONL stream in <30s, 50K-row mask in <10s with linearity guard, dense PII document, 20 subprocess parallel spawn |
+| PR-35 | D1 + D2 e2e | Webhook→finding orchestration chain (subprocess → ``_record_payload`` → upsert with HTTP-contract-id resolution + malformed-record skip); four languages concurrent without stream starvation, one-language crash isolation, cross-language node-id merge |
+| PR-36 | D3 + D4 + D5 invariants | ProjectDB policy chain (sensitive_tables block → AWR consent → per-DB masking → 10K clamp), break-glass TTL/rationale/token-hash/audit-action/share-URL pins, cron advisory-lock leader election + four schedules + 24h/6h cutoffs |
+| PR-37 | docs + cycle close | Readiness estimate ~85-88%; remaining gaps need a staging environment (live Oracle/MSSQL DB, real GitLab dev server, ``ANTHROPIC_API_KEY``) — not more code. |
+
+**Updated final state**: **37 PRs**, **396 unit + 16 integration
+tests**, ``ruff check`` clean, 1 new dep (``sqlglot``), 1 new
+alembic migration (``0016_runtime_observations``), 2 new API
+endpoints, **1 new cron** (``reset_stale_runs``). spec §2 (10 of
+10 principles) preserved end-to-end. Large-system analysis
+gates the 5 operator scenarios + the D1..D5 contract pins.
 
 ### Self-review cycle summary
 
