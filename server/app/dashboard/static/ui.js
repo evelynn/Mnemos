@@ -371,6 +371,213 @@
     });
   }
 
+  // ─── Command palette (PR-42, audit C2 + D3) ──────────────────────
+  //
+  // ``cmd/ctrl+K`` (or ``/``) anywhere on the dashboard opens a
+  // search-and-navigate overlay. Phase 1 entries are:
+  //
+  //   * static nav targets — Dashboard, Projects, Analysis, … with
+  //     keyboard shortcuts (``g d``, ``g p``, …) à la GitHub;
+  //   * project list — typing a name jumps to /analysis?project=<id>;
+  //   * findings — typing a kind / subject id from the cached set.
+  //
+  // The palette runs entirely in the browser; the GET-/api/v1/projects
+  // call is cached on first open so each subsequent ``cmd+K`` is
+  // instant. Server-side global search lives in a future PR.
+
+  var _PALETTE_PROJECTS = null;  // cached on first open
+
+  function _paletteEl() { return document.getElementById("cmdk-overlay"); }
+
+  function _buildPaletteEntries(projects) {
+    var nav = [
+      { label: "Dashboard",   href: "/",            shortcut: "g d", icon: "" },
+      { label: "Projects",    href: "/projects",    shortcut: "g p", icon: "" },
+      { label: "Analysis",    href: "/analysis",    shortcut: "g a", icon: "" },
+      { label: "Data",        href: "/data",        shortcut: "g t", icon: "" },
+      { label: "Plans",       href: "/plans",       shortcut: "",     icon: "" },
+      { label: "Diffs",       href: "/diffs",       shortcut: "g r", icon: "" },
+      { label: "Findings",    href: "/findings",    shortcut: "g f", icon: "" },
+      { label: "Audit",       href: "/audit",       shortcut: "",     icon: "" },
+      { label: "Settings",    href: "/settings",    shortcut: "g s", icon: "" },
+      { label: "Profile",     href: "/profile",     shortcut: "",     icon: "" },
+    ];
+    var entries = nav.map(function (n) { return Object.assign({ kind: "nav" }, n); });
+    (projects || []).forEach(function (p) {
+      entries.push({
+        kind: "project",
+        label: p.name,
+        sublabel: p.id,
+        href: "/analysis?project=" + encodeURIComponent(p.id),
+      });
+    });
+    return entries;
+  }
+
+  function _filterPaletteEntries(entries, q) {
+    if (!q) return entries;
+    var qLower = q.toLowerCase();
+    return entries.filter(function (e) {
+      return (
+        e.label.toLowerCase().indexOf(qLower) !== -1 ||
+        (e.sublabel && String(e.sublabel).toLowerCase().indexOf(qLower) !== -1)
+      );
+    });
+  }
+
+  function _renderPaletteResults(entries, selected) {
+    var list = document.getElementById("cmdk-list");
+    if (!list) return;
+    if (!entries.length) {
+      list.innerHTML = '<li class="cmdk-empty">' +
+        (typeof t === "function" ? t("No matches.") : "No matches.") +
+        '</li>';
+      return;
+    }
+    list.innerHTML = entries.slice(0, 20).map(function (e, i) {
+      var sub = e.sublabel ? '<span class="cmdk-sub muted">' + escapeHtml(String(e.sublabel)) + '</span>' : "";
+      var sc = e.shortcut ? '<kbd class="cmdk-sc">' + escapeHtml(e.shortcut) + '</kbd>' : "";
+      var kindBadge = e.kind === "project" ? '<span class="cmdk-kind">project</span>' : "";
+      return '<li class="cmdk-item ' + (i === selected ? "active" : "") + '" data-href="' + escapeHtml(e.href) + '">' +
+        kindBadge +
+        '<span class="cmdk-label">' + escapeHtml(e.label) + '</span>' +
+        sub + sc +
+      "</li>";
+    }).join("");
+  }
+
+  async function _loadPaletteProjects() {
+    if (_PALETTE_PROJECTS !== null) return _PALETTE_PROJECTS;
+    try {
+      var r = await fetch("/api/v1/projects");
+      _PALETTE_PROJECTS = r.ok ? await r.json() : [];
+    } catch (_) {
+      _PALETTE_PROJECTS = [];
+    }
+    return _PALETTE_PROJECTS;
+  }
+
+  async function _openPalette() {
+    var overlay = _paletteEl();
+    if (!overlay) return;
+    overlay.classList.add("open");
+    var input = document.getElementById("cmdk-input");
+    if (input) {
+      input.value = "";
+      setTimeout(function () { input.focus(); }, 10);
+    }
+    var projects = await _loadPaletteProjects();
+    var entries = _buildPaletteEntries(projects);
+    overlay._entries = entries;
+    overlay._selected = 0;
+    _renderPaletteResults(entries, 0);
+  }
+
+  function _closePalette() {
+    var overlay = _paletteEl();
+    if (overlay) overlay.classList.remove("open");
+  }
+
+  function _onPaletteInput(ev) {
+    var overlay = _paletteEl();
+    if (!overlay || !overlay._entries) return;
+    var filtered = _filterPaletteEntries(overlay._entries, ev.target.value);
+    overlay._filtered = filtered;
+    overlay._selected = 0;
+    _renderPaletteResults(filtered, 0);
+  }
+
+  function _onPaletteKey(ev) {
+    var overlay = _paletteEl();
+    if (!overlay || !overlay.classList.contains("open")) return;
+    var entries = overlay._filtered || overlay._entries || [];
+    if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      overlay._selected = Math.min((overlay._selected || 0) + 1, entries.length - 1);
+      _renderPaletteResults(entries, overlay._selected);
+    } else if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      overlay._selected = Math.max((overlay._selected || 0) - 1, 0);
+      _renderPaletteResults(entries, overlay._selected);
+    } else if (ev.key === "Enter") {
+      ev.preventDefault();
+      var pick = entries[overlay._selected || 0];
+      if (pick) {
+        _closePalette();
+        window.location.href = pick.href;
+      }
+    } else if (ev.key === "Escape") {
+      _closePalette();
+    }
+  }
+
+  // Global keybindings.
+  if (typeof document !== "undefined") {
+    document.addEventListener("DOMContentLoaded", function () {
+      // cmd/ctrl+K or ``/`` opens the palette. ``/`` doesn't fire when
+      // the focus is in an input/textarea so a search query in a
+      // page-level filter still types ``/``.
+      document.addEventListener("keydown", function (ev) {
+        var inField = /^(INPUT|TEXTAREA|SELECT)$/i.test(
+          (ev.target && ev.target.tagName) || ""
+        );
+        if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "k") {
+          ev.preventDefault();
+          _openPalette();
+          return;
+        }
+        if (!inField && ev.key === "/") {
+          ev.preventDefault();
+          _openPalette();
+          return;
+        }
+        // GitHub-style ``g <letter>`` shortcuts.
+        if (!inField && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+          if (ev.key === "g") {
+            _gPending = Date.now();
+            return;
+          }
+          if (_gPending && Date.now() - _gPending < 1500) {
+            var dest = _G_MAP[ev.key];
+            _gPending = 0;
+            if (dest) {
+              ev.preventDefault();
+              window.location.href = dest;
+              return;
+            }
+          }
+        }
+      });
+
+      // Palette input wiring.
+      var input = document.getElementById("cmdk-input");
+      if (input) {
+        input.addEventListener("input", _onPaletteInput);
+      }
+      document.addEventListener("keydown", _onPaletteKey);
+      // Click handlers on the overlay.
+      var overlay = _paletteEl();
+      if (overlay) {
+        overlay.addEventListener("click", function (ev) {
+          // Click on the backdrop closes; click on an item navigates.
+          var item = ev.target && ev.target.closest && ev.target.closest(".cmdk-item");
+          if (item) {
+            _closePalette();
+            window.location.href = item.getAttribute("data-href");
+          } else if (ev.target === overlay) {
+            _closePalette();
+          }
+        });
+      }
+    });
+  }
+
+  var _gPending = 0;
+  var _G_MAP = {
+    "d": "/", "p": "/projects", "a": "/analysis", "t": "/data",
+    "r": "/diffs", "f": "/findings", "s": "/settings",
+  };
+
   // ─── Icons (PR-41) ────────────────────────────────────────────────
   //
   // A small inline-SVG icon set drawn from the Heroicons (MIT) shape
@@ -740,6 +947,13 @@
     "No notifications yet.": "알림이 없습니다.",
     "Analysis run failed": "분석 실행 실패",
     "Toggle navigation": "메뉴 열기/닫기",
+    // PR-42 — command palette.
+    "Search projects, jump to a tab… (cmd/ctrl+K)":
+      "프로젝트 검색, 탭 이동… (cmd/ctrl+K)",
+    "No matches.": "일치하는 항목이 없습니다.",
+    "navigate": "이동",
+    "open": "열기",
+    "go to projects": "프로젝트로 이동",
     "Recent runs (7d)": "최근 실행 (7일)",
     "Open findings": "미해결 결과",
     "Readiness": "준비 상태",

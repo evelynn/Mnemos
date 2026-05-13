@@ -5,12 +5,13 @@
 
 <section class="hint">
   <p class="muted">
-    Every submission runs through a multi-pass review (rules →
-    contracts → data_access → impact → second_opinion → validator).
-    Critical findings block approval. To clear a block an admin first
-    requests a break-glass grant (which re-runs the pipeline and is
-    refused while still blocked), then a different user approves with
-    the returned token (initiator ≠ approver, 15-min TTL, single use).
+    Every submission runs through a multi-pass <span data-tip="Multi-pass safety review: a 6-stage pipeline (rules, contracts, data_access, impact, second_opinion, validator) that classifies each diff as clean / warn / blocked. See docs/ultrareview.md.">ultrareview</span>
+    (rules → contracts → data_access → impact → second_opinion →
+    validator). Critical findings block approval. To clear a block
+    an admin first requests a <span data-tip="A single-use 15-minute token an admin issues when ultrareview blocks an otherwise-justified diff. The token must be consumed by a different operator (two-eyes review). Audit-logged from issue to consumption.">break-glass grant</span>
+    (which re-runs the pipeline and is refused while still blocked),
+    then a different user approves with the returned token
+    (initiator ≠ approver, 15-min TTL, single use).
     Philosophy: <code>docs/ultrareview.md</code>.
   </p>
 </section>

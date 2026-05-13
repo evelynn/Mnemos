@@ -78,6 +78,33 @@
   </main>
   <div class="sidebar-scrim" id="sidebar-scrim"></div>
 </div>
+
+<!-- PR-42 — command palette. Opened with cmd/ctrl+K or "/" anywhere
+     on the dashboard. -->
+<div id="cmdk-overlay" class="cmdk-overlay" role="dialog"
+     aria-modal="true" aria-label="Quick navigation">
+  <div class="cmdk-modal">
+    <div class="cmdk-header">
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18"
+           viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.7" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round"
+              d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/>
+      </svg>
+      <input id="cmdk-input" type="text" autocomplete="off"
+             spellcheck="false"
+             data-i18n-placeholder="Search projects, jump to a tab… (cmd/ctrl+K)"
+             placeholder="Search projects, jump to a tab… (cmd/ctrl+K)" />
+      <kbd class="cmdk-esc">Esc</kbd>
+    </div>
+    <ul id="cmdk-list" class="cmdk-list"></ul>
+    <div class="cmdk-footer muted">
+      <span><kbd>↑</kbd><kbd>↓</kbd> <span data-i18n="navigate">navigate</span></span>
+      <span><kbd>↵</kbd> <span data-i18n="open">open</span></span>
+      <span><kbd>g</kbd>+<kbd>p</kbd> <span data-i18n="go to projects">go to projects</span></span>
+    </div>
+  </div>
+</div>
 <script>
   // P2-3 — locale switcher. Persists to localStorage and re-applies
   // every ``data-i18n`` element on the page so the operator sees the

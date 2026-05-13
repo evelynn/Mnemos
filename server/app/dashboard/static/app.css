@@ -589,6 +589,137 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
   .notif-panel { right: -180px; width: min(320px, calc(100vw - 24px)); }
 }
 
+/* PR-42 — command palette overlay.
+ *
+ * Centered modal-style overlay summoned by cmd/ctrl+K or "/". The
+ * dark scrim defers the rest of the page to the operator's
+ * attention. The modal grows / shrinks with the viewport — full
+ * width on phones, capped at 600px on desktop.
+ */
+.cmdk-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 100;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10vh;
+}
+.cmdk-overlay.open { display: flex; }
+.cmdk-modal {
+  width: min(600px, calc(100vw - 32px));
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  display: flex;
+  flex-direction: column;
+  max-height: 70vh;
+  overflow: hidden;
+}
+.cmdk-header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-soft);
+}
+.cmdk-header svg { color: var(--text-muted); flex-shrink: 0; }
+.cmdk-header input {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 1rem;
+  outline: none;
+  padding: 0;
+}
+.cmdk-esc {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  background: var(--surface-tint);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+}
+.cmdk-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1) 0;
+  overflow-y: auto;
+  flex: 1;
+}
+.cmdk-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+.cmdk-item:hover, .cmdk-item.active { background: var(--accent-soft); }
+.cmdk-label { flex: 1; }
+.cmdk-sub { font-family: var(--font-mono); font-size: 0.8rem; }
+.cmdk-kind {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.4rem;
+  background: var(--surface-tint);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.cmdk-sc, kbd {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-alt);
+  color: var(--text-muted);
+}
+.cmdk-empty {
+  padding: var(--sp-6);
+  text-align: center;
+  color: var(--text-muted);
+}
+.cmdk-footer {
+  display: flex;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-4);
+  border-top: 1px solid var(--border-soft);
+  font-size: 0.75rem;
+  background: var(--surface-alt);
+}
+
+/* PR-42 — accessible tooltips for terms like "ultrareview" /
+   "break-glass" / "L0–L3" that confuse new operators. Pure CSS,
+   no JS — the trigger uses ``data-tip="…"`` on a span/button. */
+[data-tip] {
+  position: relative;
+  cursor: help;
+  border-bottom: 1px dotted var(--text-muted);
+}
+[data-tip]:hover::after,
+[data-tip]:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  background: var(--text);
+  color: var(--text-inverted);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+  white-space: pre-line;
+  max-width: 280px;
+  box-shadow: var(--shadow-toast);
+  z-index: 90;
+  pointer-events: none;
+}
+
 /* P2-5 — colour-blind status glyphs on analysis-run badges. The
    .verdict pills (clean/warn/blocked) already carried glyphs from
    PR-9; the .badge.* family used on analysis runs and findings did
