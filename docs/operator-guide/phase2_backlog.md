@@ -61,11 +61,14 @@ positives we'd have to live with.
 
 ## P2-2 — RuntimeObservation table
 
-**Status**: shipped in PR-25 (alembic migration 0016). See
-``server/app/models/runtime.py``. The UNIQUE constraint Team B asked
-for (``organization_id, service, operation, kind``) backs the
+**Status**: shipped in PR-25 (alembic migration 0016, ORM in
+``server/app/models/runtime.py``). The UNIQUE constraint Team B
+asked for (``organization_id, service, operation, kind``) backs the
 ``INSERT … ON CONFLICT DO UPDATE`` upsert path in
-``app.merge.runtime.buffer_observations``.
+``app.merge.runtime.buffer_observations``. PR-29 wired the
+14-day retention sweep into the existing ``retention_purge`` cron
+(``DELETE FROM runtime_observations WHERE last_seen_at < cutoff``) —
+the 9th-round audit caught that as the one missing piece.
 
 Schema sketch:
 

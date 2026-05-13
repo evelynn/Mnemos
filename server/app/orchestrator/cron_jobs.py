@@ -182,25 +182,50 @@ async def _probe_recheck_one(session: AsyncSession) -> dict[str, int]:
 
 
 async def _retention_purge(session: AsyncSession) -> dict[str, int]:
-    """Trim audit / webhook receipts older than the retention window.
+    """Trim bookkeeping tables that grow unboundedly.
 
-    We never delete a finding or a graph node here; only the noisy
-    bookkeeping tables that grow unboundedly. The window is fixed at
-    180 days for now (spec §14.4 mentions "configurable per-tenant"
-    but Phase 1 ships the single-tenant default).
+    Two sweeps:
+
+    * ``audit_logs`` — 180-day window; only the noisy webhook-received
+      entries are deleted. Auth / approval / break-glass entries are
+      kept indefinitely (spec §14.4 audit retention).
+    * ``runtime_observations`` — 14-day window. The OTLP receiver
+      writes one row per ``(service, operation, kind)`` triple it
+      sees; without this sweep the table grows unbounded on any
+      busy deployment. Phase 2 backlog P2-2 promised this retention
+      and the 9th-round audit caught it as missing in PR-25.
+
+    Both windows are fixed for Phase 1; spec §14.4 mentions
+    "configurable per-tenant" but ships the single-tenant defaults.
+    We never delete a finding or a graph node here.
     """
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=180)
+    audit_cutoff = datetime.now(tz=timezone.utc) - timedelta(days=180)
     res = await session.execute(
         text(
             "DELETE FROM audit_logs WHERE created_at < :cutoff "
             "AND action IN ('webhook.received',) RETURNING id"
         ),
-        {"cutoff": cutoff},
+        {"cutoff": audit_cutoff},
     )
-    deleted = len(res.fetchall())
+    deleted_audit = len(res.fetchall())
+
+    runtime_cutoff = datetime.now(tz=timezone.utc) - timedelta(days=14)
+    res = await session.execute(
+        text(
+            "DELETE FROM runtime_observations "
+            "WHERE last_seen_at < :cutoff RETURNING id"
+        ),
+        {"cutoff": runtime_cutoff},
+    )
+    deleted_runtime = len(res.fetchall())
+
     await session.commit()
-    log.info("retention_purge: deleted=%d", deleted)
-    return {"deleted": deleted}
+    log.info(
+        "retention_purge: deleted audit=%d runtime=%d",
+        deleted_audit,
+        deleted_runtime,
+    )
+    return {"deleted": deleted_audit, "runtime_deleted": deleted_runtime}
 
 
 # ---------------------------------------------------------------------------

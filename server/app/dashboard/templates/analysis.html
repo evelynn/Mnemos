@@ -29,16 +29,16 @@
         <option value="continuation">continuation (skip L0; summaries only)</option>
       </select>
     </label>
-    <button type="submit" class="primary">Start analysis</button>
+    <button type="submit" class="primary" data-i18n="Start analysis">Start analysis</button>
   </form>
   <pre id="trigger-result" class="muted"></pre>
 </section>
 
 <section>
-  <h2>Recent runs</h2>
+  <h2 data-i18n="Recent runs">Recent runs</h2>
   <form onsubmit="return loadRuns(event)">
     <label>Project ID<input type="text" id="rpid" required placeholder="uuid" /></label>
-    <button class="primary" type="submit">Load runs</button>
+    <button class="primary" type="submit" data-i18n="Load runs">Load runs</button>
   </form>
   <div id="runs"></div>
 </section>

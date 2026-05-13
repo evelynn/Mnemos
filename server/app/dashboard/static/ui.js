@@ -532,6 +532,37 @@
     "Rebuild": "재구축",
     "Start analysis": "분석 시작",
     "Sign in": "로그인",
+    // PR-29 — form labels and CTA buttons used across multiple tabs.
+    // Keeps the most-clicked surfaces consistent in Korean even
+    // though the per-page detailed labels stay English-only for now
+    // (see phase2_backlog.md P2-3 follow-up).
+    "Search": "검색",
+    "Create": "만들기",
+    "Load": "불러오기",
+    "Load runs": "실행 목록 불러오기",
+    "Load submissions": "제출 목록 불러오기",
+    "Severity": "심각도",
+    "Status": "상태",
+    "Kind": "종류",
+    "Value": "값",
+    "Label": "라벨",
+    "Approve → MR": "승인 → MR",
+    "Approve with token": "토큰으로 승인",
+    "Project ID": "프로젝트 ID",
+    "Plan ID": "계획 ID",
+    "Source path": "소스 경로",
+    "Scope": "범위",
+    "Cancel": "취소",
+    "Close": "닫기",
+    "Trigger run": "분석 시작",
+    "Connections (Secrets)": "연결 (비밀)",
+    "Project databases": "프로젝트 데이터베이스",
+    "Pipeline monitor": "파이프라인 모니터",
+    "Recent runs": "최근 실행",
+    "Register project": "프로젝트 등록",
+    "Sign in with SSO": "SSO 로 로그인",
+    "Loaded shared approval context — paste the token to approve.":
+      "공유된 승인 컨텍스트가 로드되었습니다 — 토큰을 붙여넣어 승인하세요.",
     // SSE strip
     "Analysis stream disconnected — open the Analysis tab to reconnect.":
       "분석 스트림 연결 끊김 — Analysis 탭을 열어 재연결하세요.",
