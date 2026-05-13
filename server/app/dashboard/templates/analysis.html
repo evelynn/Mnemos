@@ -20,10 +20,10 @@
 <section>
   <h2>Trigger run</h2>
   <form id="trigger" onsubmit="return triggerRun(event)">
-    <label>Project ID<input type="text" name="project_id" required placeholder="uuid" /></label>
-    <label>Source path<input type="text" name="source_path" required value="/work" /></label>
-    <label>Git SHA<input type="text" name="git_sha" value="HEAD" /></label>
-    <label>Scope
+    <label><span data-i18n="Project ID">Project ID</span><input type="text" name="project_id" required placeholder="uuid" /></label>
+    <label><span data-i18n="Source path">Source path</span><input type="text" name="source_path" required value="/work" /></label>
+    <label><span data-i18n="Git SHA">Git SHA</span><input type="text" name="git_sha" value="HEAD" /></label>
+    <label><span data-i18n="Scope">Scope</span>
       <select name="scope">
         <option value="full" selected>full (L0 extract + findings + L1–L3)</option>
         <option value="continuation">continuation (skip L0; summaries only)</option>
@@ -37,7 +37,7 @@
 <section>
   <h2 data-i18n="Recent runs">Recent runs</h2>
   <form onsubmit="return loadRuns(event)">
-    <label>Project ID<input type="text" id="rpid" required placeholder="uuid" /></label>
+    <label><span data-i18n="Project ID">Project ID</span><input type="text" id="rpid" required placeholder="uuid" /></label>
     <button class="primary" type="submit" data-i18n="Load runs">Load runs</button>
   </form>
   <div id="runs"></div>
@@ -45,7 +45,7 @@
 
 <section>
   <h2>Pipeline monitor <span id="sse-status" class="sse-status" hidden></span></h2>
-  <label>Run ID<input type="text" id="run-id" placeholder="uuid" /></label>
+  <label><span data-i18n="Run ID">Run ID</span><input type="text" id="run-id" placeholder="uuid" /></label>
   <button onclick="monitor()" class="primary">Monitor</button>
   <button onclick="stopMonitor()">Stop</button>
 

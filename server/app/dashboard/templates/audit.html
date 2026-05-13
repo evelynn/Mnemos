@@ -4,9 +4,9 @@
 <header class="page-head"><h1 data-i18n="Audit log">Audit log</h1></header>
 
 <form onsubmit="return load(event)">
-  <label>Actor filter<input type="text" id="actor" placeholder="user:<uuid> or system" /></label>
-  <label>Action filter<input type="text" id="action" placeholder="plan.submit" /></label>
-  <label>Limit<input type="number" id="limit" value="200" min="1" max="1000" /></label>
+  <label><span data-i18n="Actor filter">Actor filter</span><input type="text" id="actor" placeholder="user:<uuid> or system" /></label>
+  <label><span data-i18n="Action filter">Action filter</span><input type="text" id="action" placeholder="plan.submit" /></label>
+  <label><span data-i18n="Limit">Limit</span><input type="number" id="limit" value="200" min="1" max="1000" /></label>
   <button class="primary" type="submit" data-i18n="Search">Search</button>
 </form>
 <div id="out"></div>

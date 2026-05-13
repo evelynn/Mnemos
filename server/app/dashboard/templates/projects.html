@@ -6,11 +6,11 @@
 <section>
   <h2 data-i18n="Register project">Register project</h2>
   <form onsubmit="return createProject(event)">
-    <label>Name<input type="text" name="name" required data-i18n-placeholder="e.g. payments-core" placeholder="e.g. payments-core" /></label>
-    <label>GitLab project ID<input type="number" name="gitlab_project_id" required min="1" /></label>
-    <label>GitLab URL<input type="url" name="gitlab_url" required data-i18n-placeholder="https://gitlab.example.com/group/repo" placeholder="https://gitlab.example.com/group/repo" /></label>
-    <label>Default branch<input type="text" name="default_branch" value="main" /></label>
-    <label>Languages
+    <label><span data-i18n="Name">Name</span><input type="text" name="name" required data-i18n-placeholder="e.g. payments-core" placeholder="e.g. payments-core" /></label>
+    <label><span data-i18n="GitLab project ID">GitLab project ID</span><input type="number" name="gitlab_project_id" required min="1" /></label>
+    <label><span data-i18n="GitLab URL">GitLab URL</span><input type="url" name="gitlab_url" required data-i18n-placeholder="https://gitlab.example.com/group/repo" placeholder="https://gitlab.example.com/group/repo" /></label>
+    <label><span data-i18n="Default branch">Default branch</span><input type="text" name="default_branch" value="main" /></label>
+    <label><span data-i18n="Languages">Languages</span>
       <select name="languages" multiple required size="2">
         <option value="csharp">csharp</option>
         <option value="typescript">typescript</option>

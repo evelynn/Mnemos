@@ -13,8 +13,8 @@
 
   {% if user.role == 'admin' %}
   <form onsubmit="return createSecret(event)">
-    <label>Label<input type="text" name="label" required placeholder="mssql-prod-orderdb" /></label>
-    <label>Kind
+    <label><span data-i18n="Label">Label</span><input type="text" name="label" required placeholder="mssql-prod-orderdb" /></label>
+    <label><span data-i18n="Kind">Kind</span>
       <select name="kind" required>
         <option value="db_connection">db_connection</option>
         <option value="gitlab_token">gitlab_token</option>
@@ -22,7 +22,7 @@
         <option value="other">other</option>
       </select>
     </label>
-    <label>Value<input type="password" name="value" required autocomplete="new-password" /></label>
+    <label><span data-i18n="Value">Value</span><input type="password" name="value" required autocomplete="new-password" /></label>
     <button type="submit" class="primary">Create secret</button>
   </form>
   <pre id="secret-create-result" class="muted"></pre>

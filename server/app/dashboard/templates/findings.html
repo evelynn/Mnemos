@@ -4,11 +4,11 @@
 <header class="page-head"><h1 data-i18n="Findings">Findings</h1></header>
 
 <form onsubmit="return loadFindings(event)">
-  <label>Project ID<input type="text" id="pid" required placeholder="uuid" /></label>
-  <label>Severity
+  <label><span data-i18n="Project ID">Project ID</span><input type="text" id="pid" required placeholder="uuid" /></label>
+  <label><span data-i18n="Severity">Severity</span>
     <select id="sev"><option value="">(all)</option><option>info</option><option>warning</option><option>error</option></select>
   </label>
-  <label>Status
+  <label><span data-i18n="Status">Status</span>
     <select id="st"><option value="">(all)</option><option>open</option><option>acknowledged</option><option>resolved</option><option>false_positive</option></select>
   </label>
   <button class="primary" type="submit" data-i18n="Load">Load</button>
