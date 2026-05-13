@@ -282,6 +282,46 @@ endpoints, **1 new cron** (``reset_stale_runs``). spec §2 (10 of
 10 principles) preserved end-to-end. Large-system analysis
 gates the 5 operator scenarios + the D1..D5 contract pins.
 
+### Team-product sprint (PR-38 → PR-46)
+
+The user asked next: *"실제 거대한 시스템을 분석하는 도구가
+아니라, 여러 명이 팀으로 운영하는 상품으로 완성해라."* — turn
+the platform from a 1-operator tool into a team-operated
+product, including RBAC, UX polish, and a professional visual
+language.
+
+| PRs | Closes | Headline |
+|-----|--------|----------|
+| PR-38 | Critical A1 / A4 / A5 / A7 | User model + ``/api/v1/users`` CRUD + ``/users`` admin tab + ``/profile`` self-service + soft-delete + role-change with self-demote guard |
+| PR-39 | Critical E3 + Major E5 / E6 | Brute-force lockout (Redis ``INCR`` + 15-min window), password policy (12-char min + letter + digit + weak-list), HSTS / CSP / X-Frame / Referrer-Policy headers |
+| PR-40 | Major B1 + B3 | CSS-variable design tokens (30 colour + spacing + radius + shadow + font + transition); ``data-theme="dark"`` override block + ``prefers-color-scheme`` fallback; 3-button sidebar theme switcher (light / auto / dark); FOUC defence via pre-paint inline script |
+| PR-41 | Major B4 / B8 + Critical C1 | Three responsive breakpoints (1024 / 768 / 480 px) with mobile drawer sidebar; inline-SVG icon set (Heroicons MIT, 8 icons) using ``currentColor`` so dark mode flows; notification centre MVP (bell + unread badge + dropdown, cross-tab via BroadcastChannel) |
+| PR-42 | C2 + D3 + D4 | Command palette (``cmd/ctrl+K`` / ``/`` to open, ``g <letter>`` GitHub-style shortcuts) with cached project list; pure-CSS tooltips (``data-tip="…"``) for jargon like "ultrareview" and "break-glass grant" |
+| PR-43 | Major C4 / C5 + B7 | Polymorphic comments table (``target_kind`` ∈ {plan, diff_submission}) + ``/api/v1/comments`` CRUD + ``MnemosUI.mountCommentThread`` helper; ``plans.assignee_id`` + ``diff_submissions.assignee_id`` FKs; loading-skeleton CSS with ``prefers-reduced-motion`` |
+| PR-44 | Major E1 + A2 + A3 + C3 | CSRF middleware (double-submit cookie + ``X-CSRF-Token`` header, fetch auto-patched); ``user_invites`` + ``password_reset_tokens`` tables + four anonymous endpoints; activity feed widget on the dashboard reading the existing audit-log |
+| PR-45 | Hotfix (14th-round audit) | CSRF exempts for logout + reset + invite-accept (every signed-in user couldn't log out otherwise); brute-force fail-open on Redis outage; comment threads mounted on diffs.html + plans.html (PR-43 helper had no caller); ``/forgot`` + ``/reset`` + ``/invite`` GUI pages; "Forgot password?" link on login + invite-by-token section on the Users admin tab |
+| PR-46 | E4 + A6 + E2 | Sliding session TTL (every authenticated request slides the Redis key expiry forward, idle past TTL = auto-logout); ``revoke_all_for_user`` force-logout (admin disable + future "log me out everywhere" UI); global rate-limit middleware (60 mutations / min per session, per-group counters, fail-open on Redis outage) |
+
+**Final final state** (post-sprint): **46 PRs**, **569 unit + 16
+integration tests**, ``ruff check`` clean, 1 dep, 4 new alembic
+migrations (``0016`` runtime obs, ``0017`` user profile cols,
+``0018`` comments + assignee, ``0019`` invites + reset tokens),
+4 new models (``RuntimeObservation``, ``Comment``,
+``UserInvite``, ``PasswordResetToken``), 3 new middlewares
+(security headers, CSRF, rate-limit), 1 new cron
+(``reset_stale_runs``), 5 new dashboard pages (profile, users,
+forgot, reset, invite), full Korean i18n surface (~120 phrase
+entries) + light/dark theme + responsive mobile drawer +
+notification centre + command palette + comment threads.
+
+상품 완성도: **53 → 70+/100** (15th-round audit estimate).
+Day-2 team workflow is genuinely covered: admin creates users
+or sends invite tokens, operators self-service their profile +
+password, brute-force / CSRF / rate-limit defend the obvious
+attack vectors, comments + assignees split work across the
+team, audit log surfaces who did what when, mobile drawer
+keeps the platform usable on a phone.
+
 ### Self-review cycle summary
 
 Eleven rounds total — Phase 1's seven rounds (PR-1 → PR-19) plus

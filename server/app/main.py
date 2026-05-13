@@ -26,6 +26,7 @@ from app.api import webhooks as webhooks_api
 from app.audit.middleware import AuditMiddleware
 from app.security.csrf import CSRFMiddleware
 from app.security.headers import SecurityHeadersMiddleware
+from app.security.rate_limit import RateLimitMiddleware
 from app.auth.oidc import router as oidc_router
 from app.config import get_settings
 from app.dashboard.router import router as dashboard_router
@@ -74,6 +75,10 @@ def create_app() -> FastAPI:
     # CSRF gate is the outermost in-bound, so a forged mutation is
     # refused before it reaches any handler (PR-44, closes audit E1).
     app.add_middleware(CSRFMiddleware)
+    # Global rate-limit sits between CSRF and the handler chain —
+    # passing the CSRF check is required, but a flood of authenticated
+    # mutations still trips this gate (PR-46, closes audit E2).
+    app.add_middleware(RateLimitMiddleware)
     app.add_middleware(RequestContextMiddleware)
 
     app.add_route("/metrics", metrics_endpoint, methods=["GET"])

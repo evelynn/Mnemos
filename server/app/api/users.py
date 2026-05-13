@@ -359,11 +359,18 @@ async def disable_user(
     if target.disabled_at is None:
         target.disabled_at = datetime.now(tz=timezone.utc)
         await db.commit()
+        # PR-46 — force-logout every active session the target had
+        # (audit A6). Without this the disabled account stays signed
+        # in until its session TTL elapses, which defeats the point
+        # of a soft-delete.
+        from app.auth.sessions import revoke_all_for_user
+
+        revoked = await revoke_all_for_user(target.id)
         await audit_record(
             actor=f"user:{actor.id}",
             action="user.disabled",
             target=f"user:{target.id}",
-            details={"username": target.username},
+            details={"username": target.username, "sessions_revoked": revoked},
         )
 
 
