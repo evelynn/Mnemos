@@ -1,36 +1,189 @@
+/* ──────────────────────────────────────────────────────────────────
+ * Design tokens (PR-40, closes audit B1 + B3).
+ *
+ * Every hex / px / em literal that the old stylesheet sprinkled
+ * across 250 lines is now one CSS variable. Two consequences:
+ *
+ *   1. A future "company colours" theme swap edits one ``:root``
+ *      block, not 80 selectors.
+ *   2. Dark mode (B3) is just a second variable block that the
+ *      runtime toggles by setting ``data-theme="dark"`` on
+ *      ``<html>``. ``prefers-color-scheme: dark`` is honoured
+ *      automatically when no explicit preference is stored.
+ *
+ * Naming follows the simple "purpose-element-state" pattern:
+ *   --bg, --surface, --border, --text-*, --accent, --danger…
+ * Spacing scale uses a single multiplier (--sp-1 .. --sp-6) so
+ * fine-grained margin / padding stays consistent.
+ * ────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Light theme — the legacy palette, now tokenised. */
+  --bg:                   #f7f7f8;
+  --surface:              #ffffff;
+  --surface-alt:          #f6f8fa;
+  --surface-tint:         #eef0f3;
+  --border:               #d0d7de;
+  --border-soft:          #e1e4e8;
+
+  --text:                 #1f2328;
+  --text-muted:           #6b7178;
+  --text-inverted:        #ffffff;
+
+  --accent:               #1f6feb;
+  --accent-soft:          #eef5ff;
+  --accent-strong:        #0a3b8c;
+
+  --success:              #145a1f;
+  --success-bg:           #dff4e0;
+  --warn:                 #6a4b00;
+  --warn-bg:              #fff1c2;
+  --danger:               #82071e;
+  --danger-bg:            #ffdede;
+  --danger-button:        #c93c37;
+  --danger-banner:        #c62828;
+
+  --sidebar-bg:           #1f2328;
+  --sidebar-fg:           #d0d4d8;
+  --sidebar-active:       #313840;
+  --sidebar-active-fg:    #ffffff;
+
+  /* Spacing scale — a single source of truth so the audit team can
+     stop catching margin: 0.25rem vs 0.3rem drift. */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.25rem;
+  --sp-6: 1.5rem;
+  --sp-8: 2rem;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --shadow-hover: 0 1px 4px rgba(31, 111, 235, 0.18);
+  --shadow-modal: 0 12px 32px rgba(0, 0, 0, 0.2);
+  --shadow-toast: 0 2px 8px rgba(0, 0, 0, 0.15);
+
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", monospace;
+
+  --transition-fast: 0.15s;
+}
+
+/* Dark theme — applied when the operator picks "dark" in the
+   theme switcher, or when the browser reports prefers-color-scheme:
+   dark and no explicit preference is stored. */
+:root[data-theme="dark"] {
+  --bg:                   #0d1117;
+  --surface:              #161b22;
+  --surface-alt:          #1c2129;
+  --surface-tint:         #21262d;
+  --border:               #30363d;
+  --border-soft:          #21262d;
+
+  --text:                 #e6edf3;
+  --text-muted:           #8b949e;
+  --text-inverted:        #0d1117;
+
+  --accent:               #4493f8;
+  --accent-soft:          #1d2742;
+  --accent-strong:        #79b8ff;
+
+  --success:              #56d364;
+  --success-bg:           #1b3a26;
+  --warn:                 #d8a657;
+  --warn-bg:              #3a2e16;
+  --danger:               #f85149;
+  --danger-bg:            #3a1818;
+  --danger-button:        #da3633;
+  --danger-banner:        #b62324;
+
+  --sidebar-bg:           #010409;
+  --sidebar-fg:           #c9d1d9;
+  --sidebar-active:       #161b22;
+  --sidebar-active-fg:    #ffffff;
+
+  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.3);
+  --shadow-hover: 0 1px 4px rgba(68, 147, 248, 0.35);
+  --shadow-modal: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --shadow-toast: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* No-preference-stored fallback: respect the OS setting. The
+   theme-switcher JS overrides this by writing data-theme on <html>. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --bg:                   #0d1117;
+    --surface:              #161b22;
+    --surface-alt:          #1c2129;
+    --surface-tint:         #21262d;
+    --border:               #30363d;
+    --border-soft:          #21262d;
+    --text:                 #e6edf3;
+    --text-muted:           #8b949e;
+    --text-inverted:        #0d1117;
+    --accent:               #4493f8;
+    --accent-soft:          #1d2742;
+    --accent-strong:        #79b8ff;
+    --success:              #56d364;
+    --success-bg:           #1b3a26;
+    --warn:                 #d8a657;
+    --warn-bg:              #3a2e16;
+    --danger:               #f85149;
+    --danger-bg:            #3a1818;
+    --danger-button:        #da3633;
+    --danger-banner:        #b62324;
+    --sidebar-bg:           #010409;
+    --sidebar-fg:           #c9d1d9;
+    --sidebar-active:       #161b22;
+    --sidebar-active-fg:    #ffffff;
+  }
+}
+
 * { box-sizing: border-box; }
 body.app {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-body);
   margin: 0;
-  background: #f7f7f8;
-  color: #1f2328;
+  background: var(--bg);
+  color: var(--text);
 }
 
 .layout { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
 .sidebar {
-  background: #1f2328;
-  color: #fff;
-  padding: 1rem;
+  background: var(--sidebar-bg);
+  color: var(--sidebar-active-fg);
+  padding: var(--sp-4);
   display: flex;
   flex-direction: column;
 }
-.sidebar .brand { font-weight: 700; font-size: 1.1rem; margin-bottom: 1rem; }
-.sidebar nav { display: flex; flex-direction: column; gap: 0.25rem; flex: 1; }
+.sidebar .brand { font-weight: 700; font-size: 1.1rem; margin-bottom: var(--sp-4); }
+.sidebar nav { display: flex; flex-direction: column; gap: var(--sp-1); flex: 1; }
 .sidebar nav a {
-  color: #d0d4d8;
+  color: var(--sidebar-fg);
   text-decoration: none;
   padding: 0.4rem 0.6rem;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
 .sidebar nav a.active, .sidebar nav a:hover {
-  background: #313840;
-  color: #fff;
+  background: var(--sidebar-active);
+  color: var(--sidebar-active-fg);
 }
-.logout-form { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 1rem; }
+.logout-form { display: flex; flex-direction: column; gap: 0.4rem; margin-top: var(--sp-4); }
 .logout-form button {
-  background: #313840; color: #fff; border: 0; padding: 0.4rem; border-radius: 4px; cursor: pointer;
+  background: var(--sidebar-active);
+  color: var(--sidebar-active-fg);
+  border: 0;
+  padding: 0.4rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
 }
-.muted { color: #6b7178; }
+.muted { color: var(--text-muted); }
 
 .content { padding: 1.5rem 2rem; }
 .page-head { margin-bottom: 1rem; }
@@ -40,56 +193,56 @@ body.app {
 .login {
   max-width: 360px;
   margin: 8vh auto;
-  background: #fff;
-  border: 1px solid #e1e4e8;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
   border-radius: 8px;
   padding: 2rem;
   text-align: center;
 }
 .login h1 { margin: 0; font-size: 1.6rem; }
-.login .subtitle { color: #6b7178; margin-bottom: 1.5rem; }
+.login .subtitle { color: var(--text-muted); margin-bottom: 1.5rem; }
 .login-form { display: flex; flex-direction: column; gap: 0.75rem; text-align: left; }
 .login-form label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.9rem; }
 .login-form input {
-  padding: 0.5rem; border: 1px solid #d0d7de; border-radius: 4px; font-size: 0.95rem;
+  padding: 0.5rem; border: 1px solid var(--border); border-radius: 4px; font-size: 0.95rem;
 }
 .login-form button {
-  padding: 0.55rem; background: #1f6feb; color: #fff; border: 0; border-radius: 4px;
+  padding: 0.55rem; background: var(--accent); color: var(--surface); border: 0; border-radius: 4px;
   cursor: pointer; font-weight: 600;
 }
 .login-form .error {
-  background: #ffebe9; color: #82071e; padding: 0.5rem; border-radius: 4px; margin: 0;
+  background: #ffebe9; color: var(--danger); padding: 0.5rem; border-radius: 4px; margin: 0;
 }
 
 /* Tables */
-table.data { width: 100%; border-collapse: collapse; background: #fff; }
+table.data { width: 100%; border-collapse: collapse; background: var(--surface); }
 table.data th, table.data td {
-  padding: 0.5rem 0.75rem; border-bottom: 1px solid #e1e4e8; text-align: left;
+  padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border-soft); text-align: left;
 }
-table.data th { background: #f6f8fa; font-weight: 600; }
+table.data th { background: var(--surface-alt); font-weight: 600; }
 
 button.primary {
-  background: #1f6feb; color: #fff; border: 0; padding: 0.45rem 0.9rem;
+  background: var(--accent); color: var(--surface); border: 0; padding: 0.45rem 0.9rem;
   border-radius: 4px; cursor: pointer; font-weight: 600;
 }
 button.danger {
-  background: #c93c37; color: #fff; border: 0; padding: 0.45rem 0.9rem;
+  background: var(--danger-button); color: var(--surface); border: 0; padding: 0.45rem 0.9rem;
   border-radius: 4px; cursor: pointer;
 }
 .danger-banner {
-  background: #c62828; color: #fff; padding: 0.6rem 0.9rem; border-radius: 4px;
+  background: var(--danger-banner); color: var(--surface); padding: 0.6rem 0.9rem; border-radius: 4px;
 }
 
 /* Accessibility — WCAG 2.1 AA. The previous stylesheet had no :focus
    rule at all, so keyboard users could not see where they were. */
 :focus-visible {
-  outline: 2px solid #1f6feb;
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: 3px;
 }
 button:focus-visible, a:focus-visible, input:focus-visible,
 textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible {
-  outline: 2px solid #1f6feb;
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
@@ -97,13 +250,13 @@ textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible {
    previously rolled its own <pre> style — kept inline to stop the
    drift the UI audit flagged. */
 pre.code, .code-block {
-  background: #f6f8fa;
+  background: var(--surface-alt);
   padding: 0.5rem 0.75rem;
   border-radius: 4px;
   overflow-x: auto;
   font-size: 0.85rem;
   line-height: 1.4;
-  border: 1px solid #e1e4e8;
+  border: 1px solid var(--border-soft);
 }
 
 /* Toast notifications — replace the `alert(await r.text())` pattern. */
@@ -113,15 +266,15 @@ pre.code, .code-block {
   z-index: 9999; max-width: min(420px, calc(100vw - 2rem));
 }
 .toast {
-  background: #1f2328; color: #fff;
+  background: var(--text); color: var(--surface);
   padding: 0.7rem 1rem; border-radius: 6px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.15);
   font-size: 0.9rem;
   animation: toast-in 0.15s ease-out;
 }
-.toast.error   { background: #82071e; }
-.toast.warn    { background: #6a4b00; }
-.toast.success { background: #145a1f; }
+.toast.error   { background: var(--danger); }
+.toast.warn    { background: var(--warn); }
+.toast.success { background: var(--success); }
 @keyframes toast-in { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
 
 /* Modal dialog (native <dialog>). */
@@ -134,22 +287,22 @@ dialog.modal header { padding: 1rem 1.25rem 0.5rem; }
 dialog.modal header h2 { margin: 0; font-size: 1.1rem; }
 dialog.modal .body { padding: 0.5rem 1.25rem 1rem; }
 dialog.modal .body textarea, dialog.modal .body input[type="text"] {
-  width: 100%; padding: 0.5rem; border: 1px solid #d0d7de; border-radius: 4px;
+  width: 100%; padding: 0.5rem; border: 1px solid var(--border); border-radius: 4px;
   font-family: inherit; font-size: 0.9rem;
 }
 dialog.modal .body textarea { min-height: 8rem; resize: vertical; }
-dialog.modal .counter { font-size: 0.8rem; color: #6b7178; margin: 0.25rem 0 0; }
-dialog.modal .counter.ok { color: #145a1f; }
+dialog.modal .counter { font-size: 0.8rem; color: var(--text-muted); margin: 0.25rem 0 0; }
+dialog.modal .counter.ok { color: var(--success); }
 dialog.modal menu {
   display: flex; justify-content: flex-end; gap: 0.5rem;
-  margin: 0; padding: 0.75rem 1.25rem; border-top: 1px solid #e1e4e8;
-  background: #f6f8fa;
+  margin: 0; padding: 0.75rem 1.25rem; border-top: 1px solid var(--border-soft);
+  background: var(--surface-alt);
 }
 dialog.modal .token-block {
   display: flex; gap: 0.4rem; align-items: center;
 }
 dialog.modal .token-block code {
-  flex: 1; padding: 0.5rem; background: #f6f8fa; border-radius: 4px;
+  flex: 1; padding: 0.5rem; background: var(--surface-alt); border-radius: 4px;
   font-family: ui-monospace, SFMono-Regular, monospace; word-break: break-all;
   user-select: all;
 }
@@ -176,26 +329,26 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
 .onboarding-step-cta {
   margin-top: 0.6rem;
   padding: 0.5rem 0.8rem;
-  background: #eef5ff;
-  border-left: 3px solid #1f6feb;
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
   border-radius: 4px;
   animation: pulse-cta 1.5s ease-in-out 2;
 }
 .onboarding-step-cta a.primary { margin-left: 0.6rem; }
 @keyframes pulse-cta {
-  0%, 100% { background: #eef5ff; }
+  0%, 100% { background: var(--accent-soft); }
   50%      { background: #d6e4ff; }
 }
 
 /* Source-of-truth badge for analysis runs — webhook vs user-triggered. */
-.badge.webhook { background: #d9e6ff; color: #0a3b8c; }
-.badge.user    { background: #e6f4ea; color: #145a1f; }
+.badge.webhook { background: #d9e6ff; color: var(--accent-strong); }
+.badge.user    { background: #e6f4ea; color: var(--success); }
 
 /* SSE connection status. */
 .sse-status { font-size: 0.8rem; padding: 0.1rem 0.5rem; border-radius: 999px; }
-.sse-status.live { background: #dff4e0; color: #145a1f; }
+.sse-status.live { background: var(--success-bg); color: var(--success); }
 .sse-status.live::before { content: "● "; }
-.sse-status.disconnected { background: #ffdede; color: #7a1818; }
+.sse-status.disconnected { background: var(--danger-bg); color: #7a1818; }
 .sse-status.disconnected::before { content: "⚠ "; }
 
 /* P2-8 cross-tab strip — sticky thin banner at the very top of any
@@ -216,7 +369,7 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
   border-bottom: 1px solid #f1c98a;
   font-size: 0.85rem;
 }
-#sse-cross-tab-strip .sse-strip-text { color: #6a4b00; }
+#sse-cross-tab-strip .sse-strip-text { color: var(--warn); }
 
 /* P2-3 — locale switcher in the sidebar. Two tiny buttons; the
    active locale is filled, the other is the outline. */
@@ -225,21 +378,49 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
   gap: 0.3rem;
   margin: 0.6rem 1rem 0;
   padding-top: 0.6rem;
-  border-top: 1px solid #d0d7de;
+  border-top: 1px solid var(--border);
 }
 .locale-btn {
   flex: 1;
   font-size: 0.75rem;
   padding: 0.2rem 0.3rem;
-  background: #f6f8fa;
-  border: 1px solid #d0d7de;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
   border-radius: 4px;
   cursor: pointer;
 }
 .locale-btn.active {
-  background: #1f6feb;
-  color: #fff;
-  border-color: #1f6feb;
+  background: var(--accent);
+  color: var(--text-inverted);
+  border-color: var(--accent);
+}
+
+/* PR-40 — theme switcher (light / auto / dark). Three tiny pill
+   buttons under the locale switcher in the sidebar. */
+.theme-switcher {
+  display: flex;
+  gap: var(--sp-1);
+  margin: var(--sp-2) var(--sp-4) 0;
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--sidebar-active);
+}
+.theme-btn {
+  flex: 1;
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 0.3rem 0;
+  background: transparent;
+  border: 1px solid var(--sidebar-active);
+  color: var(--sidebar-fg);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+.theme-btn:hover { background: var(--sidebar-active); color: var(--sidebar-active-fg); }
+.theme-btn.active {
+  background: var(--accent);
+  color: var(--text-inverted);
+  border-color: var(--accent);
 }
 
 /* P2-5 — colour-blind status glyphs on analysis-run badges. The

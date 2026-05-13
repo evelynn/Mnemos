@@ -4,6 +4,20 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{% block title %}Mnemos{% endblock %}</title>
+    <script>
+      // PR-40 — apply the operator's saved theme synchronously so
+      // the first paint is in the right colour scheme (no FOUC).
+      // Runs BEFORE the stylesheet loads so the CSS variable
+      // override is in place when the cascade applies.
+      (function () {
+        try {
+          var pref = localStorage.getItem("mnemos_theme");
+          if (pref === "dark" || pref === "light") {
+            document.documentElement.setAttribute("data-theme", pref);
+          }
+        } catch (_) {}
+      })();
+    </script>
     <link rel="stylesheet" href="/static/app.css" />
     <script src="https://unpkg.com/htmx.org@2.0.2"></script>
     <script src="/static/ui.js" defer></script>

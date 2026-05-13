@@ -42,6 +42,14 @@
       <button type="button" data-locale="en" class="locale-btn">EN</button>
       <button type="button" data-locale="ko" class="locale-btn">한국어</button>
     </div>
+    <div class="theme-switcher" role="group" aria-label="Theme">
+      <button type="button" data-theme-pref="light" class="theme-btn" title="Light"
+              aria-label="Light theme">☀</button>
+      <button type="button" data-theme-pref="auto" class="theme-btn" title="System default"
+              aria-label="System default theme">⌂</button>
+      <button type="button" data-theme-pref="dark" class="theme-btn" title="Dark"
+              aria-label="Dark theme">☾</button>
+    </div>
   </aside>
   <main class="content">
     {% block content %}{% endblock %}
@@ -66,6 +74,37 @@
           for (var j = 0; j < btns.length; j++) btns[j].classList.remove("active");
           ev.currentTarget.classList.add("active");
         }
+      });
+    }
+  });
+
+  // PR-40 — theme switcher: light / auto (= system) / dark.
+  document.addEventListener("DOMContentLoaded", function () {
+    var stored = (function () {
+      try { return localStorage.getItem("mnemos_theme") || "auto"; } catch (_) { return "auto"; }
+    })();
+    var btns = document.querySelectorAll(".theme-btn");
+    function markActive(pref) {
+      for (var i = 0; i < btns.length; i++) {
+        btns[i].classList.toggle("active",
+          btns[i].getAttribute("data-theme-pref") === pref);
+      }
+    }
+    markActive(stored);
+
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener("click", function (ev) {
+        var pref = ev.currentTarget.getAttribute("data-theme-pref");
+        try {
+          if (pref === "auto") {
+            localStorage.removeItem("mnemos_theme");
+            document.documentElement.removeAttribute("data-theme");
+          } else {
+            localStorage.setItem("mnemos_theme", pref);
+            document.documentElement.setAttribute("data-theme", pref);
+          }
+        } catch (_) {}
+        markActive(pref);
       });
     }
   });
