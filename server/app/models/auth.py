@@ -23,8 +23,33 @@ class User(Base):
     organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=True
     )
+    # PR-38 — profile + lifecycle columns added when the platform
+    # graduated from single-operator self-host to a team-operated
+    # product. ``email`` doubles as the (optional) channel for invite /
+    # password-reset flows; ``display_name`` is what the dashboard
+    # shows next to comments and audit-log entries; ``avatar_url`` is
+    # cosmetic and may be empty; ``disabled_at`` is the soft-delete
+    # flag the login + session paths refuse on.
+    email: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    display_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    avatar_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    timezone: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True, default=None
+    )
+    disabled_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
     )
 
     api_keys: Mapped[list["ApiKey"]] = relationship(back_populates="user")

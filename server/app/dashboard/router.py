@@ -119,6 +119,8 @@ async def tab_page(
         "findings",
         "audit",
         "settings",
+        "profile",
+        "users",
         "organizations",
         "gdpr",
         "sso",

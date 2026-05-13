@@ -24,9 +24,11 @@
       <a href="/diffs" class="{% if active_tab == 'diffs' %}active{% endif %}" data-i18n="Diffs">Diffs</a>
       <a href="/findings" class="{% if active_tab == 'findings' %}active{% endif %}" data-i18n="Findings">Findings</a>
       <a href="/audit" class="{% if active_tab == 'audit' %}active{% endif %}" data-i18n="Audit">Audit</a>
+      <a href="/profile" class="{% if active_tab == 'profile' %}active{% endif %}" data-i18n="Profile">Profile</a>
       <a href="/settings" class="{% if active_tab == 'settings' %}active{% endif %}" data-i18n="Settings">Settings</a>
       {% if user.role == 'admin' %}
       <div class="nav-section muted" data-i18n="Admin">Admin</div>
+      <a href="/users" class="{% if active_tab == 'users' %}active{% endif %}" data-i18n="Users">Users</a>
       <a href="/organizations" class="{% if active_tab == 'organizations' %}active{% endif %}" data-i18n="Organizations">Organizations</a>
       <a href="/sso" class="{% if active_tab == 'sso' %}active{% endif %}" data-i18n="SSO / OIDC">SSO / OIDC</a>
       <a href="/gdpr" class="{% if active_tab == 'gdpr' %}active{% endif %}" data-i18n="GDPR tools">GDPR tools</a>

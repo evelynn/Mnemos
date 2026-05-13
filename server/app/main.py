@@ -19,6 +19,7 @@ from app.api import plans as plans_api
 from app.api import project_dbs as project_dbs_api
 from app.api import projects as projects_api
 from app.api import secrets as secrets_api
+from app.api import users as users_api
 from app.api import webhooks as webhooks_api
 from app.audit.middleware import AuditMiddleware
 from app.auth.oidc import router as oidc_router
@@ -67,6 +68,7 @@ def create_app() -> FastAPI:
     app.add_route("/metrics", metrics_endpoint, methods=["GET"])
     app.include_router(health_api.router)
     app.include_router(auth_api.router)
+    app.include_router(users_api.router)
     app.include_router(oidc_router)
     app.include_router(organizations_api.router)
     app.include_router(gdpr_api.router)

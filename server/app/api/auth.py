@@ -46,6 +46,27 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_credentials"
         )
+    # PR-38: a soft-deleted account (disabled_at set) is treated as
+    # if it never existed. The audit log records the attempt with
+    # the same "login_failed" action so an admin reviewing the log
+    # can see ex-employees still poking at the door — but the
+    # response is identical to a wrong password to avoid leaking
+    # which accounts are disabled vs deleted.
+    if user.disabled_at is not None:
+        await audit_record(
+            actor=f"user:{user.id}",
+            action="auth.login_blocked_disabled",
+            target=body.username,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_credentials"
+        )
+
+    # Bookkeeping for the admin "active sessions" view + audit trail.
+    from datetime import datetime, timezone as _tz
+
+    user.last_login_at = datetime.now(tz=_tz.utc)
+    await db.commit()
 
     token = await create_session(user.id)
     await audit_record(actor=f"user:{user.id}", action="auth.login")
