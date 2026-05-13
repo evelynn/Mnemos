@@ -548,6 +548,7 @@ class WorkerSettings:
     from app.orchestrator.cron_jobs import (
         run_break_glass_expiry,
         run_probe_recheck,
+        run_reset_stale_runs,
         run_retention_purge,
     )
 
@@ -556,6 +557,9 @@ class WorkerSettings:
         cron(run_break_glass_expiry, minute=set(range(0, 60, 5))),
         cron(run_probe_recheck, hour={3}, minute={0}),
         cron(run_retention_purge, hour={4}, minute={0}),
+        # Every 15 minutes so a wedged run doesn't sit in the GUI
+        # for half a day before the operator notices.
+        cron(run_reset_stale_runs, minute=set(range(0, 60, 15))),
     ]
     on_startup = _startup
     on_shutdown = _shutdown

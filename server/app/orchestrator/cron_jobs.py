@@ -251,6 +251,63 @@ async def run_retention_purge(ctx: dict) -> dict[str, int] | None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Stale analysis_runs sweep (PR-33 — closes the "wedged run" gap the
+# 11th-round e2e audit flagged on its readiness doc).
+# ---------------------------------------------------------------------------
+
+# A run is considered abandoned when its ``started_at`` is older than
+# the longest stage budget plus a margin. The orchestrator's per-stage
+# ``time_budget_sec`` defaults to 1800s (30 min); the maximum pipeline
+# walks ~12 stages, so 6h is the soft ceiling beyond which a running
+# row almost certainly means a worker crash.
+_STALE_RUN_AFTER_SEC = 6 * 60 * 60
+
+
+async def _reset_stale_runs(session: AsyncSession) -> dict[str, int]:
+    """Flip ``status='running'`` rows whose worker is long gone to
+    ``status='failed'`` with an explanatory ``error_log``.
+
+    Spec §2.7's "always-on" promise needs this — without the sweep,
+    a SIGKILLed worker leaves the GUI showing "running" forever and
+    the operator has no way to re-trigger without admin SQL access.
+
+    The sweep is harmless when nothing is wrong: rows that finished
+    cleanly have ``status='completed'`` or ``'failed'`` already and
+    are excluded by the WHERE clause.
+    """
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(
+        seconds=_STALE_RUN_AFTER_SEC
+    )
+    res = await session.execute(
+        text(
+            "UPDATE analysis_runs SET "
+            "  status = 'failed', "
+            "  completed_at = now(), "
+            "  error_log = coalesce(error_log, '') "
+            "    || E'\\n[reset_stale_runs] worker heartbeat lost; "
+            "run exceeded 6h budget' "
+            " WHERE status = 'running' AND started_at < :cutoff "
+            " RETURNING id"
+        ),
+        {"cutoff": cutoff},
+    )
+    reset_ids = [row[0] for row in res.fetchall()]
+    await session.commit()
+    if reset_ids:
+        log.warning(
+            "reset_stale_runs: %d analysis runs flipped to failed",
+            len(reset_ids),
+        )
+    return {"reset": len(reset_ids)}
+
+
+async def run_reset_stale_runs(ctx: dict) -> dict[str, int] | None:
+    return await with_advisory_lock(
+        SessionLocal_factory(), "reset_stale_runs", _reset_stale_runs
+    )
+
+
 def SessionLocal_factory():
     """Return the canonical async-session factory.
 
@@ -267,5 +324,6 @@ __all__ = [
     "run_break_glass_expiry",
     "run_probe_recheck",
     "run_retention_purge",
+    "run_reset_stale_runs",
     "PROBE_RECHECK_INTERVAL",
 ]

@@ -13,8 +13,12 @@ from datetime import timedelta
 import pytest
 
 
-def test_worker_settings_registers_all_three_crons():
-    """If any of the three cron entries is missing, periodic work stops."""
+def test_worker_settings_registers_all_crons():
+    """If any of the cron entries is missing, periodic work stops.
+
+    PR-33 added ``run_reset_stale_runs`` (auto-flip wedged
+    analysis_runs to failed) — now four entries total.
+    """
     from app.orchestrator.jobs import WorkerSettings
 
     names = {c.coroutine.__name__ for c in WorkerSettings.cron_jobs}
@@ -22,6 +26,7 @@ def test_worker_settings_registers_all_three_crons():
         "run_break_glass_expiry",
         "run_probe_recheck",
         "run_retention_purge",
+        "run_reset_stale_runs",
     }
 
 

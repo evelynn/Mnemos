@@ -139,16 +139,11 @@ def test_e3_per_db_masking_rules_supplement_defaults():
 # ---------------------------------------------------------------------------
 
 
-def test_e4_retention_purge_sweeps_runtime_observations(tmp_path):
+def test_e4_retention_purge_sweeps_runtime_observations():
     """PR-29 fixed P2-2's missing 14-day sweep — this guard makes
     sure the cron handler keeps both deletes when someone refactors
     it. (Same code path the 9th-round audit caught as missing.)
     """
-    body = (
-        tmp_path
-        / "cron_jobs.py"  # placeholder so the test reads the *real* file
-    )
-    # The real file lives in the app tree.
     from pathlib import Path
 
     real = (

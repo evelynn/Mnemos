@@ -28,21 +28,27 @@ hours" — is the bar; this doc tells an operator how close we are.
 
 ## What's *not* yet verified end-to-end
 
-* **GitLab MR creation flow**. ``create_mr_from_worktree`` is
-  fully implemented (python-gitlab SDK, token resolution, git push
-  command sequence) but has no integration test against a live or
-  mock GitLab. Phase 3 follow-up.
+* **GitLab MR creation flow**. ``create_mr_from_worktree`` is fully
+  implemented and **PR-33 added a mock-based integration test**
+  covering the happy path (python-gitlab SDK returns a fresh MR),
+  the not-configured short-circuit, a git-step failure (preserves
+  the command output in ``MRResult.message``) and a python-gitlab
+  exception (auth / network / project-not-found). Live-server tests
+  still belong in Phase 3 — that needs a real GitLab dev instance
+  in CI.
 * **Scale**. The ``perf_indexes`` migration (0011) added the right
   indexes for million-node graphs, but the only published
   perf-test result is the Phase-B baseline from earlier in the
   project. A real 50 K-file mono-repo has not been pushed
   through the pipeline end-to-end.
-* **Crashed-worker auto-recovery**. The heartbeat side is
-  watertight (90-second stale-after window in ``health.py``,
-  Grafana alert in the dashboard). What's missing is a cron that
-  proactively flips a stale ``analysis_runs.status='running'`` row
-  back to ``failed`` so the GUI doesn't show a wedged run forever.
-  Currently this requires manual SQL — Phase 3 backlog item.
+* ~~**Crashed-worker auto-recovery**.~~ **Closed in PR-33.** A new
+  ``run_reset_stale_runs`` cron (every 15 minutes, advisory-locked)
+  flips any ``analysis_runs.status='running'`` row whose
+  ``started_at`` is older than 6 hours to ``status='failed'`` with
+  an explanatory ``error_log`` entry. The 6h cutoff is the longest
+  realistic full pipeline (12 stages × 30-min budget), so a wedged
+  run becomes visible to the GUI within 15 minutes without
+  truncating a genuinely long-running analysis.
 
 ## Five operator scenarios — current state
 
@@ -101,7 +107,7 @@ Analyzer subprocess crashes (non-zero exit)
 Worker crashes mid-run
   - heartbeat key goes stale                     ✓
   - /health/ready surfaces 503                   ✓
-  - analysis_run row stays at 'running'          ⚠ no auto-reset
+  - reset_stale_runs cron flips to 'failed'      ✓ (PR-33, every 15 min)
 ARQ Redis connection drop
   - asyncpg reconnect                            ✓ (pool)
   - ARQ retry policy                             ✓ (default 5x)
