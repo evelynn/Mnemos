@@ -36,6 +36,12 @@ class Plan(Base):
     )
     approved_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # PR-43 — optional assignee so a team can split planning load.
+    assignee_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
 
 class DiffSubmission(Base):
@@ -62,6 +68,13 @@ class DiffSubmission(Base):
     approved_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     gitlab_mr_iid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     gitlab_mr_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # PR-43 — assignee at the diff-submission grain too, so multiple
+    # operators can split review load on a single plan.
+    assignee_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
 
 class DiffBreakGlassGrant(Base):

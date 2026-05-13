@@ -616,6 +616,142 @@
     );
   }
 
+  // ─── Comment thread mount (PR-43) ─────────────────────────────────
+  //
+  // ``MnemosUI.mountCommentThread(container, kind, id)`` renders a
+  // comment thread inside ``container`` (a DOM element) for the
+  // given target (``kind`` ∈ {plan, diff_submission}, ``id`` is the
+  // target UUID). Handles list + create + edit + delete via the
+  // ``/api/v1/comments`` endpoints.
+
+  async function _loadComments(kind, targetId) {
+    var qs = new URLSearchParams({ target_kind: kind, target_id: targetId });
+    var r = await fetch("/api/v1/comments?" + qs.toString());
+    return r.ok ? r.json() : [];
+  }
+
+  async function _postComment(kind, targetId, body) {
+    var qs = new URLSearchParams({ target_kind: kind, target_id: targetId });
+    var r = await fetch("/api/v1/comments?" + qs.toString(), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: body }),
+    });
+    if (!r.ok) {
+      await showError("Comment failed", r);
+      return null;
+    }
+    return r.json();
+  }
+
+  function _renderCommentList(target, comments, kind, targetId, currentUserId, currentUserRole) {
+    if (!comments.length) {
+      target.innerHTML = '<p class="muted">' +
+        (typeof t === "function" ? t("No comments yet.") : "No comments yet.") +
+        '</p>';
+      return;
+    }
+    target.innerHTML = comments.map(function (c) {
+      var when = c.created_at
+        ? '<time data-ts="' + escapeHtml(c.created_at) + '">' + escapeHtml(c.created_at) + '</time>'
+        : "";
+      var edited = c.edited_at ? ' <span class="muted">(edited)</span>' : "";
+      var author = c.author_display_name || c.author_username || "—";
+      var ownerActions = (c.author_id === currentUserId || currentUserRole === "admin")
+        ? '<div class="comment-actions">' +
+            '<button onclick="_mnemosEditComment(\'' + c.id + '\', \'' + kind + '\', \'' + targetId + '\')">Edit</button>' +
+            '<button onclick="_mnemosDeleteComment(\'' + c.id + '\', \'' + kind + '\', \'' + targetId + '\')">Delete</button>' +
+          '</div>'
+        : "";
+      return (
+        '<div class="comment" data-comment-id="' + c.id + '">' +
+          '<div class="comment-meta">' +
+            '<span class="comment-author">' + escapeHtml(author) + '</span>' +
+            '<span>' + when + edited + '</span>' +
+          '</div>' +
+          '<div class="comment-body">' + escapeHtml(c.body) + '</div>' +
+          ownerActions +
+        '</div>'
+      );
+    }).join("");
+    hydrateRelativeTimes(target);
+  }
+
+  async function mountCommentThread(container, kind, targetId, opts) {
+    opts = opts || {};
+    container.innerHTML =
+      '<div class="comment-thread">' +
+        '<h3>' + (typeof t === "function" ? t("Comments") : "Comments") + '</h3>' +
+        '<div data-role="comment-list"><div class="skeleton skeleton-card"></div></div>' +
+        '<form class="comment-form" onsubmit="return _mnemosSubmitComment(event, \'' + kind + '\', \'' + targetId + '\')">' +
+          '<textarea required maxlength="4000" placeholder="' +
+            escapeHtml(typeof t === "function" ? t("Write a comment…") : "Write a comment…") +
+          '"></textarea>' +
+          '<button type="submit" class="primary">' +
+            (typeof t === "function" ? t("Post comment") : "Post comment") +
+          '</button>' +
+        '</form>' +
+      '</div>';
+
+    // Load current user for ownership-based action visibility.
+    var me = null;
+    try {
+      var meRes = await fetch("/api/v1/auth/me");
+      if (meRes.ok) me = await meRes.json();
+    } catch (_) {}
+
+    var listEl = container.querySelector('[data-role="comment-list"]');
+    var comments = await _loadComments(kind, targetId);
+    _renderCommentList(
+      listEl, comments, kind, targetId,
+      me ? me.id : null, me ? me.role : null,
+    );
+    // Stash the reload function so the form submit handler can call it.
+    container._mnemosReload = async function () {
+      var fresh = await _loadComments(kind, targetId);
+      _renderCommentList(
+        listEl, fresh, kind, targetId,
+        me ? me.id : null, me ? me.role : null,
+      );
+    };
+  }
+
+  // Form submit handler — global so the inline onsubmit attribute
+  // can reach it. Defensive: looks up the container at submit time.
+  window._mnemosSubmitComment = async function (ev, kind, targetId) {
+    ev.preventDefault();
+    var ta = ev.target.querySelector("textarea");
+    if (!ta || !ta.value.trim()) return false;
+    var created = await _postComment(kind, targetId, ta.value);
+    if (created) {
+      ta.value = "";
+      var container = ev.target.closest("[data-comment-thread]");
+      if (container && container._mnemosReload) await container._mnemosReload();
+    }
+    return false;
+  };
+
+  window._mnemosEditComment = async function (commentId, kind, targetId) {
+    var fresh = prompt("Edit comment:");
+    if (fresh == null || !fresh.trim()) return;
+    var r = await fetch("/api/v1/comments/" + commentId, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ body: fresh }),
+    });
+    if (!r.ok) { await showError("Edit failed", r); return; }
+    var container = document.querySelector('[data-comment-thread][data-target="' + targetId + '"]');
+    if (container && container._mnemosReload) await container._mnemosReload();
+  };
+
+  window._mnemosDeleteComment = async function (commentId, kind, targetId) {
+    if (!confirm("Delete this comment?")) return;
+    var r = await fetch("/api/v1/comments/" + commentId, { method: "DELETE" });
+    if (!r.ok && r.status !== 204) { await showError("Delete failed", r); return; }
+    var container = document.querySelector('[data-comment-thread][data-target="' + targetId + '"]');
+    if (container && container._mnemosReload) await container._mnemosReload();
+  };
+
   // ─── Notification centre (PR-41) ──────────────────────────────────
   //
   // A minimal in-browser inbox so multi-operator teams have a single
@@ -947,6 +1083,11 @@
     "No notifications yet.": "알림이 없습니다.",
     "Analysis run failed": "분석 실행 실패",
     "Toggle navigation": "메뉴 열기/닫기",
+    // PR-43 — comments.
+    "Comments": "댓글",
+    "No comments yet.": "댓글이 없습니다.",
+    "Write a comment…": "댓글 작성…",
+    "Post comment": "댓글 게시",
     // PR-42 — command palette.
     "Search projects, jump to a tab… (cmd/ctrl+K)":
       "프로젝트 검색, 탭 이동… (cmd/ctrl+K)",
@@ -1101,6 +1242,7 @@
     notify: notify,
     readNotifications: readNotifications,
     clearNotifications: clearNotifications,
+    mountCommentThread: mountCommentThread,
   };
   // Convenience global — many existing templates already call
   // ``escapeHtml(x)`` without a namespace prefix.

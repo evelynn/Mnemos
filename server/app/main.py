@@ -9,6 +9,7 @@ from app.api import artifacts as artifacts_api
 from app.api import audit as audit_api
 from app.api import auth as auth_api
 from app.api import break_glass as break_glass_api
+from app.api import comments as comments_api
 from app.api import data as data_api
 from app.api import diffs as diffs_api
 from app.api import findings as findings_api
@@ -88,6 +89,7 @@ def create_app() -> FastAPI:
     app.include_router(plans_api.router)
     app.include_router(diffs_api.router)
     app.include_router(break_glass_api.router)
+    app.include_router(comments_api.router)
     app.include_router(audit_api.router)
     app.include_router(webhooks_api.router)
     app.include_router(otlp_router)

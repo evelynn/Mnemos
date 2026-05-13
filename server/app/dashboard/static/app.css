@@ -702,6 +702,89 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
   cursor: help;
   border-bottom: 1px dotted var(--text-muted);
 }
+/* PR-43 — loading skeletons.
+ *
+ * A grey shimmer for pending API responses. Use on the `<div>`
+ * that will hold the eventual content; remove the class once
+ * the fetch resolves. Pure CSS animation; respects
+ * ``prefers-reduced-motion``.
+ */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--surface-tint) 0%,
+    var(--surface-alt) 50%,
+    var(--surface-tint) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+  color: transparent;
+  user-select: none;
+  min-height: 1em;
+}
+.skeleton.skeleton-text-lg { height: 1.6rem; width: 60%; }
+.skeleton.skeleton-text { height: 1rem; margin: 0.3rem 0; width: 80%; }
+.skeleton.skeleton-card { height: 4rem; margin: 0.5rem 0; }
+
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+}
+
+/* PR-43 — comment thread styling. */
+.comment-thread {
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border-soft);
+}
+.comment-thread h3 { margin: 0 0 var(--sp-3); font-size: 1rem; }
+.comment {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3);
+  margin-bottom: var(--sp-3);
+  background: var(--surface);
+}
+.comment-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: var(--sp-2);
+}
+.comment-author { font-weight: 600; color: var(--text); }
+.comment-body { white-space: pre-wrap; word-break: break-word; }
+.comment-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.comment-actions button {
+  font-size: 0.8rem;
+  padding: 0.2rem 0.5rem;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.comment-actions button:hover { background: var(--surface-alt); color: var(--text); }
+.comment-form { display: flex; flex-direction: column; gap: var(--sp-2); }
+.comment-form textarea {
+  width: 100%;
+  min-height: 4rem;
+  padding: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 0.9rem;
+  resize: vertical;
+}
+
 [data-tip]:hover::after,
 [data-tip]:focus-visible::after {
   content: attr(data-tip);
