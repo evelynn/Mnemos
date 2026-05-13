@@ -37,10 +37,15 @@ hours" — is the bar; this doc tells an operator how close we are.
   still belong in Phase 3 — that needs a real GitLab dev instance
   in CI.
 * **Scale**. The ``perf_indexes`` migration (0011) added the right
-  indexes for million-node graphs, but the only published
-  perf-test result is the Phase-B baseline from earlier in the
-  project. A real 50 K-file mono-repo has not been pushed
-  through the pipeline end-to-end.
+  indexes for million-node graphs. **PR-34 added synthetic scale
+  tests** that bound the hot paths: ``AnalyzerRunner`` drains 10 000
+  JSON records in <30 s, ``mask_rows`` handles 50 000 rows × 5
+  columns in <10 s and scales linearly with row count (a quadratic
+  regex regression would blow the budget), the masker redacts a
+  dense PII document with 55 patterns in one pass, and 20
+  parallel subprocess spawns complete in <15 s. A real 50 K-file
+  mono-repo run is still future work — the synthetic bounds give
+  CI a regression guard until that's available.
 * ~~**Crashed-worker auto-recovery**.~~ **Closed in PR-33.** A new
   ``run_reset_stale_runs`` cron (every 15 minutes, advisory-locked)
   flips any ``analysis_runs.status='running'`` row whose
