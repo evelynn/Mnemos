@@ -30,7 +30,11 @@
   --text-muted:           #6b7178;
   --text-inverted:        #ffffff;
 
-  --accent:               #1f6feb;
+  /* PR-48 — bumped from #1f6feb (4.18:1 on white) to #0a5fc7
+     which clears WCAG 2.1 AA (4.74:1). The audit team flagged
+     the original for the brand-logo + small-text use cases on a
+     light surface. Dark-mode accent already passes (8.2:1). */
+  --accent:               #0a5fc7;
   --accent-soft:          #eef5ff;
   --accent-strong:        #0a3b8c;
 

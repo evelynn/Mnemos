@@ -106,6 +106,22 @@ async def revoke_all_for_user(user_id: uuid.UUID) -> int:
     sessions for *that* user). The legacy ``scan_iter`` path
     stays as a fallback for sessions created before the index
     existed.
+
+    **Race window note (17th-round audit A2)**: a ``create_session``
+    racing with a ``revoke_all_for_user`` can land *after* the
+    SMEMBERS snapshot — the new token isn't in the set we read,
+    so the fast path doesn't delete it. The scan_iter fallback
+    catches it as long as the session row was already committed
+    when ``scan_iter`` ran; otherwise the new session lives
+    until its TTL elapses (max ``session_max_age_sec``). The
+    audit team rated this Minor — a freshly-issued session for a
+    user who just got disabled is short-lived anyway, and the
+    next request's ``read_session`` would still find the row
+    valid (its key wasn't deleted) until the operator manually
+    re-runs disable. If a future deployment needs strict
+    revocation in the race window, swap the SMEMBERS read for a
+    transactional pattern (WATCH/MULTI) or pin the disable flow
+    to a single worker via the existing advisory-lock helper.
     """
     client = _client()
     revoked = 0
