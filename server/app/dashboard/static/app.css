@@ -161,6 +161,70 @@ body.app {
   display: flex;
   flex-direction: column;
 }
+
+/* PR-41 — responsive layout.
+ *
+ * Three breakpoints:
+ *   ≤ 1024px (tablet)   — sidebar shrinks; content padding tightens.
+ *   ≤  768px (mobile)   — sidebar becomes a drawer; hamburger appears.
+ *   ≤  480px (phone)    — stacked cards in the dashboard summary grid.
+ *
+ * The drawer uses a <details> element under the brand so we get
+ * keyboard accessibility for free; ``aria-expanded`` is set by the
+ * theme JS for screen readers.
+ */
+.menu-toggle {
+  display: none;
+  font-size: 1.4rem;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  cursor: pointer;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+}
+.menu-toggle:hover { background: var(--surface-tint); }
+.menu-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+@media (max-width: 1024px) {
+  .layout { grid-template-columns: 180px 1fr; }
+  .content { padding: var(--sp-4); }
+}
+
+@media (max-width: 768px) {
+  .layout { grid-template-columns: 1fr; }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 240px;
+    height: 100vh;
+    transform: translateX(-100%);
+    transition: transform var(--transition-fast) ease-out;
+    z-index: 50;
+    box-shadow: var(--shadow-modal);
+  }
+  .sidebar.open { transform: translateX(0); }
+  .menu-toggle { display: inline-flex; align-items: center; }
+  .content { padding: var(--sp-4) var(--sp-3); padding-top: 3.5rem; }
+  /* Scrim behind the open drawer so the drawer feels modal. */
+  .sidebar-scrim {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 40;
+  }
+  .sidebar.open + .sidebar-scrim { display: block; }
+}
+
+@media (max-width: 480px) {
+  .summary-grid {
+    grid-template-columns: 1fr 1fr !important;
+  }
+  .page-head h1 { font-size: 1.3rem; }
+  table.data { font-size: 0.85rem; }
+}
 .sidebar .brand { font-weight: 700; font-size: 1.1rem; margin-bottom: var(--sp-4); }
 .sidebar nav { display: flex; flex-direction: column; gap: var(--sp-1); flex: 1; }
 .sidebar nav a {
@@ -421,6 +485,108 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
   background: var(--accent);
   color: var(--text-inverted);
   border-color: var(--accent);
+}
+
+/* PR-41 — notification centre.
+ *
+ * Sidebar header gets a bell button + dropdown panel. The dropdown
+ * is positioned relative to the sidebar so it never overlaps the
+ * content; on mobile it stretches to fill the drawer width.
+ */
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--sp-4);
+}
+.notif-wrap { position: relative; }
+.notif-bell {
+  background: transparent;
+  border: 0;
+  color: var(--sidebar-fg);
+  cursor: pointer;
+  padding: var(--sp-1);
+  border-radius: var(--radius-sm);
+  position: relative;
+  display: inline-flex;
+}
+.notif-bell:hover { background: var(--sidebar-active); color: var(--sidebar-active-fg); }
+.notif-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  background: var(--danger-button);
+  color: var(--text-inverted);
+  font-size: 0.65rem;
+  line-height: 16px;
+  border-radius: var(--radius-pill);
+  text-align: center;
+  font-weight: 700;
+}
+.notif-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 320px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-modal);
+  z-index: 60;
+  display: none;
+}
+.notif-panel.open { display: block; }
+.notif-panel header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-alt);
+}
+.notif-panel .link-btn {
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0;
+}
+.notif-list { list-style: none; margin: 0; padding: 0; }
+.notif-item {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-soft);
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+.notif-item:hover { background: var(--surface-alt); }
+.notif-item.unread { border-left-color: var(--accent); background: var(--accent-soft); }
+.notif-item.unread.error   { border-left-color: var(--danger-button); }
+.notif-item.unread.warn    { border-left-color: var(--warn); }
+.notif-item.unread.success { border-left-color: var(--success); }
+.notif-row {
+  display: flex;
+  gap: var(--sp-2);
+  justify-content: space-between;
+  align-items: baseline;
+}
+.notif-when { font-size: 0.75rem; }
+.notif-body { font-size: 0.85rem; margin-top: 2px; }
+.notif-empty {
+  padding: var(--sp-4);
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 768px) {
+  .notif-panel { right: -180px; width: min(320px, calc(100vw - 24px)); }
 }
 
 /* P2-5 — colour-blind status glyphs on analysis-run badges. The

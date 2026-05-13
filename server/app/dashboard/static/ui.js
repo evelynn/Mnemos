@@ -371,6 +371,184 @@
     });
   }
 
+  // ─── Icons (PR-41) ────────────────────────────────────────────────
+  //
+  // A small inline-SVG icon set drawn from the Heroicons (MIT) shape
+  // catalogue. Each entry is the inner ``<path>`` markup — the SVG
+  // wrapper is added by ``icon()`` so callers can size + colour
+  // them with CSS (``currentColor`` flows naturally).
+  //
+  // Usage:
+  //     element.innerHTML = MnemosUI.icon("bell");
+  //     element.innerHTML = MnemosUI.icon("check", { size: 20 });
+  //
+  // The set is intentionally tiny — only the icons the dashboard
+  // actually uses today. Adding a new one is one entry in
+  // ``_ICONS`` and one ``MnemosUI.icon("name")`` call.
+
+  var _ICONS = {
+    bell: '<path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0"/>',
+    check: '<path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/>',
+    x: '<path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>',
+    warn: '<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"/>',
+    info: '<path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z"/>',
+    search: '<path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/>',
+    plus: '<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/>',
+    cog: '<path stroke-linecap="round" stroke-linejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 011.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.894.149c-.424.07-.764.383-.929.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 01-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.398.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 01-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.506-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.108-1.204l-.526-.738a1.125 1.125 0 01.12-1.45l.773-.773a1.125 1.125 0 011.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>',
+  };
+
+  function icon(name, opts) {
+    var size = (opts && opts.size) || 18;
+    var path = _ICONS[name];
+    if (!path) return "";
+    var classAttr = (opts && opts.cls) ? ' class="' + opts.cls + '"' : "";
+    return (
+      '<svg xmlns="http://www.w3.org/2000/svg" width="' + size + '" height="' + size +
+      '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"' +
+      classAttr + ' aria-hidden="true">' + path + "</svg>"
+    );
+  }
+
+  // ─── Notification centre (PR-41) ──────────────────────────────────
+  //
+  // A minimal in-browser inbox so multi-operator teams have a single
+  // surface where "analysis completed", "diff approved", "your
+  // permissions changed" land — instead of toast soup that flashes
+  // and disappears.
+  //
+  // MVP storage model: per-origin localStorage. Server-pushed
+  // notifications (the eventual SSE / WebSocket fan-out) are a
+  // Phase-3 follow-up; for now the platform's own front-end calls
+  // ``MnemosUI.notify(...)`` whenever it sees something the operator
+  // would want to see in the inbox.
+  //
+  // A notification is: { id, title, body, level, at, read }.
+  //   level ∈ {info, success, warn, error}
+  //   at    = epoch ms
+  //
+  // The unread count drives the bell badge; clicking a notification
+  // marks it read. The "Clear all" action wipes the list.
+  // Cross-tab sync uses the same BroadcastChannel pattern as the
+  // SSE strip so a notification fired from /analysis is visible on
+  // /findings without a reload.
+
+  var _NOTIF_KEY = "mnemos_notifications";
+  var _NOTIF_MAX = 50;  // cap to keep localStorage from growing
+  var _notifChannel = null;
+
+  function _notifBC() {
+    if (_notifChannel) return _notifChannel;
+    if (typeof BroadcastChannel === "undefined") return null;
+    try {
+      _notifChannel = new BroadcastChannel("mnemos-notifs");
+    } catch (_) { _notifChannel = null; }
+    return _notifChannel;
+  }
+
+  function readNotifications() {
+    try {
+      var raw = localStorage.getItem(_NOTIF_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch (_) { return []; }
+  }
+
+  function _writeNotifications(list) {
+    try {
+      var trimmed = list.slice(0, _NOTIF_MAX);
+      localStorage.setItem(_NOTIF_KEY, JSON.stringify(trimmed));
+      _renderBell();
+      var ch = _notifBC();
+      if (ch) try { ch.postMessage({ type: "updated" }); } catch (_) {}
+    } catch (_) {}
+  }
+
+  function notify(title, opts) {
+    opts = opts || {};
+    var entry = {
+      id: (Date.now().toString(36) + Math.random().toString(36).slice(2, 8)),
+      title: String(title || ""),
+      body: String(opts.body || ""),
+      level: opts.level || "info",
+      at: Date.now(),
+      read: false,
+    };
+    var list = readNotifications();
+    list.unshift(entry);
+    _writeNotifications(list);
+    // Also fire a toast so the new notification is visible right
+    // away — the bell badge is a *secondary* surface.
+    if (opts.silent !== true) {
+      showToast(entry.title, entry.level === "info" ? null : entry.level);
+    }
+  }
+
+  function clearNotifications() { _writeNotifications([]); }
+
+  function _renderBell() {
+    var bell = document.getElementById("notif-bell");
+    var badge = document.getElementById("notif-badge");
+    var list = document.getElementById("notif-list");
+    if (!bell || !badge || !list) return;
+    var notifs = readNotifications();
+    var unread = notifs.filter(function (n) { return !n.read; }).length;
+    badge.hidden = unread === 0;
+    badge.textContent = unread > 9 ? "9+" : String(unread);
+    if (!notifs.length) {
+      list.innerHTML = '<li class="notif-empty">' +
+        (typeof t === "function" ? t("No notifications yet.") : "No notifications yet.") +
+        '</li>';
+      return;
+    }
+    list.innerHTML = notifs.slice(0, 20).map(function (n) {
+      var when = typeof relativeTime === "function"
+        ? relativeTime(new Date(n.at).toISOString())
+        : new Date(n.at).toLocaleString();
+      return '<li class="notif-item ' + (n.read ? "read" : "unread") + " " + n.level + '" data-id="' + n.id + '">' +
+        '<div class="notif-row">' +
+          '<strong>' + escapeHtml(n.title) + '</strong>' +
+          '<span class="muted notif-when">' + escapeHtml(when) + '</span>' +
+        '</div>' +
+        (n.body ? '<div class="notif-body muted">' + escapeHtml(n.body) + '</div>' : "") +
+      '</li>';
+    }).join("");
+    // Mark-as-read on click.
+    list.querySelectorAll(".notif-item").forEach(function (li) {
+      li.addEventListener("click", function () {
+        var id = li.getAttribute("data-id");
+        var updated = readNotifications().map(function (n) {
+          return n.id === id ? Object.assign({}, n, { read: true }) : n;
+        });
+        _writeNotifications(updated);
+      });
+    });
+  }
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("DOMContentLoaded", function () {
+      _renderBell();
+      // Cross-tab refresh: a notification posted by /analysis should
+      // light the bell on /findings without a reload.
+      var ch = _notifBC();
+      if (ch) ch.onmessage = function () { _renderBell(); };
+      // Bell click toggles the dropdown.
+      var bell = document.getElementById("notif-bell");
+      var panel = document.getElementById("notif-panel");
+      if (bell && panel) {
+        bell.addEventListener("click", function (ev) {
+          ev.stopPropagation();
+          panel.classList.toggle("open");
+        });
+        // Click outside closes.
+        document.addEventListener("click", function () {
+          panel.classList.remove("open");
+        });
+        panel.addEventListener("click", function (ev) { ev.stopPropagation(); });
+        var clearBtn = document.getElementById("notif-clear");
+        if (clearBtn) clearBtn.addEventListener("click", clearNotifications);
+      }
+    });
+  }
+
   // ─── SSE cross-tab status (P2-8) ─────────────────────────────────────
   // When the Analysis tab's EventSource goes live or drops out, the
   // operator on a different tab has no way to know. PR-17 added the
@@ -556,6 +734,12 @@
     "Role updated.": "역할이 업데이트되었습니다.",
     "User disabled.": "유저가 비활성화되었습니다.",
     "User re-enabled.": "유저가 다시 활성화되었습니다.",
+    // PR-41 — notification centre + responsive.
+    "Notifications": "알림",
+    "Clear all": "모두 지우기",
+    "No notifications yet.": "알림이 없습니다.",
+    "Analysis run failed": "분석 실행 실패",
+    "Toggle navigation": "메뉴 열기/닫기",
     "Recent runs (7d)": "최근 실행 (7일)",
     "Open findings": "미해결 결과",
     "Readiness": "준비 상태",
@@ -699,6 +883,10 @@
     t: t,
     setLocale: setLocale,
     applyI18n: applyI18n,
+    icon: icon,
+    notify: notify,
+    readNotifications: readNotifications,
+    clearNotifications: clearNotifications,
   };
   // Convenience global — many existing templates already call
   // ``escapeHtml(x)`` without a namespace prefix.

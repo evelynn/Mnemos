@@ -238,12 +238,18 @@ async function openStream(id) {
         await refreshStages(id);
       }
       if (ev.event === "run_failed") {
-        MnemosUI.showToast(
-          `Analysis run failed: ${ev.error || "(no detail)"}`,
-          "error",
+        // PR-41 — also drop a notification so an operator who walked
+        // away from the analysis tab sees the failure on whatever
+        // page they come back to.
+        MnemosUI.notify(
+          MnemosUI.t("Analysis run failed"),
+          { body: ev.error || "(no detail)", level: "error" },
         );
       } else if (ev.event === "run_completed") {
-        MnemosUI.showToast("Analysis run completed.", "success");
+        MnemosUI.notify(
+          MnemosUI.t("Analysis run completed."),
+          { level: "success" },
+        );
       }
     } catch {}
   });
