@@ -84,7 +84,7 @@ def test_canvas_draws_edges_then_nodes():
     """Edges first so node discs draw on top — same z-order as SVG."""
     body = _read(_TPL / "graph.html")
     idx = body.find("function renderGraphCanvas(")
-    slab = body[idx:idx + 2400]
+    slab = body[idx:idx + 3600]
     edge_at = slab.find("for (const e of _gState.edges)")
     node_at = slab.find("for (const n of _gState.nodes)")
     assert edge_at != -1 and node_at != -1
@@ -96,7 +96,7 @@ def test_canvas_reads_theme_colours():
     """Colours come from CSS custom properties so dark mode renders."""
     body = _read(_TPL / "graph.html")
     idx = body.find("function renderGraphCanvas(")
-    slab = body[idx:idx + 2400]
+    slab = body[idx:idx + 3600]
     assert "getComputedStyle(document.documentElement)" in slab
     assert "--accent" in slab
 

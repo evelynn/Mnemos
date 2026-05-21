@@ -71,8 +71,9 @@
       <g id="g-edges"></g>
       <g id="g-nodes"></g>
     </svg>
-    <canvas id="gcanvas-2d" hidden role="img" aria-label="Knowledge graph visualisation (canvas)"></canvas>
+    <canvas id="gcanvas-2d" hidden tabindex="0" role="img" aria-label="Knowledge graph visualisation (canvas)"></canvas>
     <div id="g-tooltip" class="graph-tip" hidden></div>
+    <div id="g-a11y" class="sr-only" role="status" aria-live="polite"></div>
     <p class="muted" id="g-canvas-note" hidden data-i18n="Large graph — rendered on canvas for performance. Hover a node for details.">
       Large graph — rendered on canvas for performance. Hover a node for details.
     </p>
@@ -220,8 +221,27 @@ async function loadGraph(ev) {
   document.getElementById("g-exercised-pct").textContent = exercisedPct + "%";
   document.getElementById("gstats").hidden = false;
 
+  _updateGraphA11y();
   resetGraphLayout();
   return false;
+}
+
+// Text alternative for the canvas/SVG visual — screen readers get a
+// node/edge count and the component names via the aria-live region.
+function _updateGraphA11y() {
+  const el = document.getElementById("g-a11y");
+  if (!el) return;
+  const comps = _gState.nodes
+    .filter(n => n.kind === "Component")
+    .slice(0, 15)
+    .map(n => n.label || n.id);
+  let txt = MnemosUI.t("Knowledge graph") + ": "
+    + _gState.nodes.length + " " + MnemosUI.t("Nodes") + ", "
+    + _gState.edges.length + " " + MnemosUI.t("Edges") + ".";
+  if (comps.length) {
+    txt += " " + MnemosUI.t("Components") + ": " + comps.join(", ") + ".";
+  }
+  el.textContent = txt;
 }
 
 function resetGraphLayout() {
@@ -363,26 +383,45 @@ function renderGraphCanvas() {
   const cSuccessBg = col("--success-bg", "#d6f0e0");
 
   const byId = new Map(_gState.nodes.map(n => [n.id, n]));
+  const nodeR = n => (n.kind === "Component" ? 7 : 4);
 
   // Edges first so node discs draw on top.
   for (const e of _gState.edges) {
     const a = byId.get(e.source), b = byId.get(e.target);
     if (!a || !b) continue;
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y);
-    ctx.lineTo(b.x, b.y);
     ctx.strokeStyle = e.exercised ? cAccent : cMuted;
+    ctx.fillStyle = e.exercised ? cAccent : cMuted;
     ctx.globalAlpha = e.exercised ? 0.85 : 0.4;
     ctx.lineWidth = e.exercised ? 1.6 : 1.0;
     ctx.setLineDash(e.certainty === "inferred" ? [4, 3] : []);
+    // Stop the line at the target disc's edge so the arrowhead sits
+    // cleanly against the node instead of under it.
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const ux = dx / dist, uy = dy / dist;
+    const tipX = b.x - ux * (nodeR(b) + 1);
+    const tipY = b.y - uy * (nodeR(b) + 1);
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(tipX, tipY);
     ctx.stroke();
+    // Arrowhead — a small filled triangle pointing at the target,
+    // so an operator can read edge direction (CALLS / READS go one way).
+    ctx.setLineDash([]);
+    const ah = 5;
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(tipX - ux * ah - uy * ah * 0.5, tipY - uy * ah + ux * ah * 0.5);
+    ctx.lineTo(tipX - ux * ah + uy * ah * 0.5, tipY - uy * ah - ux * ah * 0.5);
+    ctx.closePath();
+    ctx.fill();
   }
   ctx.setLineDash([]);
   ctx.globalAlpha = 1;
 
   // Nodes — discs sized by kind, ringed by certainty.
   for (const n of _gState.nodes) {
-    const r = n.kind === "Component" ? 7 : 4;
+    const r = nodeR(n);
     ctx.beginPath();
     ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
     ctx.fillStyle = n.exercised ? cSuccessBg : cSurface;
@@ -391,6 +430,19 @@ function renderGraphCanvas() {
     ctx.strokeStyle = n.certainty === "verified" ? cSuccess
       : n.certainty === "inferred" ? cWarn : cAccent;
     ctx.stroke();
+  }
+
+  // Labels — Components always (the map an operator reads); other
+  // kinds only on a sparse graph, otherwise the text turns to mush.
+  const labelAll = _gState.nodes.length <= 350;
+  ctx.fillStyle = col("--text", "#222");
+  ctx.font = "10px var(--font-mono, monospace)";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  for (const n of _gState.nodes) {
+    if (n.kind !== "Component" && !labelAll) continue;
+    const label = (n.label || n.id).slice(0, 18);
+    ctx.fillText(label, n.x, n.y + nodeR(n) + 2);
   }
 }
 

@@ -1096,3 +1096,19 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
   border-radius: var(--radius-sm);
   min-width: 2px;
 }
+
+/* ──────────────────────────────────────────────────────────────────
+ * Screen-reader-only utility (PR-65). Visually hidden but read by
+ * assistive tech — used for the knowledge-graph text alternative.
+ * ────────────────────────────────────────────────────────────────── */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
