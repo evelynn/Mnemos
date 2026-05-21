@@ -119,10 +119,12 @@ def test_graph_uses_force_directed_layout():
 
 def test_graph_layout_caps_iterations_for_responsiveness():
     """A naïve force loop on 1000 nodes is 1M operations per
-    iteration. The 120-iteration cap keeps the worst case under
-    a second on a modern laptop."""
+    iteration. The iteration cap keeps the worst case under a
+    second on a modern laptop. PR-59 trims it further past 400
+    nodes — the ceiling stays at 120 for the common case."""
     body = _read(_TPL / "graph.html")
-    assert "ITER = 120" in body
+    assert "ITER = " in body
+    assert "120" in body
 
 
 def test_graph_node_classes_reflect_certainty():

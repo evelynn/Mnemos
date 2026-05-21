@@ -71,7 +71,11 @@
       <g id="g-edges"></g>
       <g id="g-nodes"></g>
     </svg>
+    <canvas id="gcanvas-2d" hidden role="img" aria-label="Knowledge graph visualisation (canvas)"></canvas>
     <div id="g-tooltip" class="graph-tip" hidden></div>
+    <p class="muted" id="g-canvas-note" hidden data-i18n="Large graph — rendered on canvas for performance. Hover a node for details.">
+      Large graph — rendered on canvas for performance. Hover a node for details.
+    </p>
     <p class="muted" id="g-truncated" hidden data-i18n="Graph truncated — increase Max nodes or filter by kind to see more.">
       Graph truncated — increase Max nodes or filter by kind to see more.
     </p>
@@ -100,6 +104,7 @@
   overflow: hidden;
 }
 #gcanvas { display: block; width: 100%; height: 600px; }
+#gcanvas-2d { display: block; width: 100%; height: 600px; cursor: crosshair; }
 #gcanvas .node-circle {
   fill: var(--surface-alt);
   stroke: var(--text-muted);
@@ -148,9 +153,14 @@
 
 <script>
 // PR-49 — vanilla-JS force-directed graph (no D3, no Cytoscape).
-// Keeps the bundle thin and the layout works for the ~200-node
-// component map most operators look at. For 1000+ nodes the
-// audit recommends a Phase-3 swap to Canvas/WebGL.
+// PR-59 — renderGraph() now picks the backend by node count: SVG
+// (crisp, hoverable <g> elements) for the ~200-node component map
+// most operators look at, Canvas 2D for the 1000-node case where
+// thousands of DOM nodes would stall layout/paint.
+
+// Above this node count the SVG backend produces too many DOM
+// elements; switch to the Canvas 2D backend instead.
+const CANVAS_THRESHOLD = 200;
 
 let _gState = { nodes: [], edges: [], adj: new Map() };
 
@@ -234,7 +244,9 @@ function resetGraphLayout() {
 
   // Build id → node map for edge lookup.
   const byId = new Map(nodes.map(n => [n.id, n]));
-  const ITER = 120;
+  // The refinement is O(n²) per step; trim the step count for big
+  // graphs so a 1000-node layout still settles in well under a second.
+  const ITER = nodes.length > 400 ? 60 : 120;
   for (let step = 0; step < ITER; step++) {
     // Repulsion (n-body) — O(n^2). Acceptable for n ≤ 1000.
     for (let i = 0; i < nodes.length; i++) {
@@ -277,6 +289,20 @@ function resetGraphLayout() {
 }
 
 function renderGraph() {
+  // Pick the backend by size. The SVG and Canvas elements are
+  // toggled so only one is visible / hit-tested at a time.
+  const useCanvas = _gState.nodes.length > CANVAS_THRESHOLD;
+  document.getElementById("gcanvas").hidden = useCanvas;
+  document.getElementById("gcanvas-2d").hidden = !useCanvas;
+  document.getElementById("g-canvas-note").hidden = !useCanvas;
+  if (useCanvas) {
+    renderGraphCanvas();
+  } else {
+    renderGraphSvg();
+  }
+}
+
+function renderGraphSvg() {
   const nodesEl = document.getElementById("g-nodes");
   const edgesEl = document.getElementById("g-edges");
   const byId = new Map(_gState.nodes.map(n => [n.id, n]));
@@ -311,6 +337,85 @@ function renderGraph() {
     </g>`;
   }).join("");
 }
+
+// Canvas 2D backend — used for large graphs. Draws into the fixed
+// 800×600 layout space; CSS stretches the canvas to the container,
+// and the hit-test maps pointer coords back through that scale.
+function renderGraphCanvas() {
+  const canvas = document.getElementById("gcanvas-2d");
+  const W = 800, H = 600;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  // Pull colours from the active theme so dark mode renders too.
+  const css = getComputedStyle(document.documentElement);
+  const col = (name, fallback) =>
+    (css.getPropertyValue(name).trim() || fallback);
+  const cMuted = col("--text-muted", "#888");
+  const cAccent = col("--accent", "#4a90d9");
+  const cSuccess = col("--success", "#2e8b57");
+  const cWarn = col("--warn", "#c08000");
+  const cSurface = col("--surface-alt", "#eee");
+  const cSuccessBg = col("--success-bg", "#d6f0e0");
+
+  const byId = new Map(_gState.nodes.map(n => [n.id, n]));
+
+  // Edges first so node discs draw on top.
+  for (const e of _gState.edges) {
+    const a = byId.get(e.source), b = byId.get(e.target);
+    if (!a || !b) continue;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.strokeStyle = e.exercised ? cAccent : cMuted;
+    ctx.globalAlpha = e.exercised ? 0.85 : 0.4;
+    ctx.lineWidth = e.exercised ? 1.6 : 1.0;
+    ctx.setLineDash(e.certainty === "inferred" ? [4, 3] : []);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+
+  // Nodes — discs sized by kind, ringed by certainty.
+  for (const n of _gState.nodes) {
+    const r = n.kind === "Component" ? 7 : 4;
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = n.exercised ? cSuccessBg : cSurface;
+    ctx.fill();
+    ctx.lineWidth = 1.4;
+    ctx.strokeStyle = n.certainty === "verified" ? cSuccess
+      : n.certainty === "inferred" ? cWarn : cAccent;
+    ctx.stroke();
+  }
+}
+
+// Pointer hit-test for the Canvas backend — finds the nearest node
+// within a small radius and reuses the shared tooltip.
+function _canvasHover(ev) {
+  if (document.getElementById("gcanvas-2d").hidden) return;
+  const canvas = document.getElementById("gcanvas-2d");
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const mx = (ev.clientX - rect.left) * (800 / rect.width);
+  const my = (ev.clientY - rect.top) * (600 / rect.height);
+  let best = null, bestD = 12 * 12;
+  for (const n of _gState.nodes) {
+    const dx = n.x - mx, dy = n.y - my;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; best = n; }
+  }
+  if (best) _showGraphTip(ev, best.id);
+  else _hideGraphTip();
+}
+document.getElementById("gcanvas-2d")
+  .addEventListener("mousemove", _canvasHover);
+document.getElementById("gcanvas-2d")
+  .addEventListener("mouseleave", _hideGraphTip);
 
 function _showGraphTip(ev, nodeId) {
   const n = _gState.nodes.find(x => x.id === nodeId);

@@ -1366,6 +1366,9 @@
       "그래프가 잘렸습니다 — 최대 노드 수를 늘리거나 종류로 필터하세요.",
     "Enter a project ID above and click Render to see its knowledge graph.":
       "위에 프로젝트 ID 를 입력하고 Render 를 클릭하면 지식 그래프가 보입니다.",
+    // PR-59 — canvas backend for large graphs.
+    "Large graph — rendered on canvas for performance. Hover a node for details.":
+      "대규모 그래프 — 성능을 위해 캔버스로 렌더링했습니다. 노드에 마우스를 올리면 상세 정보가 보입니다.",
     // PR-50 — finding risk scoring + remediation.
     "Priority": "우선순위",
     "Risk": "위험도",
