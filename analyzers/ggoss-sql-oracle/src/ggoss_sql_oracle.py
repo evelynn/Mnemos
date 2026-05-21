@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,57 @@ from typing import Any
 
 SOURCE_NAME = "ggoss-sql-oracle"
 SOURCE_VERSION = "1.0.0"
+
+# A plain Oracle identifier — letters, digits, _ $ #, not starting with a
+# digit. A table name matching this cannot smuggle SQL into a FROM clause.
+_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$#]*$")
+
+
+def _max_rows() -> int:
+    """Hard row cap for the ``query`` verb (analyzer-contract §1.0)."""
+    try:
+        return max(1, int(os.environ.get("MNEMOS_MAX_ROWS", "10000")))
+    except ValueError:
+        return 10000
+
+
+def _parse_conn(conn_string: str) -> tuple[str, str, str]:
+    """Split an Oracle ``user/password@dsn`` string.
+
+    The username is taken up to the *first* ``/`` and the dsn from the
+    *last* ``@`` so a password containing ``/`` or ``@`` — common in
+    generated credentials — doesn't corrupt the split.
+    """
+    user, _, rest = conn_string.partition("/")
+    password, _, dsn = rest.rpartition("@")
+    return user, password, dsn
+
+
+def _validate_table(table: str) -> str:
+    """Return ``table`` unchanged iff it is a plain (optionally
+    schema-qualified) Oracle identifier; raise otherwise.
+
+    The ``sample`` verb interpolates the table name into a ``FROM``
+    clause — bind parameters cannot carry an identifier — so the only
+    safe defence is to reject anything that isn't an identifier.
+    """
+    parts = table.split(".")
+    if len(parts) not in (1, 2) or not all(_IDENT.match(p) for p in parts):
+        raise ValueError(f"invalid_table_name: {table!r}")
+    return table
+
+
+def _is_safe_select(sql: str) -> bool:
+    """True iff ``sql`` is a single read-only statement.
+
+    Rejects multi-statement payloads (a trailing ``;`` is tolerated and
+    stripped) and anything that isn't a ``SELECT`` / CTE ``WITH``.
+    """
+    stripped = sql.strip().rstrip(";").strip()
+    if ";" in stripped:
+        return False
+    head = stripped.lower()
+    return head.startswith("select") or head.startswith("with")
 
 
 def envelope(record_type: str, data: dict[str, Any]) -> None:
@@ -135,8 +187,7 @@ def cmd_db_probe(conn_string: str | None) -> int:
         sys.stdout.write("\n")
         return 0
 
-    user, _, rest = conn_string.partition("/")
-    password, _, dsn = rest.partition("@")
+    user, password, dsn = _parse_conn(conn_string)
     facts: list[dict[str, Any]] = []
     grants: dict[str, list[str]] = {}
     write_privs = {"INSERT", "UPDATE", "DELETE", "MERGE",
@@ -255,8 +306,7 @@ def cmd_live_schema(conn_string: str | None) -> int:
     oracledb = _require_oracledb()
     if oracledb is None:
         return 1
-    user, _, rest = conn_string.partition("/")
-    password, _, dsn = rest.partition("@")
+    user, password, dsn = _parse_conn(conn_string)
     with oracledb.connect(user=user, password=password, dsn=dsn) as conn:
         component_id = f"db.oracle.{dsn or 'default'}"
         envelope(
@@ -316,11 +366,18 @@ def cmd_sample(conn_string: str | None, table: str | None, limit: int) -> int:
     if oracledb is None:
         return 1
     limit = max(1, min(limit, 100))
-    user, _, rest = conn_string.partition("/")
-    password, _, dsn = rest.partition("@")
+    try:
+        safe_table = _validate_table(table)
+    except ValueError as exc:
+        error(str(exc), recoverable=False)
+        return 2
+    user, password, dsn = _parse_conn(conn_string)
     with oracledb.connect(user=user, password=password, dsn=dsn) as conn:
         cur = conn.cursor()
-        cur.execute(f"SELECT * FROM {table} FETCH FIRST {limit} ROWS ONLY")
+        # safe_table is a validated plain identifier; limit is an int.
+        cur.execute(
+            f"SELECT * FROM {safe_table} FETCH FIRST {limit} ROWS ONLY"
+        )
         cols = [{"name": d[0], "type": d[1].name} for d in cur.description]
         rows = []
         for row in cur:
@@ -334,20 +391,38 @@ def cmd_query(conn_string: str | None, sql_file: str | None) -> int:
         error("query_requires_conn_and_sql_file", recoverable=False)
         return 2
     sql = Path(sql_file).read_text()
-    if not sql.lstrip().lower().startswith("select"):
-        error("only_select_allowed", recoverable=False)
+    if not _is_safe_select(sql):
+        error("only_single_select_allowed", recoverable=False)
         return 2
     oracledb = _require_oracledb()
     if oracledb is None:
         return 1
-    user, _, rest = conn_string.partition("/")
-    password, _, dsn = rest.partition("@")
+    max_rows = _max_rows()
+    user, password, dsn = _parse_conn(conn_string)
     with oracledb.connect(user=user, password=password, dsn=dsn) as conn:
         cur = conn.cursor()
+        cur.arraysize = min(max_rows, 1000)
         cur.execute(sql)
         cols = [{"name": d[0], "type": d[1].name} for d in cur.description]
-        rows = [[None if v is None else str(v) for v in row] for row in cur]
-    envelope("query_result", {"columns": cols, "rows": rows})
+        # Hard row cap (analyzer-contract §1.0) — fetchmany in batches
+        # and stop at max_rows so a huge result can't OOM the worker.
+        rows: list[list[Any]] = []
+        truncated = False
+        while True:
+            batch = cur.fetchmany(cur.arraysize)
+            if not batch:
+                break
+            for row in batch:
+                rows.append([None if v is None else str(v) for v in row])
+                if len(rows) >= max_rows:
+                    truncated = True
+                    break
+            if truncated:
+                break
+    envelope(
+        "query_result",
+        {"columns": cols, "rows": rows, "rows_truncated": truncated},
+    )
     return 0
 
 
@@ -389,7 +464,8 @@ def main() -> int:
     query.add_argument("--conn")
     query.add_argument("--sql-file", required=True)
 
-    sub.add_parser("db_probe")
+    probe_db = sub.add_parser("db_probe")
+    probe_db.add_argument("--conn", help="user/password@dsn")
 
     args = parser.parse_args()
     # Platform passes MNEMOS_DB_CONN (canonical); honour the older
@@ -411,7 +487,7 @@ def main() -> int:
         if args.verb == "query":
             return cmd_query(args.conn or conn_env, args.sql_file)
         if args.verb == "db_probe":
-            return cmd_db_probe(conn_env)
+            return cmd_db_probe(args.conn or conn_env)
         if args.verb == "schema":
             return cmd_schema()
         parser.print_help()
