@@ -1228,6 +1228,25 @@
     "Exported.": "내보냈습니다.",
     "Nothing to export.": "내보낼 항목이 없습니다.",
     "Enter a project ID first.": "프로젝트 ID 를 먼저 입력하세요.",
+    // PR-49 — knowledge graph visualisation.
+    "Graph": "그래프",
+    "Knowledge graph": "지식 그래프",
+    "Component-level visualisation of the analysed system. Nodes are services / modules; edges are CALLS / EXPOSES / READS / WRITES relationships. Exercised edges (validated by OTLP traces) are drawn solid; static-only edges are dashed.":
+      "분석된 시스템의 컴포넌트 수준 시각화. 노드는 서비스/모듈, 엣지는 CALLS/EXPOSES/READS/WRITES 관계입니다. OTLP 트레이스로 확인된 실행된 엣지는 실선으로, 정적 분석만 된 엣지는 점선으로 표시됩니다.",
+    "Node kind": "노드 종류",
+    "Max nodes": "최대 노드 수",
+    "Render": "렌더",
+    "Re-layout": "재배치",
+    "Nodes": "노드",
+    "Edges": "엣지",
+    "Verified %": "검증됨 %",
+    "Exercised %": "실행됨 %",
+    "vs asserted / inferred": "vs 단언/추론",
+    "confirmed by OTLP traces": "OTLP 트레이스로 확인됨",
+    "Graph truncated — increase Max nodes or filter by kind to see more.":
+      "그래프가 잘렸습니다 — 최대 노드 수를 늘리거나 종류로 필터하세요.",
+    "Enter a project ID above and click Render to see its knowledge graph.":
+      "위에 프로젝트 ID 를 입력하고 Render 를 클릭하면 지식 그래프가 보입니다.",
     // PR-41 — notification centre + responsive.
     "Notifications": "알림",
     "Clear all": "모두 지우기",

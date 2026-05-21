@@ -139,6 +139,7 @@ async def tab_page(
         "projects",
         "analysis",
         "data",
+        "graph",
         "plans",
         "diffs",
         "findings",

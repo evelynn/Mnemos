@@ -1,0 +1,346 @@
+{% extends "_layout.html" %}
+{% block title %}Graph — Mnemos{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1 data-i18n="Knowledge graph">Knowledge graph</h1>
+</header>
+
+<section>
+  <p class="muted" data-i18n="Component-level visualisation of the analysed system. Nodes are services / modules; edges are CALLS / EXPOSES / READS / WRITES relationships. Exercised edges (validated by OTLP traces) are drawn solid; static-only edges are dashed.">
+    Component-level visualisation of the analysed system. Nodes
+    are services / modules; edges are CALLS / EXPOSES / READS /
+    WRITES relationships. Exercised edges (validated by OTLP
+    traces) are drawn solid; static-only edges are dashed.
+  </p>
+
+  <form onsubmit="return loadGraph(event)" class="graph-form">
+    <label><span data-i18n="Project ID">Project ID</span>
+      <input id="gpid" type="text" required placeholder="uuid" />
+    </label>
+    <label><span data-i18n="Node kind">Node kind</span>
+      <select id="gkind">
+        <option value="Component" selected>Component</option>
+        <option value="Symbol">Symbol</option>
+        <option value="Contract">Contract</option>
+        <option value="DataEntity">DataEntity</option>
+        <option value="">(all)</option>
+      </select>
+    </label>
+    <label><span data-i18n="Max nodes">Max nodes</span>
+      <input id="glimit" type="number" min="10" max="1000" value="200" />
+    </label>
+    <button class="primary" type="submit" data-i18n="Render">Render</button>
+    <button type="button" onclick="resetGraphLayout()" data-i18n="Re-layout">Re-layout</button>
+  </form>
+</section>
+
+<section class="graph-stats" id="gstats" hidden>
+  <div class="stat-card">
+    <h3 data-i18n="Nodes">Nodes</h3>
+    <div class="big" id="g-node-count">—</div>
+  </div>
+  <div class="stat-card">
+    <h3 data-i18n="Edges">Edges</h3>
+    <div class="big" id="g-edge-count">—</div>
+  </div>
+  <div class="stat-card">
+    <h3 data-i18n="Verified %">Verified %</h3>
+    <div class="big" id="g-verified-pct">—</div>
+    <span class="muted" data-i18n="vs asserted / inferred">vs asserted / inferred</span>
+  </div>
+  <div class="stat-card">
+    <h3 data-i18n="Exercised %">Exercised %</h3>
+    <div class="big" id="g-exercised-pct">—</div>
+    <span class="muted" data-i18n="confirmed by OTLP traces">confirmed by OTLP traces</span>
+  </div>
+</section>
+
+<section>
+  <div class="graph-canvas-wrap" id="gcanvas-wrap" hidden>
+    <svg id="gcanvas" viewBox="0 0 800 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Knowledge graph visualisation">
+      <defs>
+        <marker id="arrow" viewBox="0 -5 10 10" refX="14" refY="0"
+                markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,-5L10,0L0,5" />
+        </marker>
+        <marker id="arrow-dashed" viewBox="0 -5 10 10" refX="14" refY="0"
+                markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M0,-5L10,0L0,5" />
+        </marker>
+      </defs>
+      <g id="g-edges"></g>
+      <g id="g-nodes"></g>
+    </svg>
+    <div id="g-tooltip" class="graph-tip" hidden></div>
+    <p class="muted" id="g-truncated" hidden data-i18n="Graph truncated — increase Max nodes or filter by kind to see more.">
+      Graph truncated — increase Max nodes or filter by kind to see more.
+    </p>
+  </div>
+  <div id="gempty" class="muted" data-i18n="Enter a project ID above and click Render to see its knowledge graph.">
+    Enter a project ID above and click Render to see its knowledge graph.
+  </div>
+</section>
+
+<style>
+.graph-form { display: flex; gap: var(--sp-3); flex-wrap: wrap; align-items: end; }
+.graph-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--sp-3);
+  margin: var(--sp-3) 0;
+}
+.graph-stats .stat-card { padding: var(--sp-3); }
+.graph-stats h3 { margin: 0 0 var(--sp-1); font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase; }
+.graph-stats .big { font-size: 1.4rem; font-weight: 600; }
+.graph-canvas-wrap {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+#gcanvas { display: block; width: 100%; height: 600px; }
+#gcanvas .node-circle {
+  fill: var(--surface-alt);
+  stroke: var(--text-muted);
+  stroke-width: 1.5;
+  cursor: pointer;
+  transition: fill 0.15s, stroke-width 0.15s;
+}
+#gcanvas .node-circle.verified { stroke: var(--success); }
+#gcanvas .node-circle.asserted { stroke: var(--accent); }
+#gcanvas .node-circle.inferred { stroke: var(--warn); stroke-dasharray: 3 2; }
+#gcanvas .node-circle.exercised { fill: var(--success-bg); }
+#gcanvas .node-circle:hover { stroke-width: 3; }
+#gcanvas .node-label {
+  font: 11px var(--font-mono);
+  fill: var(--text);
+  pointer-events: none;
+}
+#gcanvas .edge {
+  stroke: var(--text-muted);
+  stroke-width: 1.2;
+  fill: none;
+  opacity: 0.5;
+}
+#gcanvas .edge.exercised {
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  opacity: 0.85;
+}
+#gcanvas .edge.inferred {
+  stroke-dasharray: 4 3;
+}
+#gcanvas marker path { fill: var(--text-muted); }
+.graph-tip {
+  position: absolute;
+  background: var(--text);
+  color: var(--text-inverted);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+  pointer-events: none;
+  box-shadow: var(--shadow-toast);
+  max-width: 280px;
+  z-index: 10;
+}
+</style>
+
+<script>
+// PR-49 — vanilla-JS force-directed graph (no D3, no Cytoscape).
+// Keeps the bundle thin and the layout works for the ~200-node
+// component map most operators look at. For 1000+ nodes the
+// audit recommends a Phase-3 swap to Canvas/WebGL.
+
+let _gState = { nodes: [], edges: [], adj: new Map() };
+
+async function loadGraph(ev) {
+  ev && ev.preventDefault();
+  const pid = document.getElementById("gpid").value.trim();
+  if (!pid) return false;
+  const kind = document.getElementById("gkind").value;
+  const limit = document.getElementById("glimit").value || "200";
+  const qs = new URLSearchParams({ limit });
+  if (kind) qs.set("kind", kind);
+  // Loading skeleton.
+  document.getElementById("gempty").hidden = true;
+  document.getElementById("gcanvas-wrap").hidden = false;
+  const wrap = document.getElementById("gcanvas-wrap");
+  wrap.classList.add("skeleton");
+
+  let payload;
+  try {
+    const r = await fetch(`/api/v1/projects/${pid}/graph/component_map?${qs}`);
+    if (!r.ok) {
+      await MnemosUI.showError("Graph load failed", r);
+      return false;
+    }
+    payload = await r.json();
+  } finally {
+    wrap.classList.remove("skeleton");
+  }
+
+  _gState.nodes = payload.nodes || [];
+  _gState.edges = payload.edges || [];
+  _gState.adj = new Map();
+  for (const e of _gState.edges) {
+    if (!_gState.adj.has(e.source)) _gState.adj.set(e.source, []);
+    _gState.adj.get(e.source).push(e.target);
+  }
+  document.getElementById("g-truncated").hidden = !payload.truncated;
+  document.getElementById("g-node-count").textContent = _gState.nodes.length;
+  document.getElementById("g-edge-count").textContent = _gState.edges.length;
+
+  // Certainty / exercised stats.
+  try {
+    const cr = await fetch(`/api/v1/projects/${pid}/graph/certainty_breakdown`);
+    if (cr.ok) {
+      const c = await cr.json();
+      const nVerified = (c.nodes && c.nodes.verified) || 0;
+      const nTotal = Object.values(c.nodes || {}).reduce((a, b) => a + b, 0);
+      const pct = nTotal ? Math.round((100 * nVerified) / nTotal) : 0;
+      document.getElementById("g-verified-pct").textContent = pct + "%";
+    }
+  } catch (_) {}
+  const exercisedEdges = _gState.edges.filter(e => e.exercised).length;
+  const exercisedPct = _gState.edges.length
+    ? Math.round((100 * exercisedEdges) / _gState.edges.length)
+    : 0;
+  document.getElementById("g-exercised-pct").textContent = exercisedPct + "%";
+  document.getElementById("gstats").hidden = false;
+
+  resetGraphLayout();
+  return false;
+}
+
+function resetGraphLayout() {
+  const nodes = _gState.nodes;
+  const edges = _gState.edges;
+  if (!nodes.length) return;
+  // Circle layout as the seed, then iterate a simple force-directed
+  // refinement so connected nodes pull together. Good enough for
+  // ~200 nodes; for more, the operator can filter by kind.
+  const W = 800, H = 600;
+  const cx = W / 2, cy = H / 2;
+  const R = Math.min(W, H) * 0.4;
+  nodes.forEach((n, i) => {
+    const t = (i / nodes.length) * Math.PI * 2;
+    n.x = cx + R * Math.cos(t);
+    n.y = cy + R * Math.sin(t);
+    n.vx = 0;
+    n.vy = 0;
+  });
+
+  // Build id → node map for edge lookup.
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const ITER = 120;
+  for (let step = 0; step < ITER; step++) {
+    // Repulsion (n-body) — O(n^2). Acceptable for n ≤ 1000.
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        const dx = a.x - b.x, dy = a.y - b.y;
+        const dist2 = dx * dx + dy * dy + 0.01;
+        const f = 800 / dist2;
+        a.vx += (dx / Math.sqrt(dist2)) * f;
+        a.vy += (dy / Math.sqrt(dist2)) * f;
+        b.vx -= (dx / Math.sqrt(dist2)) * f;
+        b.vy -= (dy / Math.sqrt(dist2)) * f;
+      }
+    }
+    // Edge spring.
+    for (const e of edges) {
+      const a = byId.get(e.source), b = byId.get(e.target);
+      if (!a || !b) continue;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) + 0.01;
+      const target = 90;
+      const f = 0.04 * (dist - target);
+      a.vx += (dx / dist) * f;
+      a.vy += (dy / dist) * f;
+      b.vx -= (dx / dist) * f;
+      b.vy -= (dy / dist) * f;
+    }
+    // Damped step + boundary.
+    const damp = 0.55;
+    for (const n of nodes) {
+      n.x += n.vx * 0.03;
+      n.y += n.vy * 0.03;
+      n.vx *= damp;
+      n.vy *= damp;
+      n.x = Math.max(20, Math.min(W - 20, n.x));
+      n.y = Math.max(20, Math.min(H - 20, n.y));
+    }
+  }
+  renderGraph();
+}
+
+function renderGraph() {
+  const nodesEl = document.getElementById("g-nodes");
+  const edgesEl = document.getElementById("g-edges");
+  const byId = new Map(_gState.nodes.map(n => [n.id, n]));
+  // Edges first so circles draw on top.
+  edgesEl.innerHTML = _gState.edges.map(e => {
+    const a = byId.get(e.source), b = byId.get(e.target);
+    if (!a || !b) return "";
+    const cls = ["edge",
+      e.exercised ? "exercised" : "",
+      e.certainty === "inferred" ? "inferred" : "",
+    ].filter(Boolean).join(" ");
+    const markerId = e.certainty === "inferred" ? "arrow-dashed" : "arrow";
+    return `<line class="${cls}" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}"
+      marker-end="url(#${markerId})">
+      <title>${escapeHtml(e.source)} →[${escapeHtml(e.kind)}]→ ${escapeHtml(e.target)} (${escapeHtml(e.certainty || "")})${e.exercised ? " ✓ exercised" : ""}</title>
+    </line>`;
+  }).join("");
+  nodesEl.innerHTML = _gState.nodes.map(n => {
+    const r = n.kind === "Component" ? 14 : 9;
+    const cls = ["node-circle",
+      escapeHtml(n.certainty || ""),
+      n.exercised ? "exercised" : "",
+    ].filter(Boolean).join(" ");
+    const labelY = n.y + r + 12;
+    return `<g class="node" data-id="${escapeHtml(n.id)}">
+      <circle class="${cls}" cx="${n.x}" cy="${n.y}" r="${r}"
+              onmouseenter="_showGraphTip(event, '${escapeHtml(n.id)}')"
+              onmouseleave="_hideGraphTip()"></circle>
+      <text class="node-label" x="${n.x}" y="${labelY}" text-anchor="middle">
+        ${escapeHtml((n.label || n.id).slice(0, 18))}
+      </text>
+    </g>`;
+  }).join("");
+}
+
+function _showGraphTip(ev, nodeId) {
+  const n = _gState.nodes.find(x => x.id === nodeId);
+  if (!n) return;
+  const adj = _gState.adj.get(nodeId) || [];
+  const tip = document.getElementById("g-tooltip");
+  tip.hidden = false;
+  tip.innerHTML =
+    `<strong>${escapeHtml(n.label || n.id)}</strong><br>` +
+    `<code class="muted">${escapeHtml(n.id)}</code><br>` +
+    `kind: ${escapeHtml(n.kind)} · certainty: ${escapeHtml(n.certainty || "?")}` +
+    (n.exercised ? ' · <span style="color:var(--success-bg)">✓ exercised</span>' : '') +
+    (adj.length ? `<br>${adj.length} outgoing edge${adj.length === 1 ? '' : 's'}` : '');
+  const wrap = document.getElementById("gcanvas-wrap").getBoundingClientRect();
+  const x = ev.clientX - wrap.left + 12;
+  const y = ev.clientY - wrap.top + 12;
+  tip.style.left = x + "px";
+  tip.style.top = y + "px";
+}
+function _hideGraphTip() {
+  document.getElementById("g-tooltip").hidden = true;
+}
+
+// Honour ?project=… query param so the dashboard's stat-card
+// "Open graph →" link works straight away.
+(function () {
+  const p = new URLSearchParams(window.location.search).get("project");
+  if (p) {
+    document.getElementById("gpid").value = p;
+    loadGraph(null);
+  }
+})();
+</script>
+{% endblock %}

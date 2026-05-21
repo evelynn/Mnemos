@@ -13,7 +13,7 @@ from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
 from app.auth.org_scope import require_project_org
 from app.db import get_session
-from app.models.graph import AnalysisRun, Node
+from app.models.graph import AnalysisRun, Edge, Node
 from app.models.projects import Project
 from app.models.stages import AnalysisStage
 from app.orchestrator.progress import ProgressBus
@@ -261,3 +261,122 @@ async def graph_search(
         stmt = stmt.where(Node.id.ilike(f"%{q}%"))
     rows = (await db.execute(stmt)).scalars().all()
     return [{"id": r.id, "kind": r.kind, "data": r.data, "certainty": r.certainty} for r in rows]
+
+
+@router.get(
+    "/projects/{project_id}/graph/component_map",
+    dependencies=[Depends(require_project_org())],
+)
+async def graph_component_map(
+    project_id: uuid.UUID,
+    _: CurrentUser,
+    kind: str | None = None,
+    limit: int = 200,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Light-weight payload for the dashboard's graph visualizer
+    (PR-49). Returns up to ``limit`` nodes + the edges between them
+    in a shape that fits a force-directed layout straight away:
+
+      {
+        "nodes": [{"id", "kind", "label", "certainty", "exercised"}],
+        "edges": [{"source", "target", "kind", "certainty", "exercised"}],
+      }
+
+    The audit team's biggest "본질 가치" gap was that the platform
+    stored 100K+ nodes but never *showed* the graph to a human.
+    This endpoint is the data plane behind the new ``/graph`` tab.
+
+    ``kind=Component`` is the canonical first view — operators
+    almost always want the high-level component map. ``kind=null``
+    returns the whole truncated graph (useful for small projects
+    or for the "everything" overview).
+    """
+    limit = max(10, min(limit, 1000))
+    node_stmt = select(Node).where(
+        Node.project_id == project_id, Node.valid_to.is_(None)
+    )
+    if kind:
+        node_stmt = node_stmt.where(Node.kind == kind)
+    node_stmt = node_stmt.order_by(Node.id).limit(limit)
+    nodes = (await db.execute(node_stmt)).scalars().all()
+    node_ids = {n.id for n in nodes}
+
+    # Only edges where BOTH endpoints are inside the truncated
+    # node set — otherwise the visualizer would draw arrows into
+    # void.
+    edge_rows = (
+        await db.execute(
+            select(Edge).where(
+                Edge.project_id == project_id,
+                Edge.valid_to.is_(None),
+                Edge.source_id.in_(node_ids),
+                Edge.target_id.in_(node_ids),
+            )
+        )
+    ).scalars().all()
+
+    def _label(n: Node) -> str:
+        data = n.data or {}
+        return str(data.get("name") or data.get("title") or n.id)
+
+    def _exercised(data: dict) -> bool:
+        # PR-25 OTLP Tier 2 marks live edges/nodes with this flag.
+        return str((data or {}).get("exercised", "")).lower() == "true"
+
+    return {
+        "nodes": [
+            {
+                "id": n.id,
+                "kind": n.kind,
+                "label": _label(n),
+                "certainty": n.certainty,
+                "exercised": _exercised(n.data or {}),
+            }
+            for n in nodes
+        ],
+        "edges": [
+            {
+                "source": e.source_id,
+                "target": e.target_id,
+                "kind": e.kind,
+                "certainty": e.certainty,
+                "exercised": _exercised(e.data or {}),
+            }
+            for e in edge_rows
+        ],
+        "truncated": len(nodes) >= limit,
+    }
+
+
+@router.get(
+    "/projects/{project_id}/graph/certainty_breakdown",
+    dependencies=[Depends(require_project_org())],
+)
+async def graph_certainty_breakdown(
+    project_id: uuid.UUID,
+    _: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, dict[str, int]]:
+    """Coverage metric (audit C3 — "how trustworthy is our graph?").
+
+    Returns the count of nodes + edges per certainty value
+    (``verified`` / ``asserted`` / ``inferred``), so the dashboard
+    can show "12% of edges are still inferred — push more
+    analyzers to lift confidence" instead of a single opaque
+    "1 234 nodes" number.
+    """
+    node_rows = await db.execute(
+        select(Node.certainty, func.count(Node.id))
+        .where(Node.project_id == project_id, Node.valid_to.is_(None))
+        .group_by(Node.certainty)
+    )
+    edge_rows = await db.execute(
+        select(Edge.certainty, func.count(Edge.id))
+        .where(Edge.project_id == project_id, Edge.valid_to.is_(None))
+        .group_by(Edge.certainty)
+    )
+    return {
+        "nodes": {c: int(n) for c, n in node_rows.all()},
+        "edges": {c: int(n) for c, n in edge_rows.all()},
+    }
