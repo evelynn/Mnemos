@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
-from app.auth.org_scope import require_project_org
+from app.auth.org_scope import require_project_org, resolve_project_org, same_org
+from app.auth.rbac import require_operator
 from app.db import get_session
 from app.merge.findings import run_all
 from app.models.findings import Finding
@@ -108,7 +109,10 @@ async def list_findings(
     return [_out(f) for f in rows]
 
 
-@router.patch("/api/v1/findings/{finding_id}")
+@router.patch(
+    "/api/v1/findings/{finding_id}",
+    dependencies=[Depends(require_operator)],
+)
 async def patch_finding(
     finding_id: uuid.UUID,
     body: FindingPatch,
@@ -119,6 +123,13 @@ async def patch_finding(
         await db.execute(select(Finding).where(Finding.id == finding_id))
     ).scalar_one_or_none()
     if f is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    # This route keys off finding_id, so require_project_org (which
+    # needs a project_id path param) can't gate it — resolve the
+    # finding's org by hand and 404 on a cross-org id so a tenant
+    # can't mutate, or probe the existence of, another org's finding.
+    org_id = await resolve_project_org(db, f.project_id)
+    if not same_org(user, org_id):
         raise HTTPException(status_code=404, detail="not_found")
     f.status = body.status
     now = datetime.now(tz=timezone.utc)

@@ -184,6 +184,9 @@ async def edit_comment(
     ).scalar_one_or_none()
     if c is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    # 404 before the author check so a cross-org admin can't even
+    # confirm the comment exists.
+    await _check_target_in_user_org(db, c.target_kind, c.target_id, user)
     # Author can edit; admin can edit any.
     if c.author_id != user.id and user.role != "admin":
         raise HTTPException(
@@ -213,6 +216,7 @@ async def delete_comment(
     ).scalar_one_or_none()
     if c is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    await _check_target_in_user_org(db, c.target_kind, c.target_id, user)
     if c.author_id != user.id and user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="not_comment_author"
