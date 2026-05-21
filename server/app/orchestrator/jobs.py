@@ -149,7 +149,10 @@ _VERB_ACCEPT = {
     "symbols": {"symbol", "data_entity"},
     "contracts": {"contract", "edge"},
     "calls": {"edge"},
-    "data_access": {"edge"},
+    # data_access emits the logical DataEntity nodes it discovered in
+    # source (e.g. a table named in raw SQL) alongside the READS /
+    # WRITES edges to them.
+    "data_access": {"edge", "data_entity"},
     "live_schema": {"data_entity"},
 }
 

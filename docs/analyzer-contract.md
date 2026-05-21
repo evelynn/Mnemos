@@ -15,7 +15,7 @@ Every analyzer MUST expose a single command-line entry point named
 | `symbols <path> [--output <file>]` | Stream `record_type=symbol` records. | JSON Lines on stdout (or `--output` file). |
 | `calls <path> [--output <file>]` | Stream `record_type=edge,kind=CALLS` records. | JSON Lines. |
 | `contracts <path> [--output <file>]` | Stream `record_type=contract` and the EXPOSES edges that connect them. | JSON Lines. |
-| `data_access <path> [--output <file>]` | Stream READS/WRITES edges referencing DataEntities. | JSON Lines. |
+| `data_access <path> [--output <file>]` | Stream READS/WRITES edges and the `record_type=data_entity` nodes they reference. Source-only analyzers emit name-keyed logical entities (`data.<table>`); the merge layer reconciles these against the schema-qualified entities the DB analyzers emit. | JSON Lines. |
 | `schema` | Print the JSON Schema for this analyzer's `data` payloads. | One JSON document on stdout. |
 
 DB analyzers (`ggoss-sql-mssql`, `ggoss-sql-oracle`) extend the surface with

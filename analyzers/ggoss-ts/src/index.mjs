@@ -3,7 +3,7 @@
  * Mnemos TypeScript analyzer (Phase 1).
  *
  * Implements the CLI contract in docs/analyzer-contract.md: probe, inventory,
- * symbols, calls (stub), contracts (stub), data_access (stub), schema.
+ * symbols, calls, contracts, data_access, schema.
  *
  * Follows spec §7.2 — uses the official TypeScript Compiler API so both JS and
  * TS files can be analysed with minimal project configuration.
@@ -358,17 +358,163 @@ function cmdContracts(target, outPath) {
   if (outPath) out.end();
 }
 
-function cmdDataAccess(_target, outPath) {
+// ORM / query-builder verbs. The receiver tells us the entity; the
+// verb tells us read vs write. Prisma exposes them as
+// ``client.<model>.<verb>()``; Sequelize / TypeORM as model statics
+// ``<Model>.<verb>()``.
+const _DATA_READ_OPS = new Set([
+  "find", "findone", "findall", "findmany", "findunique", "findfirst",
+  "count", "aggregate", "select",
+]);
+const _DATA_WRITE_OPS = new Set([
+  "create", "createmany", "insert", "update", "updatemany", "updateone",
+  "save", "delete", "deletemany", "deleteone", "destroy", "upsert",
+  "bulkcreate",
+]);
+
+// Raw-SQL table extraction. A literal is only treated as SQL when it
+// carries a statement keyword, which keeps ordinary strings out.
+const _SQL_HINT = /\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE)\b/i;
+const _SQL_TABLE = [
+  // The READS ``FROM`` rule must not also fire on ``DELETE FROM``,
+  // which the WRITES rule below already owns.
+  { re: /(?<!DELETE\s{1,4})\bFROM\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "READS" },
+  { re: /\bJOIN\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "READS" },
+  { re: /\bINSERT\s+INTO\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "WRITES" },
+  { re: /\bUPDATE\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "WRITES" },
+  { re: /\bDELETE\s+FROM\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "WRITES" },
+];
+
+function dataEntityName(raw) {
+  // Strip quoting, drop any schema/owner qualifier (dbo.Orders → orders).
+  const cleaned = raw.replace(/[`"'[\]]/g, "").trim().toLowerCase();
+  const parts = cleaned.split(".");
+  return parts[parts.length - 1];
+}
+
+function emitDataAccess(out, sf, fnNode, rawEntity, access, site, seen) {
+  const name = dataEntityName(rawEntity);
+  // A logical (name-keyed) entity id — the merge layer reconciles it
+  // against the schema-qualified DataEntity the DB analyzers emit.
+  if (!name || !/^[a-z_]\w*$/.test(name)) return;
+  const entityId = `data.${name}`;
+  if (!seen.has(entityId)) {
+    seen.add(entityId);
+    writeLine(
+      out,
+      envelope("data_entity", {
+        id: entityId,
+        kind: "table",
+        name,
+        schema: {},
+        sample_available: false,
+        is_sensitive: false,
+        certainty: "inferred",
+        created_by: [SOURCE_NAME],
+        metadata: { detected_by: "ts_static" },
+      }),
+    );
+  }
+  const callerId = fnNode
+    ? symbolIdFor(sf, fnNode, fnNode.name?.text ?? "<anonymous>")
+    : `ts:${path.basename(sf.fileName)}:<module>`;
+  writeLine(
+    out,
+    envelope("edge", {
+      source_id: callerId,
+      target_id: entityId,
+      kind: access,
+      certainty: "inferred",
+      created_by: [SOURCE_NAME],
+      metadata: { access_site: site },
+    }),
+  );
+}
+
+function cmdDataAccess(target, outPath) {
+  const program = buildProgram(target);
   const out = openOutput(outPath);
-  // ORM integration is Week-5 work; leave the stub cleanly empty.
+
+  for (const sf of program.getSourceFiles()) {
+    if (sf.isDeclarationFile || sf.fileName.includes("node_modules")) continue;
+    const enclosingFn = [];
+    const seen = new Set();
+    const visit = (node) => {
+      const isFn =
+        node.kind === ts.SyntaxKind.FunctionDeclaration ||
+        node.kind === ts.SyntaxKind.MethodDeclaration;
+      if (isFn) enclosingFn.push(node);
+      const fn = enclosingFn[enclosingFn.length - 1] ?? null;
+
+      // (1) Raw SQL embedded in string / template literals.
+      if (
+        node.kind === ts.SyntaxKind.StringLiteral ||
+        node.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral ||
+        node.kind === ts.SyntaxKind.TemplateExpression
+      ) {
+        const text = node.getText(sf);
+        if (_SQL_HINT.test(text)) {
+          const s = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+          const site = { line: s.line + 1, col: s.character + 1 };
+          for (const { re, access } of _SQL_TABLE) {
+            re.lastIndex = 0;
+            let m;
+            while ((m = re.exec(text)) !== null) {
+              emitDataAccess(out, sf, fn, m[1], access, site, seen);
+            }
+          }
+        }
+      }
+
+      // (2) ORM-style method calls — prisma.<model>.<verb>() or
+      //     <Model>.<verb>() statics.
+      if (
+        node.kind === ts.SyntaxKind.CallExpression &&
+        node.expression.kind === ts.SyntaxKind.PropertyAccessExpression
+      ) {
+        const expr = node.expression;
+        const op = expr.name.text.toLowerCase();
+        const isWrite = _DATA_WRITE_OPS.has(op);
+        const isRead = _DATA_READ_OPS.has(op);
+        if (isRead || isWrite) {
+          const recv = expr.expression;
+          let entity = null;
+          if (recv.kind === ts.SyntaxKind.PropertyAccessExpression) {
+            // client.<model>.<verb>()
+            entity = recv.name.text;
+          } else if (
+            recv.kind === ts.SyntaxKind.Identifier &&
+            /^[A-Z]/.test(recv.text)
+          ) {
+            // <Model>.<verb>() — gated on the capitalised-model
+            // convention so ordinary helper calls don't leak in.
+            entity = recv.text;
+          }
+          if (entity) {
+            const s = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+            emitDataAccess(out, sf, fn, entity, isWrite ? "WRITES" : "READS",
+              { line: s.line + 1, col: s.character + 1 }, seen);
+          }
+        }
+      }
+
+      ts.forEachChild(node, visit);
+      if (isFn) enclosingFn.pop();
+    };
+    try {
+      visit(sf);
+    } catch (err) {
+      reportError(sf.fileName, err.message);
+    }
+  }
   if (outPath) out.end();
 }
 
 function cmdSchema() {
   return {
     schema: "https://mnemos.dev/analyzer/ggoss-ts/v1",
-    record_types: ["symbol", "contract", "edge"],
-    emits_edges: ["CALLS"],
+    record_types: ["symbol", "contract", "data_entity", "edge"],
+    emits_edges: ["CALLS", "READS", "WRITES"],
   };
 }
 
