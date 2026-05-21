@@ -253,3 +253,100 @@ async def findings_summary(
         "resolved_last_7d": resolved_last_7d,
         "new_last_7d": new_last_7d,
     }
+
+
+@router.get(
+    "/api/v1/projects/{project_id}/findings/trend",
+    dependencies=[Depends(require_project_org())],
+)
+async def findings_trend(
+    project_id: uuid.UUID,
+    _: CurrentUser,
+    days: int = 90,
+    bucket_days: int = 7,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Long-horizon trend buckets for the executive report (PR-55,
+    audit C2).
+
+    PR-51's summary gave a single 7-day delta — "is the backlog
+    growing this week?". The audit's C2 asked for the longer
+    horizon: a PM wants the 90-day shape, not a one-week snapshot.
+
+    Returns a list of time buckets, oldest first:
+
+      {
+        "buckets": [
+          {"start": iso, "end": iso,
+           "new": int,        # findings first seen in the bucket
+           "resolved": int,   # findings resolved in the bucket
+           "net": int},       # new − resolved (positive = growing)
+          …
+        ],
+        "bucket_days": int,
+        "total_new": int,
+        "total_resolved": int,
+      }
+
+    A backlog that's under control shows ``net`` trending toward
+    zero or negative across the buckets. A team can paste the
+    chart straight into a status update.
+    """
+    days = max(7, min(days, 365))
+    bucket_days = max(1, min(bucket_days, 30))
+    now = datetime.now(tz=timezone.utc)
+    window_start = now - timedelta(days=days)
+
+    rows = (
+        await db.execute(
+            select(Finding.first_seen_at, Finding.resolved_at).where(
+                Finding.project_id == project_id
+            )
+        )
+    ).all()
+
+    # Build the bucket skeleton.
+    n_buckets = (days + bucket_days - 1) // bucket_days
+    buckets: list[dict[str, Any]] = []
+    for i in range(n_buckets):
+        b_start = window_start + timedelta(days=i * bucket_days)
+        b_end = b_start + timedelta(days=bucket_days)
+        buckets.append(
+            {
+                "start": b_start.isoformat(),
+                "end": b_end.isoformat(),
+                "new": 0,
+                "resolved": 0,
+                "net": 0,
+            }
+        )
+
+    def _bucket_index(ts: datetime) -> int | None:
+        if ts < window_start or ts >= now:
+            return None
+        delta_days = (ts - window_start).total_seconds() / 86400.0
+        idx = int(delta_days // bucket_days)
+        return idx if 0 <= idx < n_buckets else None
+
+    total_new = 0
+    total_resolved = 0
+    for first_seen, resolved in rows:
+        if first_seen is not None:
+            bi = _bucket_index(first_seen)
+            if bi is not None:
+                buckets[bi]["new"] += 1
+                total_new += 1
+        if resolved is not None:
+            bi = _bucket_index(resolved)
+            if bi is not None:
+                buckets[bi]["resolved"] += 1
+                total_resolved += 1
+    for b in buckets:
+        b["net"] = b["new"] - b["resolved"]
+
+    return {
+        "buckets": buckets,
+        "bucket_days": bucket_days,
+        "total_new": total_new,
+        "total_resolved": total_resolved,
+    }

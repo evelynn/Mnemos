@@ -36,6 +36,9 @@
   <h3 data-i18n="Findings by kind">Findings by kind</h3>
   <div id="rp-kinds"></div>
 
+  <h3 data-i18n="Finding trend (90 days)">Finding trend (90 days)</h3>
+  <div id="rp-trend"></div>
+
   <h3 data-i18n="System-level narrative (L3)">System-level narrative (L3)</h3>
   <div id="rp-l3" class="report-narrative"></div>
 
@@ -93,6 +96,18 @@
 }
 .report-narrative .l3-item h4 { margin: 0 0 var(--sp-1); font-size: 0.9rem; }
 .report-footer { margin-top: var(--sp-6); font-size: 0.8rem; text-align: center; }
+.trend-chart { width: 100%; max-width: 560px; height: auto; }
+.trend-chart .trend-new { stroke: var(--danger-button); stroke-width: 2; }
+.trend-chart .trend-resolved { stroke: var(--success); stroke-width: 2; }
+.trend-chart .trend-bar-up { fill: var(--danger-bg); }
+.trend-chart .trend-bar-down { fill: var(--success-bg); }
+.trend-legend { font-size: 0.8rem; margin-top: var(--sp-1); }
+.trend-legend .lg {
+  display: inline-block; width: 10px; height: 10px;
+  border-radius: 2px; vertical-align: middle;
+}
+.trend-legend .lg-new { background: var(--danger-button); }
+.trend-legend .lg-resolved { background: var(--success); }
 
 @media print {
   .no-print, .sidebar, .menu-toggle, #sse-cross-tab-strip { display: none !important; }
@@ -110,11 +125,12 @@ async function buildReport(ev) {
   document.getElementById("rp-empty").hidden = true;
   const body = document.getElementById("report-body");
 
-  // Parallel fetch — health summary + L3 narrative + cost.
-  const [sumRes, l3Res, costRes] = await Promise.all([
+  // Parallel fetch — health summary + L3 narrative + cost + trend.
+  const [sumRes, l3Res, costRes, trendRes] = await Promise.all([
     fetch(`/api/v1/projects/${pid}/findings/summary`),
     fetch(`/api/v1/projects/${pid}/summaries?level=3`),
     fetch(`/api/v1/projects/${pid}/llm_cost`),
+    fetch(`/api/v1/projects/${pid}/findings/trend?days=90&bucket_days=7`),
   ]);
   if (!sumRes.ok) {
     await MnemosUI.showError("Report generation failed", sumRes);
@@ -123,6 +139,7 @@ async function buildReport(ev) {
   const s = await sumRes.json();
   const l3 = l3Res.ok ? await l3Res.json() : [];
   const cost = costRes.ok ? await costRes.json() : null;
+  const trend = trendRes.ok ? await trendRes.json() : null;
 
   document.getElementById("rp-when").textContent = new Date().toISOString();
   document.getElementById("rp-project").textContent = pid;
@@ -164,6 +181,9 @@ async function buildReport(ev) {
       }).join("")
     : '<p class="muted">No findings.</p>';
 
+  // Finding trend — twin-line SVG (new vs resolved per bucket).
+  renderTrendChart(trend);
+
   // L3 narrative.
   document.getElementById("rp-l3").innerHTML = l3.length
     ? l3.map(item => `<div class="l3-item">
@@ -185,6 +205,46 @@ async function buildReport(ev) {
   body.hidden = false;
   MnemosUI.applyI18n(body);
   return false;
+}
+
+function renderTrendChart(trend) {
+  const host = document.getElementById("rp-trend");
+  if (!trend || !trend.buckets || !trend.buckets.length) {
+    host.innerHTML = '<p class="muted" data-i18n="Not enough history yet for a trend chart.">Not enough history yet for a trend chart.</p>';
+    MnemosUI.applyI18n(host);
+    return;
+  }
+  const buckets = trend.buckets;
+  const W = 560, H = 140, padL = 30, padB = 20, padT = 10;
+  const maxV = Math.max(1, ...buckets.flatMap(b => [b.new, b.resolved]));
+  const stepX = (W - padL) / Math.max(1, buckets.length - 1);
+  const yFor = (v) => padT + (H - padT - padB) * (1 - v / maxV);
+  const xFor = (i) => padL + i * stepX;
+  const linePath = (key) => buckets
+    .map((b, i) => `${i === 0 ? "M" : "L"}${xFor(i).toFixed(1)},${yFor(b[key]).toFixed(1)}`)
+    .join(" ");
+  // net bars (new − resolved): positive = backlog growing.
+  const bars = buckets.map((b, i) => {
+    const zero = yFor(0);
+    const top = yFor(Math.abs(b.net));
+    const h = Math.abs(zero - top);
+    const x = xFor(i) - 3;
+    const y = b.net >= 0 ? Math.min(zero, top) : zero;
+    const cls = b.net > 0 ? "trend-bar-up" : "trend-bar-down";
+    return `<rect class="${cls}" x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="6" height="${Math.max(1, h).toFixed(1)}"></rect>`;
+  }).join("");
+  host.innerHTML =
+    `<svg class="trend-chart" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="finding trend">`
+    + bars
+    + `<path class="trend-new" d="${linePath("new")}" fill="none"></path>`
+    + `<path class="trend-resolved" d="${linePath("resolved")}" fill="none"></path>`
+    + `</svg>`
+    + `<p class="muted trend-legend">`
+    + `<span class="lg lg-new"></span> <span data-i18n="new">new</span> · `
+    + `<span class="lg lg-resolved"></span> <span data-i18n="resolved">resolved</span> · `
+    + `<span data-i18n="total over window">total over window</span>: `
+    + `${trend.total_new} new, ${trend.total_resolved} resolved</p>`;
+  MnemosUI.applyI18n(host);
 }
 
 (function () {
