@@ -36,6 +36,13 @@ log = logging.getLogger(__name__)
 # the cache warm for long-lived bindings.
 PROBE_RECHECK_INTERVAL = timedelta(hours=24)
 
+# A binding whose probe is older than this AND which keeps getting
+# skipped (a project that is continuously analysing) is overdue: the
+# recheck can't safely run mid-analysis, but silently skipping forever
+# would let credentials drift unverified (§2.5). Past the ceiling we
+# log a warning and count it so an operator can act.
+PROBE_OVERDUE_CEILING = PROBE_RECHECK_INTERVAL * 7
+
 
 async def _try_acquire(session: AsyncSession, name: str) -> bool:
     """Return True iff this connection acquired the named advisory lock.
@@ -138,6 +145,8 @@ async def _probe_recheck_one(session: AsyncSession) -> dict[str, int]:
 
     rechecked = 0
     disabled = 0
+    overdue = 0
+    overdue_cutoff = datetime.now(tz=timezone.utc) - PROBE_OVERDUE_CEILING
     for row in rows:
         # Skip while an analysis is running against this DB — we'd
         # otherwise risk yanking the binding out from under it. The
@@ -150,6 +159,17 @@ async def _probe_recheck_one(session: AsyncSession) -> dict[str, int]:
             {"pid": row.project_id},
         )
         if running.first() is not None:
+            # A continuously-busy project can be skipped indefinitely;
+            # once its probe is past the ceiling, surface it so the
+            # silent skip doesn't hide drifting credentials.
+            if row.last_probe_at is None or row.last_probe_at < overdue_cutoff:
+                overdue += 1
+                log.warning(
+                    "probe_recheck: ProjectDB %s overdue (last_probe_at=%s) "
+                    "but skipped — project continuously analysing",
+                    row.id,
+                    row.last_probe_at,
+                )
             continue
 
         conn = await _resolve_conn_ref(session, row.secret_id)
@@ -177,8 +197,13 @@ async def _probe_recheck_one(session: AsyncSession) -> dict[str, int]:
     project_db_disabled.set(int(total_disabled))
 
     await session.commit()
-    log.info("probe_recheck: rechecked=%d disabled=%d", rechecked, disabled)
-    return {"rechecked": rechecked, "disabled": disabled}
+    log.info(
+        "probe_recheck: rechecked=%d disabled=%d overdue=%d",
+        rechecked,
+        disabled,
+        overdue,
+    )
+    return {"rechecked": rechecked, "disabled": disabled, "overdue": overdue}
 
 
 async def _retention_purge(session: AsyncSession) -> dict[str, int]:

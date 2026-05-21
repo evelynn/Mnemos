@@ -122,11 +122,19 @@ async def gitlab_webhook(
     project_path = (body.get("project") or {}).get("path_with_namespace")
 
     enqueued: dict[str, Any] | None = None
+    # For a push event that fails to enqueue, this records *why* — a
+    # silent 200 left an operator whose project's gitlab_project_id is
+    # unset wondering why no analysis ever ran (§2.7 always-on).
+    skip_reason: str | None = None
     if object_kind in ("push", "tag_push"):
         project = await _resolve_project(db, body)
         before = str(body.get("before") or "")
         after = str(body.get("after") or "")
         ref = str(body.get("ref") or "")
+        if project is None:
+            skip_reason = "project_not_registered"
+        elif not after or not ref:
+            skip_reason = "malformed_push_payload"
         if project is not None and after and ref:
             run = AnalysisRun(
                 project_id=project.id,
@@ -161,9 +169,13 @@ async def gitlab_webhook(
                 "before": before,
             }
 
+    # A push that should have enqueued but didn't gets a distinct
+    # ``webhook.skipped`` action so an operator can filter the audit
+    # log for misrouted hooks instead of trawling every ``received``.
+    action = "webhook.skipped" if skip_reason else "webhook.received"
     await audit_record(
         actor="gitlab",
-        action="webhook.received",
+        action=action,
         target=x_gitlab_event or "unknown",
         details={
             "event": x_gitlab_event,
@@ -171,7 +183,12 @@ async def gitlab_webhook(
             "object_kind": object_kind,
             "project": project_path,
             "enqueued": enqueued,
+            "skip_reason": skip_reason,
         },
     )
 
-    return {"status": "received", "enqueued": enqueued is not None}
+    return {
+        "status": "received",
+        "enqueued": enqueued is not None,
+        "skip_reason": skip_reason,
+    }
