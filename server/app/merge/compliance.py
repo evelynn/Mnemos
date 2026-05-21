@@ -33,8 +33,10 @@ _CWE_COMPLIANCE: dict[str, dict[str, list[str]]] = {
         "nist_800_53": ["SI-10 Information Input Validation"],
     },
     "CWE-561": {  # Dead code (dead_path_suspected)
+        # Dead code is a maintenance / attack-surface concern, not a
+        # cardholder-data control — no honest PCI DSS requirement maps.
         "owasp": [],
-        "pci_dss": ["6.2.4 Secure coding — review of unused code"],
+        "pci_dss": [],
         "nist_800_53": ["CM-7 Least Functionality"],
     },
     "CWE-1078": {  # Inappropriate structure (schema_mismatch)

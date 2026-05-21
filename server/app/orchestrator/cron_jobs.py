@@ -211,9 +211,10 @@ async def _retention_purge(session: AsyncSession) -> dict[str, int]:
 
     Two sweeps:
 
-    * ``audit_logs`` — 180-day window; only the noisy webhook-received
-      entries are deleted. Auth / approval / break-glass entries are
-      kept indefinitely (spec §14.4 audit retention).
+    * ``audit_logs`` — 180-day window; only the noisy webhook ingest
+      entries (``webhook.received`` / ``webhook.skipped``) are deleted.
+      Auth / approval / break-glass entries are kept indefinitely
+      (spec §14.4 audit retention).
     * ``runtime_observations`` — 14-day window. The OTLP receiver
       writes one row per ``(service, operation, kind)`` triple it
       sees; without this sweep the table grows unbounded on any
@@ -228,7 +229,8 @@ async def _retention_purge(session: AsyncSession) -> dict[str, int]:
     res = await session.execute(
         text(
             "DELETE FROM audit_logs WHERE created_at < :cutoff "
-            "AND action IN ('webhook.received',) RETURNING id"
+            "AND action IN ('webhook.received', 'webhook.skipped') "
+            "RETURNING id"
         ),
         {"cutoff": audit_cutoff},
     )

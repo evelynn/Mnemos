@@ -39,7 +39,7 @@ def test_roi_is_two_sided():
     """Risk eliminated (benefit) paired with LLM spend (cost)."""
     body = _read(_APP / "api" / "findings.py")
     idx = body.find("async def findings_roi(")
-    slab = body[idx:idx + 2800]
+    slab = body[idx:idx + 3800]
     assert "risk_eliminated" in slab
     assert "estimated_usd" in slab
     assert "risk_per_usd" in slab
@@ -59,7 +59,7 @@ def test_roi_only_counts_resolved_as_benefit():
     not inflate risk_eliminated, only feed the precision figure."""
     body = _read(_APP / "api" / "findings.py")
     idx = body.find("async def findings_roi(")
-    slab = body[idx:idx + 2800]
+    slab = body[idx:idx + 3800]
     assert 'status_val == "resolved"' in slab
     assert 'status_val == "false_positive"' in slab
 

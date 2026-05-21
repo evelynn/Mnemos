@@ -374,6 +374,7 @@ async def findings_trend(
 async def findings_roi(
     project_id: uuid.UUID,
     _: CurrentUser,
+    days: int = 0,
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """ROI rollup — risk eliminated vs LLM spend (audit C6).
@@ -386,46 +387,65 @@ async def findings_roi(
     ``precision`` is the analyzer-quality signal: of the findings an
     operator has triaged to a terminal state, how many were real
     (``resolved``) rather than noise (``false_positive``).
+
+    ``days`` windows the flow metrics (risk eliminated, precision,
+    spend) to the recent period — ``0`` means all-time. Without it a
+    mature project's headline numbers freeze and stop reflecting
+    current effort. ``open_risk_remaining`` is always a live snapshot.
     """
     import os
 
     from app.models.findings import Summary
 
+    window_start: datetime | None = None
+    if days > 0:
+        window_start = datetime.now(tz=timezone.utc) - timedelta(
+            days=min(days, 365)
+        )
+
     rows = (
         await db.execute(
-            select(Finding.status, Finding.risk_score).where(
-                Finding.project_id == project_id
-            )
+            select(
+                Finding.status, Finding.risk_score, Finding.resolved_at
+            ).where(Finding.project_id == project_id)
         )
     ).all()
     risk_eliminated = 0
     findings_resolved = 0
     open_risk_remaining = 0
     false_positive_count = 0
-    for status_val, risk in rows:
+    for status_val, risk, resolved_at in rows:
         risk = int(risk or 0)
+        if status_val in {"open", "acknowledged"}:
+            # Live snapshot — never windowed.
+            open_risk_remaining += risk
+            continue
+        # Terminal states are windowed: a finding triaged outside the
+        # window doesn't count toward recent ROI / precision.
+        if window_start is not None and (
+            resolved_at is None or resolved_at < window_start
+        ):
+            continue
         if status_val == "resolved":
             risk_eliminated += risk
             findings_resolved += 1
         elif status_val == "false_positive":
             false_positive_count += 1
-        elif status_val in {"open", "acknowledged"}:
-            open_risk_remaining += risk
 
-    token_rows = (
-        await db.execute(
-            select(Summary.tokens_used).where(
-                Summary.project_id == project_id,
-                Summary.superseded_by.is_(None),
-            )
-        )
-    ).all()
+    token_stmt = select(Summary.tokens_used).where(
+        Summary.project_id == project_id,
+        Summary.superseded_by.is_(None),
+    )
+    if window_start is not None:
+        token_stmt = token_stmt.where(Summary.generated_at >= window_start)
+    token_rows = (await db.execute(token_stmt)).all()
     total_tokens = sum(int(t or 0) for (t,) in token_rows)
     rate = float(os.environ.get("MNEMOS_LLM_USD_PER_MTOK", "3.0"))
     estimated_usd = round((total_tokens / 1_000_000.0) * rate, 4)
 
     triaged = findings_resolved + false_positive_count
     return {
+        "window_days": days,
         "risk_eliminated": risk_eliminated,
         "findings_resolved": findings_resolved,
         "open_risk_remaining": open_risk_remaining,

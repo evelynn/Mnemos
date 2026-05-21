@@ -126,7 +126,12 @@ async def gitlab_webhook(
     # silent 200 left an operator whose project's gitlab_project_id is
     # unset wondering why no analysis ever ran (§2.7 always-on).
     skip_reason: str | None = None
-    if object_kind in ("push", "tag_push"):
+    if object_kind == "tag_push":
+        # A tag points at a commit already on a branch we analyse via
+        # its push event; re-analysing it would just be a redundant
+        # run (and its all-zero ``before`` SHA defeats job dedup).
+        skip_reason = "tag_push_no_new_commits"
+    elif object_kind == "push":
         project = await _resolve_project(db, body)
         before = str(body.get("before") or "")
         after = str(body.get("after") or "")
