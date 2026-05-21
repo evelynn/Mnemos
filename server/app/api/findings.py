@@ -365,3 +365,78 @@ async def findings_trend(
         "total_new": total_new,
         "total_resolved": total_resolved,
     }
+
+
+@router.get(
+    "/api/v1/projects/{project_id}/findings/roi",
+    dependencies=[Depends(require_project_org())],
+)
+async def findings_roi(
+    project_id: uuid.UUID,
+    _: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """ROI rollup — risk eliminated vs LLM spend (audit C6).
+
+    ``project_llm_cost`` answered only the *cost* half of ROI. This
+    pairs it with the *benefit* half: the risk-score points removed
+    from the system by resolving findings. ``risk_per_usd`` is the
+    headline — analysis spend converted into risk eliminated.
+
+    ``precision`` is the analyzer-quality signal: of the findings an
+    operator has triaged to a terminal state, how many were real
+    (``resolved``) rather than noise (``false_positive``).
+    """
+    import os
+
+    from app.models.findings import Summary
+
+    rows = (
+        await db.execute(
+            select(Finding.status, Finding.risk_score).where(
+                Finding.project_id == project_id
+            )
+        )
+    ).all()
+    risk_eliminated = 0
+    findings_resolved = 0
+    open_risk_remaining = 0
+    false_positive_count = 0
+    for status_val, risk in rows:
+        risk = int(risk or 0)
+        if status_val == "resolved":
+            risk_eliminated += risk
+            findings_resolved += 1
+        elif status_val == "false_positive":
+            false_positive_count += 1
+        elif status_val in {"open", "acknowledged"}:
+            open_risk_remaining += risk
+
+    token_rows = (
+        await db.execute(
+            select(Summary.tokens_used).where(
+                Summary.project_id == project_id,
+                Summary.superseded_by.is_(None),
+            )
+        )
+    ).all()
+    total_tokens = sum(int(t or 0) for (t,) in token_rows)
+    rate = float(os.environ.get("MNEMOS_LLM_USD_PER_MTOK", "3.0"))
+    estimated_usd = round((total_tokens / 1_000_000.0) * rate, 4)
+
+    triaged = findings_resolved + false_positive_count
+    return {
+        "risk_eliminated": risk_eliminated,
+        "findings_resolved": findings_resolved,
+        "open_risk_remaining": open_risk_remaining,
+        "false_positive_count": false_positive_count,
+        "estimated_usd": estimated_usd,
+        "risk_per_usd": (
+            round(risk_eliminated / estimated_usd, 1)
+            if estimated_usd > 0
+            else None
+        ),
+        "precision": (
+            round(findings_resolved / triaged, 3) if triaged else None
+        ),
+    }

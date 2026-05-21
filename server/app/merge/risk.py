@@ -108,7 +108,9 @@ _REMEDIATION: dict[str, tuple[str, str | None]] = {
         "path. Add an analyzer for its language, or wrap it in a "
         "contract (an explicit API boundary) so its behaviour becomes "
         "observable.",
-        None,
+        # Relying on a component whose behaviour can't be verified is a
+        # trustworthiness weakness — it carries supply-chain audit weight.
+        "CWE-1357",  # Reliance on Insufficiently Trustworthy Component
     ),
 }
 

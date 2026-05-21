@@ -52,6 +52,11 @@ _CWE_COMPLIANCE: dict[str, dict[str, list[str]]] = {
         "pci_dss": ["3.4 Protect stored cardholder data"],
         "nist_800_53": ["AC-3 Access Enforcement"],
     },
+    "CWE-1357": {  # Reliance on insufficiently trustworthy component
+        "owasp": ["A06:2021 Vulnerable and Outdated Components"],
+        "pci_dss": ["6.3.2 Inventory of bespoke and custom software"],
+        "nist_800_53": ["SR-3 Supply Chain Controls and Processes"],
+    },
 }
 
 _FRAMEWORK_LABELS = {

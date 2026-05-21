@@ -1389,6 +1389,13 @@
     "Findings by kind": "종류별 발견",
     "System-level narrative (L3)": "시스템 수준 서술 (L3)",
     "Analysis cost": "분석 비용",
+    // PR-63 — ROI rollup.
+    "Return on investment": "투자 수익 (ROI)",
+    "risk points eliminated": "위험 점수 제거됨",
+    "risk points still open": "위험 점수 미해결",
+    "Risk eliminated per USD": "달러당 제거된 위험",
+    "Finding precision": "발견 정밀도",
+    "false positive": "오탐",
     // PR-55 — finding trend chart.
     "Finding trend (90 days)": "발견 추이 (90일)",
     "Not enough history yet for a trend chart.": "추이 차트를 그릴 이력이 아직 부족합니다.",
