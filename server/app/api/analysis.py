@@ -1,17 +1,18 @@
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
 from app.auth.org_scope import require_project_org
+from app.auth.rbac import require_operator
 from app.db import get_session
 from app.models.graph import AnalysisRun, Edge, Node
 from app.models.projects import Project
@@ -332,20 +333,147 @@ async def graph_component_map(
                 "label": _label(n),
                 "certainty": n.certainty,
                 "exercised": _exercised(n.data or {}),
+                "confirmed": _confirmation_action(n.data or {}),
             }
             for n in nodes
         ],
         "edges": [
             {
+                "id": str(e.id),
                 "source": e.source_id,
                 "target": e.target_id,
                 "kind": e.kind,
                 "certainty": e.certainty,
                 "exercised": _exercised(e.data or {}),
+                "confirmed": _confirmation_action(e.data or {}),
             }
             for e in edge_rows
         ],
         "truncated": len(nodes) >= limit,
+    }
+
+
+def _confirmation_action(data: dict) -> str | None:
+    """Return ``"confirm"`` / ``"dispute"`` if a human has weighed in
+    on this fact (PR-67, spec §1.2), else None."""
+    hc = (data or {}).get("human_confirmation")
+    return hc.get("action") if isinstance(hc, dict) else None
+
+
+def _strengthened_certainty(action: str, current: str) -> str:
+    """§1.2 + §2.3 — a human confirmation is one trustworthy source
+    asserting the fact, so an ``inferred`` fact rises to ``asserted``.
+
+    It never reaches ``verified``: that rung is reserved for the
+    system observing the fact directly (a runtime trace, the DB
+    catalogue). A dispute, or an already-asserted/verified fact,
+    leaves the certainty untouched.
+    """
+    if action == "confirm" and current == "inferred":
+        return "asserted"
+    return current
+
+
+class ConfirmFactBody(BaseModel):
+    target_kind: Literal["node", "edge"]
+    target_id: str = Field(min_length=1, max_length=512)
+    action: Literal["confirm", "dispute"]
+    rationale: str = Field(min_length=10, max_length=2000)
+
+
+@router.post(
+    "/projects/{project_id}/graph/confirm_fact",
+    dependencies=[Depends(require_project_org()), Depends(require_operator)],
+)
+async def confirm_fact(
+    project_id: uuid.UUID,
+    body: ConfirmFactBody,
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Human certainty feedback — spec §1.2.
+
+    §1.2 is explicit that the graph's certainty must not stay frozen
+    at whatever the analyzers first guessed: facts confirmed while
+    *using* the platform strengthen it. When an operator confirms an
+    ``inferred`` fact during Q&A / graph review this lifts it
+    ``inferred → asserted`` (see :func:`_strengthened_certainty`).
+    A dispute records the operator's doubt — surfaced on the graph —
+    without silently rewriting analyzer output.
+
+    The ``data`` JSONB carries the confirmation record (who, when,
+    why) the same way PR-25's OTLP merge stamps ``exercised``, so no
+    schema change is needed and the bitemporal history is preserved.
+    """
+    now = datetime.now(tz=timezone.utc)
+    if body.target_kind == "edge":
+        try:
+            edge_uuid = uuid.UUID(body.target_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="bad_edge_id")
+        row = (
+            await db.execute(
+                select(Edge).where(
+                    Edge.id == edge_uuid,
+                    Edge.project_id == project_id,
+                    Edge.valid_to.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+    else:
+        row = (
+            await db.execute(
+                select(Node).where(
+                    Node.id == body.target_id,
+                    Node.project_id == project_id,
+                    Node.valid_to.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="fact_not_found")
+
+    new_data = dict(row.data or {})
+    new_data["human_confirmation"] = {
+        "action": body.action,
+        "by": f"user:{user.id}",
+        "at": now.isoformat(),
+        "rationale": body.rationale,
+    }
+    before = row.certainty
+    after = _strengthened_certainty(body.action, before)
+
+    if body.target_kind == "edge":
+        await db.execute(
+            update(Edge)
+            .where(Edge.id == row.id, Edge.valid_from == row.valid_from)
+            .values(data=new_data, certainty=after)
+        )
+    else:
+        await db.execute(
+            update(Node)
+            .where(
+                Node.id == row.id,
+                Node.project_id == project_id,
+                Node.valid_from == row.valid_from,
+            )
+            .values(data=new_data, certainty=after)
+        )
+    await db.commit()
+
+    await audit_record(
+        actor=f"user:{user.id}",
+        action="graph.fact_confirmed",
+        target=f"{body.target_kind}:{body.target_id}",
+        project_id=project_id,
+        details={"action": body.action, "certainty": f"{before}->{after}"},
+    )
+    return {
+        "target_kind": body.target_kind,
+        "target_id": body.target_id,
+        "action": body.action,
+        "certainty_before": before,
+        "certainty_after": after,
     }
 
 

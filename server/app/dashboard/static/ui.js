@@ -1367,6 +1367,19 @@
     "Enter a project ID above and click Render to see its knowledge graph.":
       "위에 프로젝트 ID 를 입력하고 Render 를 클릭하면 지식 그래프가 보입니다.",
     "Components": "컴포넌트",
+    // PR-67 — human certainty feedback (§1.2).
+    "Confirm a graph fact": "그래프 사실 확인",
+    "If the analysers only inferred an edge or node, confirming it here records your judgement and raises its certainty from inferred to asserted (spec §1.2). Dispute flags a fact you believe is wrong.":
+      "분석기가 엣지나 노드를 추론(inferred)만 한 경우, 여기서 확인하면 귀하의 판단이 기록되고 확신도가 추론에서 단언(asserted)으로 올라갑니다 (스펙 §1.2). 이의 제기는 잘못되었다고 보는 사실을 표시합니다.",
+    "Target": "대상",
+    "Fact ID": "사실 ID",
+    "Action": "동작",
+    "Rationale": "근거",
+    "Submit": "제출",
+    "Why you are confirming or disputing this": "확인 또는 이의 제기 사유",
+    "Confirmation failed": "확인 실패",
+    "Recorded": "기록됨",
+    "Graph fact updated": "그래프 사실이 갱신되었습니다",
     // PR-59 — canvas backend for large graphs.
     "Large graph — rendered on canvas for performance. Hover a node for details.":
       "대규모 그래프 — 성능을 위해 캔버스로 렌더링했습니다. 노드에 마우스를 올리면 상세 정보가 보입니다.",

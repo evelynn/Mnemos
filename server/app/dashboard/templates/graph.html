@@ -86,8 +86,50 @@
   </div>
 </section>
 
+<section>
+  <details class="confirm-fact">
+    <summary data-i18n="Confirm a graph fact">Confirm a graph fact</summary>
+    <p class="muted" data-i18n="If the analysers only inferred an edge or node, confirming it here records your judgement and raises its certainty from inferred to asserted (spec §1.2). Dispute flags a fact you believe is wrong.">
+      If the analysers only inferred an edge or node, confirming it
+      here records your judgement and raises its certainty from
+      inferred to asserted (spec §1.2). Dispute flags a fact you
+      believe is wrong.
+    </p>
+    <form onsubmit="return submitFactConfirmation(event)" class="confirm-form">
+      <label><span data-i18n="Target">Target</span>
+        <select id="cf-kind">
+          <option value="edge" selected>edge</option>
+          <option value="node">node</option>
+        </select>
+      </label>
+      <label><span data-i18n="Fact ID">Fact ID</span>
+        <input id="cf-id" type="text" required
+               placeholder="edge uuid / node id" />
+      </label>
+      <label><span data-i18n="Action">Action</span>
+        <select id="cf-action">
+          <option value="confirm" selected>confirm</option>
+          <option value="dispute">dispute</option>
+        </select>
+      </label>
+      <label class="confirm-rationale"><span data-i18n="Rationale">Rationale</span>
+        <input id="cf-rationale" type="text" required minlength="10"
+               data-i18n-placeholder="Why you are confirming or disputing this" />
+      </label>
+      <button class="primary" type="submit" data-i18n="Submit">Submit</button>
+    </form>
+    <div id="cf-result" class="muted" hidden></div>
+  </details>
+</section>
+
 <style>
 .graph-form { display: flex; gap: var(--sp-3); flex-wrap: wrap; align-items: end; }
+.confirm-fact { margin-top: var(--sp-3); }
+.confirm-fact summary { cursor: pointer; font-weight: 600; }
+.confirm-form { display: flex; gap: var(--sp-3); flex-wrap: wrap; align-items: end; margin-top: var(--sp-2); }
+.confirm-form .confirm-rationale { flex: 1 1 240px; }
+.confirm-form .confirm-rationale input { width: 100%; }
+#cf-result { margin-top: var(--sp-2); }
 .graph-stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -350,7 +392,8 @@ function renderGraphSvg() {
     return `<g class="node" data-id="${escapeHtml(n.id)}">
       <circle class="${cls}" cx="${n.x}" cy="${n.y}" r="${r}"
               onmouseenter="_showGraphTip(event, '${escapeHtml(n.id)}')"
-              onmouseleave="_hideGraphTip()"></circle>
+              onmouseleave="_hideGraphTip()"
+              onclick="_prefillConfirm('node', '${escapeHtml(n.id)}')"></circle>
       <text class="node-label" x="${n.x}" y="${labelY}" text-anchor="middle">
         ${escapeHtml((n.label || n.id).slice(0, 18))}
       </text>
@@ -489,6 +532,47 @@ function _showGraphTip(ev, nodeId) {
 }
 function _hideGraphTip() {
   document.getElementById("g-tooltip").hidden = true;
+}
+
+// --- Human certainty feedback (PR-67, spec §1.2) -------------------
+// Clicking a node pre-fills the confirm form so an operator can lift
+// an inferred fact to asserted without copying ids by hand.
+function _prefillConfirm(kind, id) {
+  document.getElementById("cf-kind").value = kind;
+  document.getElementById("cf-id").value = id;
+  const det = document.querySelector("details.confirm-fact");
+  if (det) det.open = true;
+}
+
+async function submitFactConfirmation(ev) {
+  ev.preventDefault();
+  const pid = document.getElementById("gpid").value.trim();
+  if (!pid) return false;
+  const body = {
+    target_kind: document.getElementById("cf-kind").value,
+    target_id: document.getElementById("cf-id").value.trim(),
+    action: document.getElementById("cf-action").value,
+    rationale: document.getElementById("cf-rationale").value.trim(),
+  };
+  const r = await fetch(`/api/v1/projects/${pid}/graph/confirm_fact`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const out = document.getElementById("cf-result");
+  out.hidden = false;
+  if (!r.ok) {
+    await MnemosUI.showError("Confirmation failed", r);
+    out.textContent = MnemosUI.t("Confirmation failed");
+    return false;
+  }
+  const j = await r.json();
+  out.textContent = MnemosUI.t("Recorded") + ": " + j.target_kind
+    + " " + j.certainty_before + " → " + j.certainty_after;
+  MnemosUI.showToast(MnemosUI.t("Graph fact updated"), "success");
+  // Re-render so the freshly-confirmed fact picks up its new colour.
+  loadGraph(null);
+  return false;
 }
 
 // Honour ?project=… query param so the dashboard's stat-card
