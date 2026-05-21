@@ -1247,6 +1247,12 @@
       "그래프가 잘렸습니다 — 최대 노드 수를 늘리거나 종류로 필터하세요.",
     "Enter a project ID above and click Render to see its knowledge graph.":
       "위에 프로젝트 ID 를 입력하고 Render 를 클릭하면 지식 그래프가 보입니다.",
+    // PR-50 — finding risk scoring + remediation.
+    "Priority": "우선순위",
+    "Risk": "위험도",
+    "Kind": "종류",
+    "Subject": "대상",
+    "Suggested fix": "권장 조치",
     // PR-41 — notification centre + responsive.
     "Notifications": "알림",
     "Clear all": "모두 지우기",

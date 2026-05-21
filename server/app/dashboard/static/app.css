@@ -799,6 +799,51 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
   resize: vertical;
 }
 
+/* PR-50 — finding priority pill + risk bar.
+ *
+ * Priority is the at-a-glance triage signal; the risk bar is the
+ * numeric backing. P1 (≥75) is red, P2 amber, P3 blue, P4 grey —
+ * the colour carries the urgency, the letter carries it for
+ * colour-blind operators. */
+.priority-pill {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--radius-sm);
+  color: var(--text-inverted);
+}
+.priority-pill.P1 { background: var(--danger-button); }
+.priority-pill.P2 { background: var(--warn); }
+.priority-pill.P3 { background: var(--accent); }
+.priority-pill.P4 { background: var(--text-muted); }
+.risk-bar {
+  display: inline-block;
+  min-width: 2.2rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+  /* Background fill scales with --risk (0-100): a linear-gradient
+     stop at risk% gives a tiny inline progress bar. */
+  background: linear-gradient(
+    to right,
+    var(--accent-soft) 0%,
+    var(--accent-soft) calc(var(--risk, 0) * 1%),
+    transparent calc(var(--risk, 0) * 1%)
+  );
+  border: 1px solid var(--border-soft);
+}
+.fix-detail summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 0.85rem;
+}
+.fix-detail p { margin: var(--sp-2) 0; font-size: 0.85rem; }
+.fix-detail .raw-detail summary { color: var(--text-muted); font-size: 0.78rem; }
+.cwe-link { font-size: 0.78rem; }
+
 /* PR-44 — activity feed on the dashboard. */
 .activity-feed {
   list-style: none;
