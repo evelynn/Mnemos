@@ -38,6 +38,17 @@ so the figure reflects the real limitation rather than a curated
 best case. The benchmark is a CI regression guard — an analyzer
 change that drops a contract or invents a spurious one fails it.
 
+**OTLP runtime replay (PR-68).** ``runtime-trace.otlp.json`` is a
+recorded OTLP/HTTP trace of the same reference system;
+``test_pr68_otlp_replay.py`` replays it through ``assemble_trace_
+tree`` and scores the ``(service, operation, kind)`` extraction
+against ``runtime_ground_truth.json`` (precision/recall 1.00). It
+also proves the trace's exposed API operation resolves to the very
+``http.GET./api/orders`` contract the static benchmark finds — so a
+§7.6 reconcile would mark that contract ``exercised``. This is the
+"live OTLP collector" gap closed with a recorded fixture, the same
+way OpenTelemetry's own conformance suite works.
+
 ## Headline
 
 * **End-to-end analysis pipeline**: works for the four Phase-1

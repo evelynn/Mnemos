@@ -1,0 +1,77 @@
+{
+  "_comment": "Recorded OTLP/HTTP JSON trace for the reference system. One trace: the orders BFF receives a request, calls the C# API over HTTP, and the API reads the orders table. Replaying this through the runtime receiver proves the OTLP ingestion path without a live collector — the same labelled-fixture methodology as the analyzer benchmark.",
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "service.name", "value": {"stringValue": "orders-bff"}}
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "5b8efff798038103d269b633813fc60c",
+              "spanId": "eee19b7ec3c1b174",
+              "parentSpanId": "",
+              "name": "GET /orders",
+              "kind": 2,
+              "attributes": [
+                {"key": "http.route", "value": {"stringValue": "/orders"}},
+                {"key": "http.request.method", "value": {"stringValue": "GET"}}
+              ]
+            },
+            {
+              "traceId": "5b8efff798038103d269b633813fc60c",
+              "spanId": "f1c2a3b4d5e6f708",
+              "parentSpanId": "eee19b7ec3c1b174",
+              "name": "GET /api/orders",
+              "kind": 3,
+              "attributes": [
+                {"key": "http.route", "value": {"stringValue": "/api/orders"}},
+                {"key": "http.request.method", "value": {"stringValue": "GET"}},
+                {"key": "server.address", "value": {"stringValue": "refsys-api"}}
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resource": {
+        "attributes": [
+          {"key": "service.name", "value": {"stringValue": "refsys-api"}}
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "5b8efff798038103d269b633813fc60c",
+              "spanId": "a9b8c7d6e5f40312",
+              "parentSpanId": "f1c2a3b4d5e6f708",
+              "name": "GET /api/orders",
+              "kind": 2,
+              "attributes": [
+                {"key": "http.route", "value": {"stringValue": "/api/orders"}},
+                {"key": "http.request.method", "value": {"stringValue": "GET"}}
+              ]
+            },
+            {
+              "traceId": "5b8efff798038103d269b633813fc60c",
+              "spanId": "0102030405060708",
+              "parentSpanId": "a9b8c7d6e5f40312",
+              "name": "SELECT orders",
+              "kind": 3,
+              "attributes": [
+                {"key": "db.system", "value": {"stringValue": "mssql"}},
+                {"key": "db.operation", "value": {"stringValue": "SELECT"}},
+                {"key": "db.sql.table", "value": {"stringValue": "orders"}}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

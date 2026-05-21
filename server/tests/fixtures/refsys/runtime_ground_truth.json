@@ -1,0 +1,14 @@
+{
+  "description": "Answer key for runtime-trace.otlp.json. Each triple is what assemble_trace_tree() must extract from the recorded trace: (service, operation, edge-kind). SERVER spans become EXPOSES, CLIENT spans CALLS. The operation for the BFF→API and API SERVER spans is /api/orders — the same path the static analyzer benchmark resolves the C# [HttpGet] contract to, so a reconcile against the static graph would mark http.GET./api/orders exercised.",
+  "expected_triples": [
+    {"service": "orders-bff", "operation": "/orders", "kind": "EXPOSES"},
+    {"service": "orders-bff", "operation": "/api/orders", "kind": "CALLS"},
+    {"service": "refsys-api", "operation": "/api/orders", "kind": "EXPOSES"},
+    {"service": "refsys-api", "operation": "SELECT orders", "kind": "CALLS"}
+  ],
+  "exercised_contract_path": "/api/orders",
+  "thresholds": {
+    "triple_precision_min": 1.0,
+    "triple_recall_min": 1.0
+  }
+}
