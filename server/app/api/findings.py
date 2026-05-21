@@ -31,6 +31,8 @@ class FindingOut(BaseModel):
     priority: str
     remediation: str | None
     cwe_id: str | None
+    # PR-56 — compliance cross-reference.
+    compliance_tags: list[str]
     first_seen_at: datetime
     last_seen_at: datetime
     acknowledged_at: datetime | None
@@ -42,6 +44,7 @@ class FindingPatch(BaseModel):
 
 
 def _out(f: Finding) -> FindingOut:
+    from app.merge.compliance import compliance_tags
     from app.merge.risk import priority_label
 
     return FindingOut(
@@ -57,6 +60,7 @@ def _out(f: Finding) -> FindingOut:
         priority=priority_label(f.risk_score),
         remediation=f.remediation,
         cwe_id=f.cwe_id,
+        compliance_tags=compliance_tags(f.cwe_id),
         first_seen_at=f.first_seen_at,
         last_seen_at=f.last_seen_at,
         acknowledged_at=f.acknowledged_at,

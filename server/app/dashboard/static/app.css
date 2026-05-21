@@ -877,7 +877,36 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
 .fix-detail p { margin: var(--sp-2) 0; font-size: 0.85rem; }
 .fix-detail .raw-detail summary { color: var(--text-muted); font-size: 0.78rem; }
 .cwe-link { font-size: 0.78rem; }
-.fix-actions { margin: var(--sp-2) 0; }
+.fix-actions {
+  margin: var(--sp-2) 0;
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+/* PR-56 — compliance pills + linked-plan badge. */
+.compliance-tags {
+  display: flex;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+  margin: var(--sp-2) 0;
+}
+.compliance-pill {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.4rem;
+  background: var(--warn-bg);
+  color: var(--warn);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+}
+.plan-badge {
+  font-size: 0.78rem;
+  padding: 0.15rem 0.5rem;
+  background: var(--success-bg);
+  color: var(--success);
+  border-radius: var(--radius-pill);
+  font-weight: 600;
+}
 .mini-btn {
   font-size: 0.8rem;
   padding: 0.25rem 0.6rem;

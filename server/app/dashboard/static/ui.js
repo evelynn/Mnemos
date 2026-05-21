@@ -1376,6 +1376,9 @@
       "L3 요약이 아직 없습니다 — 전체 분석을 실행하여 시스템 수준 서술을 생성하세요.",
     // PR-52 — finding → plan.
     "Create plan": "계획 생성",
+    // PR-56 — finding↔plan linkage.
+    "linked plan": "연결된 계획",
+    "linked plans": "연결된 계획",
     "Create a draft plan from this finding? You can review and edit it on the Plans tab.":
       "이 발견 항목으로 초안 계획을 생성할까요? Plans 탭에서 검토하고 수정할 수 있습니다.",
     "Draft plan created from finding.": "발견 항목으로 초안 계획이 생성되었습니다.",

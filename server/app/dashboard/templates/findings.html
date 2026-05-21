@@ -176,10 +176,17 @@ function _showNextFindingsPage() {
     const planBtn = (f.status === "open" || f.status === "acknowledged")
       ? `<button class="mini-btn" onclick="createPlanFromFinding('${escapeHtml(f.id)}')" data-i18n="Create plan">Create plan</button>`
       : "";
+    const compliance = (f.compliance_tags && f.compliance_tags.length)
+      ? `<div class="compliance-tags">`
+        + f.compliance_tags.map(t => `<span class="compliance-pill">${escapeHtml(t)}</span>`).join("")
+        + `</div>`
+      : "";
     const remediation = f.remediation
       ? `<details class="fix-detail"><summary>${escapeHtml(f.priority || "")} fix</summary>`
         + `<p>${escapeHtml(f.remediation)}</p>${cwe}`
-        + `<div class="fix-actions">${planBtn}</div>`
+        + compliance
+        + `<div class="fix-actions">${planBtn}`
+        + `<span class="related-plans" data-finding="${escapeHtml(f.id)}"></span></div>`
         + `<details class="raw-detail"><summary>raw</summary><pre>${escapeHtml(JSON.stringify(f.detail))}</pre></details>`
         + `</details>`
       : `<pre>${escapeHtml(JSON.stringify(f.detail))}</pre>${planBtn}`;
@@ -196,6 +203,27 @@ function _showNextFindingsPage() {
   tpl.innerHTML = html;
   tbody.appendChild(tpl.content);
   MnemosUI.applyI18n(tbody);
+  // PR-56 — lazily fill the "related plans" badge when its
+  // <details> is first opened, so we don't fire N fetches up front.
+  tbody.querySelectorAll(".fix-detail").forEach((det) => {
+    det.addEventListener("toggle", function onToggle() {
+      if (!det.open) return;
+      det.removeEventListener("toggle", onToggle);
+      const span = det.querySelector(".related-plans");
+      if (!span) return;
+      const fid = span.getAttribute("data-finding");
+      fetch(`/api/v1/findings/${fid}/plans`)
+        .then((r) => (r.ok ? r.json() : []))
+        .then((plans) => {
+          if (plans.length) {
+            span.innerHTML = `<span class="plan-badge">${plans.length} `
+              + MnemosUI.t(plans.length === 1 ? "linked plan" : "linked plans")
+              + `</span>`;
+          }
+        })
+        .catch(() => {});
+    });
+  });
   tbody.dataset.offset = String(next);
   const status = document.getElementById("findings-status");
   if (status) status.textContent = `Showing ${next} of ${total} findings.`;

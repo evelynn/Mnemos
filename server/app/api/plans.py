@@ -228,6 +228,51 @@ async def plan_from_finding(
     return _out(plan)
 
 
+@router.get("/api/v1/findings/{finding_id}/plans")
+async def plans_for_finding(
+    finding_id: uuid.UUID,
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+) -> list[PlanOut]:
+    """Plans spawned from a finding (PR-56 — Finding↔Plan linkage).
+
+    PR-52 recorded ``impact_report.source_finding_id`` when a Plan
+    was created from a finding, but the link was write-only — the
+    findings table couldn't show "you already opened a Plan for
+    this". This endpoint closes the loop: given a finding, return
+    every Plan whose impact_report names it.
+
+    Org-isolated via the finding's project.
+    """
+    finding = (
+        await db.execute(select(Finding).where(Finding.id == finding_id))
+    ).scalar_one_or_none()
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding_not_found")
+    from app.models.projects import Project
+
+    project = (
+        await db.execute(
+            select(Project).where(Project.id == finding.project_id)
+        )
+    ).scalar_one_or_none()
+    if project is None or project.organization_id != user.organization_id:
+        raise HTTPException(status_code=404, detail="finding_not_found")
+
+    rows = (
+        await db.execute(
+            select(Plan).where(Plan.project_id == finding.project_id)
+        )
+    ).scalars().all()
+    target = str(finding_id)
+    matched = [
+        p
+        for p in rows
+        if (p.impact_report or {}).get("source_finding_id") == target
+    ]
+    return [_out(p) for p in matched]
+
+
 @router.get(
     "/api/v1/projects/{project_id}/plans",
     dependencies=[Depends(require_project_org())],
