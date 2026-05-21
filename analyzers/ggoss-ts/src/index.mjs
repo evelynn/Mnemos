@@ -358,10 +358,70 @@ function cmdContracts(target, outPath) {
   if (outPath) out.end();
 }
 
+// Raw-SQL table extraction. ``_looksLikeSql`` is deliberately strict:
+// running it against real codebases showed a bare keyword ("update
+// the cache", "select an option") floods the graph with junk
+// entities, so a string is only treated as SQL when it *begins* with
+// a statement and carries that statement's mandatory clause.
+const _SQL_TABLE = [
+  // The READS ``FROM`` rule must not also fire on ``DELETE FROM``,
+  // which the WRITES rule below already owns.
+  { re: /(?<!DELETE\s{1,4})\bFROM\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "READS" },
+  { re: /\bJOIN\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "READS" },
+  { re: /\bINSERT\s+INTO\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "WRITES" },
+  { re: /\bUPDATE\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "WRITES" },
+  { re: /\bDELETE\s+FROM\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "WRITES" },
+];
+
+function _looksLikeSql(raw) {
+  // Drop the JS quote/backtick wrapper and any leading whitespace.
+  const s = raw.replace(/^[`'"\s]+/, "");
+  const head = s.slice(0, 14).toUpperCase();
+  if (head.startsWith("SELECT ")) return /\bFROM\b/i.test(s);
+  if (head.startsWith("UPDATE ")) return /\bSET\b/i.test(s);
+  if (head.startsWith("WITH ")) return /\bSELECT\b/i.test(s) && /\bFROM\b/i.test(s);
+  return (
+    head.startsWith("INSERT INTO ") ||
+    head.startsWith("DELETE FROM ") ||
+    head.startsWith("MERGE INTO ")
+  );
+}
+
+// JS built-ins whose statics collide with ORM verbs — ``Object.create``
+// is not a database write. Excluded from the capitalised-model branch.
+const _JS_BUILTINS = new Set([
+  "Object", "Array", "Map", "Set", "WeakMap", "WeakSet", "Promise",
+  "Math", "JSON", "Number", "String", "Boolean", "Symbol", "BigInt",
+  "Date", "RegExp", "Error", "Reflect", "Proxy", "console", "Intl",
+]);
+
+// Identifier names that mark a chain as a genuine ORM/DB client, so
+// ``prisma.user.findMany()`` is detected but ``node.children.find()``
+// — an ordinary array walk — is not.
+const _ORM_CLIENT = /^(prisma|prismaclient|db|dbclient|client|knex|orm|sequelize|datasource|repo|repository|conn|connection|pool|entitymanager|em)$/i;
+
+function _chainHasOrmClient(node) {
+  // Walk a property-access / call chain collecting identifier names;
+  // true iff any of them looks like a DB client.
+  let cur = node;
+  while (cur) {
+    if (cur.kind === ts.SyntaxKind.Identifier) {
+      return _ORM_CLIENT.test(cur.text);
+    }
+    if (cur.kind === ts.SyntaxKind.PropertyAccessExpression) {
+      if (_ORM_CLIENT.test(cur.name.text)) return true;
+      cur = cur.expression;
+    } else if (cur.kind === ts.SyntaxKind.CallExpression) {
+      cur = cur.expression;
+    } else {
+      return false;
+    }
+  }
+  return false;
+}
+
 // ORM / query-builder verbs. The receiver tells us the entity; the
-// verb tells us read vs write. Prisma exposes them as
-// ``client.<model>.<verb>()``; Sequelize / TypeORM as model statics
-// ``<Model>.<verb>()``.
+// verb tells us read vs write.
 const _DATA_READ_OPS = new Set([
   "find", "findone", "findall", "findmany", "findunique", "findfirst",
   "count", "aggregate", "select",
@@ -372,18 +432,17 @@ const _DATA_WRITE_OPS = new Set([
   "bulkcreate",
 ]);
 
-// Raw-SQL table extraction. A literal is only treated as SQL when it
-// carries a statement keyword, which keeps ordinary strings out.
-const _SQL_HINT = /\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE)\b/i;
-const _SQL_TABLE = [
-  // The READS ``FROM`` rule must not also fire on ``DELETE FROM``,
-  // which the WRITES rule below already owns.
-  { re: /(?<!DELETE\s{1,4})\bFROM\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "READS" },
-  { re: /\bJOIN\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "READS" },
-  { re: /\bINSERT\s+INTO\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "WRITES" },
-  { re: /\bUPDATE\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "WRITES" },
-  { re: /\bDELETE\s+FROM\s+[`"'[]?([A-Za-z_][\w.]*)/gi, access: "WRITES" },
-];
+// ORM-distinctive verbs — these rarely collide with ordinary code, so
+// they are the only ones trusted on the *un-client-gated* capitalised-
+// model branch. ``create`` / ``find`` / ``update`` are too generic
+// there (``NestFactory.create()`` is not a database write); on the
+// client-gated Prisma branch the client itself is the precision
+// guarantee, so all verbs are allowed there.
+const _DISTINCTIVE_OPS = new Set([
+  "findall", "findmany", "findunique", "findfirst", "findone",
+  "createmany", "updatemany", "updateone", "deletemany", "deleteone",
+  "bulkcreate", "upsert", "aggregate",
+]);
 
 function dataEntityName(raw) {
   // Strip quoting, drop any schema/owner qualifier (dbo.Orders → orders).
@@ -453,7 +512,7 @@ function cmdDataAccess(target, outPath) {
         node.kind === ts.SyntaxKind.TemplateExpression
       ) {
         const text = node.getText(sf);
-        if (_SQL_HINT.test(text)) {
+        if (_looksLikeSql(text)) {
           const s = sf.getLineAndCharacterOfPosition(node.getStart(sf));
           const site = { line: s.line + 1, col: s.character + 1 };
           for (const { re, access } of _SQL_TABLE) {
@@ -466,8 +525,10 @@ function cmdDataAccess(target, outPath) {
         }
       }
 
-      // (2) ORM-style method calls — prisma.<model>.<verb>() or
-      //     <Model>.<verb>() statics.
+      // (2) ORM-style method calls. Two shapes, each gated to keep
+      //     ordinary JS out: prisma.<model>.<verb>() — only when the
+      //     chain roots in a recognised DB client — and <Model>.<verb>()
+      //     statics — only for non-built-in capitalised receivers.
       if (
         node.kind === ts.SyntaxKind.CallExpression &&
         node.expression.kind === ts.SyntaxKind.PropertyAccessExpression
@@ -479,15 +540,21 @@ function cmdDataAccess(target, outPath) {
         if (isRead || isWrite) {
           const recv = expr.expression;
           let entity = null;
-          if (recv.kind === ts.SyntaxKind.PropertyAccessExpression) {
-            // client.<model>.<verb>()
+          if (
+            recv.kind === ts.SyntaxKind.PropertyAccessExpression &&
+            _chainHasOrmClient(recv.expression)
+          ) {
+            // client.<model>.<verb>() — the chain roots in a DB client.
             entity = recv.name.text;
           } else if (
             recv.kind === ts.SyntaxKind.Identifier &&
-            /^[A-Z]/.test(recv.text)
+            /^[A-Z]/.test(recv.text) &&
+            !_JS_BUILTINS.has(recv.text) &&
+            _DISTINCTIVE_OPS.has(op)
           ) {
-            // <Model>.<verb>() — gated on the capitalised-model
-            // convention so ordinary helper calls don't leak in.
+            // <Model>.<verb>() — capitalised, not a JS built-in, and
+            // an ORM-distinctive verb (so NestFactory.create() and
+            // other capitalised factories don't leak in).
             entity = recv.text;
           }
           if (entity) {
