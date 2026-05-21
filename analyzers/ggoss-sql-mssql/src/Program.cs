@@ -84,6 +84,19 @@ static string? FindConnArg(string[] args, string flag)
     return null;
 }
 
+// A table name is interpolated into a FROM clause (an identifier can't
+// be a bind parameter), so the only safe defence is to reject anything
+// that isn't a plain, optionally schema-qualified, identifier.
+static bool IsValidTableName(string? table) =>
+    table is not null &&
+    System.Text.RegularExpressions.Regex.IsMatch(
+        table, @"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$");
+
+// Hard row cap for the query verb (analyzer-contract §1.0).
+static int MaxRows() =>
+    int.TryParse(Environment.GetEnvironmentVariable("MNEMOS_MAX_ROWS"), out var n)
+        && n > 0 ? n : 10000;
+
 static async Task<int> LiveSchemaAsync(string[] args)
 {
     var conn = FindConnArg(args, "--conn") ?? Environment.GetEnvironmentVariable("MNEMOS_MSSQL_CONN");
@@ -159,9 +172,15 @@ static async Task<int> SampleAsync(string[] args)
         return 2;
     }
     var limit = int.TryParse(limitStr, out var n) ? Math.Clamp(n, 1, 100) : 10;
+    if (!IsValidTableName(table))
+    {
+        Console.Error.WriteLine(JsonSerializer.Serialize(new { level = "error", message = "invalid_table_name", recoverable = false }));
+        return 2;
+    }
 
     await using var c = new SqlConnection(conn);
     await c.OpenAsync();
+    // table is a validated plain identifier; limit is a clamped int.
     var sql = $"SELECT TOP ({limit}) * FROM {table}";
     await using var cmd = new SqlCommand(sql, c) { CommandTimeout = 10 };
     await using var rdr = await cmd.ExecuteReaderAsync();
@@ -192,11 +211,21 @@ static async Task<int> QueryAsync(string[] args)
         return 2;
     }
     var sql = await File.ReadAllTextAsync(sqlFile);
-    if (!sql.TrimStart().StartsWith("select", StringComparison.OrdinalIgnoreCase))
+    // A trailing ; is tolerated and stripped; an embedded one means a
+    // second statement (MSSQL runs batches) and is rejected.
+    var trimmed = sql.Trim().TrimEnd(';').Trim();
+    if (!trimmed.StartsWith("select", StringComparison.OrdinalIgnoreCase)
+        && !trimmed.StartsWith("with", StringComparison.OrdinalIgnoreCase))
     {
         Console.Error.WriteLine(JsonSerializer.Serialize(new { level = "error", message = "only_select_allowed", recoverable = false }));
         return 2;
     }
+    if (trimmed.Contains(';'))
+    {
+        Console.Error.WriteLine(JsonSerializer.Serialize(new { level = "error", message = "multi_statement_not_allowed", recoverable = false }));
+        return 2;
+    }
+    var maxRows = MaxRows();
     await using var c = new SqlConnection(conn);
     await c.OpenAsync();
     await using var cmd = new SqlCommand(sql, c) { CommandTimeout = 30 };
@@ -206,14 +235,16 @@ static async Task<int> QueryAsync(string[] args)
     for (int i = 0; i < rdr.FieldCount; i++)
         cols.Add(new { name = rdr.GetName(i), type = rdr.GetDataTypeName(i) });
     var rows = new List<object[]>();
+    var truncated = false;
     while (await rdr.ReadAsync())
     {
+        if (rows.Count >= maxRows) { truncated = true; break; }
         var row = new object?[rdr.FieldCount];
         for (int i = 0; i < rdr.FieldCount; i++)
             row[i] = rdr.IsDBNull(i) ? null : rdr.GetValue(i)?.ToString();
         rows.Add(row!);
     }
-    Emit("query_result", new { columns = cols, rows });
+    Emit("query_result", new { columns = cols, rows, rows_truncated = truncated });
     return 0;
 }
 
