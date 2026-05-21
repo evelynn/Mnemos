@@ -380,3 +380,95 @@ async def graph_certainty_breakdown(
         "nodes": {c: int(n) for c, n in node_rows.all()},
         "edges": {c: int(n) for c, n in edge_rows.all()},
     }
+
+
+@router.get(
+    "/projects/{project_id}/summaries",
+    dependencies=[Depends(require_project_org())],
+)
+async def list_summaries(
+    project_id: uuid.UUID,
+    _: CurrentUser,
+    level: int | None = None,
+    db: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Hierarchical L1-L3 summaries for the project (PR-53).
+
+    The value audit's C4 gap: L1-L3 summaries were *produced* by
+    the analysis pipeline but never *surfaced* — no API, no GUI.
+    The executive-report page reads ``?level=3`` for the
+    system-level narrative; ``?level=`` (all) drives a drill-down.
+
+    Only current summaries (``superseded_by IS NULL``) are
+    returned so an operator never reads a stale narrative.
+    """
+    from app.models.findings import Summary
+
+    stmt = (
+        select(Summary)
+        .where(
+            Summary.project_id == project_id,
+            Summary.superseded_by.is_(None),
+        )
+        .order_by(Summary.level.desc(), Summary.generated_at.desc())
+    )
+    if level is not None:
+        stmt = stmt.where(Summary.level == level)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [
+        {
+            "id": str(s.id),
+            "target_id": s.target_id,
+            "level": s.level,
+            "summary": s.summary,
+            "detailed": s.detailed,
+            "claims": s.claims or [],
+            "open_questions": s.open_questions or [],
+            "model_used": s.model_used,
+            "tokens_used": s.tokens_used,
+            "generated_at": s.generated_at.isoformat() if s.generated_at else None,
+        }
+        for s in rows
+    ]
+
+
+@router.get(
+    "/projects/{project_id}/llm_cost",
+    dependencies=[Depends(require_project_org())],
+)
+async def project_llm_cost(
+    project_id: uuid.UUID,
+    _: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """LLM token spend for the project (PR-53, audit C5).
+
+    The audit flagged that ``ANTHROPIC_API_KEY`` usage was
+    invisible — no way to estimate the monthly bill. Every
+    ``Summary`` row records ``tokens_used``; this sums them and
+    applies a coarse per-million-token rate so the dashboard can
+    show an order-of-magnitude cost. The rate is configurable via
+    ``MNEMOS_LLM_USD_PER_MTOK`` (default 3.0, ~Sonnet input).
+    """
+    import os
+
+    from app.models.findings import Summary
+
+    rows = (
+        await db.execute(
+            select(Summary.tokens_used, Summary.model_used).where(
+                Summary.project_id == project_id,
+                Summary.superseded_by.is_(None),
+            )
+        )
+    ).all()
+    total_tokens = sum(int(t or 0) for t, _ in rows)
+    summary_count = len(rows)
+    rate = float(os.environ.get("MNEMOS_LLM_USD_PER_MTOK", "3.0"))
+    est_usd = round((total_tokens / 1_000_000.0) * rate, 4)
+    return {
+        "summary_count": summary_count,
+        "total_tokens": total_tokens,
+        "rate_usd_per_mtok": rate,
+        "estimated_usd": est_usd,
+    }
