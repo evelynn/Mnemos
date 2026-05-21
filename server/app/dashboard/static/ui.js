@@ -1253,6 +1253,12 @@
     "Kind": "종류",
     "Subject": "대상",
     "Suggested fix": "권장 조치",
+    // PR-52 — finding → plan.
+    "Create plan": "계획 생성",
+    "Create a draft plan from this finding? You can review and edit it on the Plans tab.":
+      "이 발견 항목으로 초안 계획을 생성할까요? Plans 탭에서 검토하고 수정할 수 있습니다.",
+    "Draft plan created from finding.": "발견 항목으로 초안 계획이 생성되었습니다.",
+    "Open the Plans tab to review the new draft?": "Plans 탭을 열어 새 초안을 검토할까요?",
     // PR-51 — system-health panel.
     "Risk index": "위험 지수",
     "mean risk of open findings": "미해결 발견 평균 위험도",

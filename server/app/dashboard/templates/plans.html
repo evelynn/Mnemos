@@ -51,6 +51,17 @@ async function load(ev) {
   }, 0);
   return false;
 }
+// PR-52 — accept ?project=… so the "Create plan from finding"
+// flow can deep-link straight to the new draft.
+(function () {
+  const p = new URLSearchParams(window.location.search).get("project");
+  if (p) {
+    document.getElementById("pid").value = p;
+    const form = document.querySelector('form[onsubmit*="load"]');
+    if (form) form.dispatchEvent(new Event("submit"));
+  }
+})();
+
 async function decide(id, s) {
   const feedback = s === "reject" ? prompt("Feedback?") : null;
   const r = await fetch(`/api/v1/plans/${id}/decide`, {

@@ -872,6 +872,18 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
 .fix-detail p { margin: var(--sp-2) 0; font-size: 0.85rem; }
 .fix-detail .raw-detail summary { color: var(--text-muted); font-size: 0.78rem; }
 .cwe-link { font-size: 0.78rem; }
+.fix-actions { margin: var(--sp-2) 0; }
+.mini-btn {
+  font-size: 0.8rem;
+  padding: 0.25rem 0.6rem;
+  background: var(--accent);
+  color: var(--text-inverted);
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-weight: 600;
+}
+.mini-btn:hover { filter: brightness(1.1); }
 
 /* PR-44 — activity feed on the dashboard. */
 .activity-feed {

@@ -48,6 +48,25 @@
 <div id="out"></div>
 
 <script>
+async function createPlanFromFinding(findingId) {
+  if (!confirm(MnemosUI.t("Create a draft plan from this finding? You can review and edit it on the Plans tab."))) {
+    return;
+  }
+  const r = await fetch(`/api/v1/findings/${findingId}/plan`, { method: "POST" });
+  if (!r.ok) { await MnemosUI.showError("Plan creation failed", r); return; }
+  const plan = await r.json();
+  MnemosUI.notify(
+    MnemosUI.t("Draft plan created from finding."),
+    { body: plan.spec && plan.spec.title, level: "success" },
+  );
+  // Offer a jump to the Plans tab pre-filled with this project.
+  setTimeout(() => {
+    if (confirm(MnemosUI.t("Open the Plans tab to review the new draft?"))) {
+      window.location.href = "/plans?project=" + encodeURIComponent(plan.project_id);
+    }
+  }, 300);
+}
+
 async function loadHealthPanel(pid) {
   try {
     const r = await fetch(`/api/v1/projects/${pid}/findings/summary`);
@@ -153,12 +172,16 @@ function _showNextFindingsPage() {
     const cwe = f.cwe_id
       ? ` <a class="cwe-link" href="https://cwe.mitre.org/data/definitions/${escapeHtml(String(f.cwe_id).replace(/[^0-9]/g, ""))}.html" target="_blank" rel="noopener">${escapeHtml(f.cwe_id)}</a>`
       : "";
+    const planBtn = (f.status === "open" || f.status === "acknowledged")
+      ? `<button class="mini-btn" onclick="createPlanFromFinding('${escapeHtml(f.id)}')" data-i18n="Create plan">Create plan</button>`
+      : "";
     const remediation = f.remediation
       ? `<details class="fix-detail"><summary>${escapeHtml(f.priority || "")} fix</summary>`
         + `<p>${escapeHtml(f.remediation)}</p>${cwe}`
+        + `<div class="fix-actions">${planBtn}</div>`
         + `<details class="raw-detail"><summary>raw</summary><pre>${escapeHtml(JSON.stringify(f.detail))}</pre></details>`
         + `</details>`
-      : `<pre>${escapeHtml(JSON.stringify(f.detail))}</pre>`;
+      : `<pre>${escapeHtml(JSON.stringify(f.detail))}</pre>${planBtn}`;
     html += `<tr>`
       + `<td><span class="priority-pill ${priority}">${priority}</span></td>`
       + `<td><span class="risk-bar" style="--risk:${risk}">${risk}</span></td>`
