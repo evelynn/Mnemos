@@ -1,5 +1,5 @@
 {
-  "description": "Hand-labelled ground truth for the polyglot reference system. 'contracts' lists every HTTP contract that genuinely exists across the TS BFF and the C# API; 'ts_statically_resolvable' is the subset a static TS analyzer can find (the dynamic template-literal URL is deliberately excluded so recall is honest). Methodology: CAS / NIST SAMATE static-analysis tool evaluation — score the analyzer against a known answer key.",
+  "description": "Hand-labelled ground truth for the polyglot reference system. 'contracts' lists every HTTP contract that genuinely exists across the TS BFF and the C# API; 'ts_statically_resolvable' is the subset a static TS analyzer can find (the dynamic template-literal URL is deliberately excluded so recall is honest). The corpus also contains src/noise.ts — decoy constructs that look extractable but must yield nothing — so precision is measured under false-positive pressure, not just on a curated best case. Methodology: CAS / NIST SAMATE static-analysis tool evaluation — score the analyzer against a known answer key.",
   "contracts": [
     "http.GET./api/orders",
     "http.GET./api/orders/{id}",

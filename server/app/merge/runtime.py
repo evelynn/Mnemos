@@ -103,6 +103,25 @@ def _operation_of(span: dict[str, Any], attrs: dict[str, str]) -> str:
     return span.get("name", "")
 
 
+def _operation_matches(candidate: Any, observed: str) -> bool:
+    """True when a stored edge operation matches a runtime-observed
+    one — raw, or after the path-template normalisation contract ids
+    use, so a literal ``/api/orders/42`` matches a templated
+    ``/api/orders/{id}``. Non-path operations (a db ``SELECT orders``)
+    only match raw, never path-normalised.
+    """
+    if candidate is None or not observed:
+        return False
+    candidate = str(candidate)
+    if candidate == observed:
+        return True
+    if candidate.startswith("/") and observed.startswith("/"):
+        from app.merge.contract_id import normalize_http_path
+
+        return normalize_http_path(candidate) == normalize_http_path(observed)
+    return False
+
+
 def assemble_trace_tree(
     resource_spans: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -237,16 +256,20 @@ async def reconcile_observations(
         )
         candidates = (await db.execute(edge_q)).scalars().all()
         hit = None
+        obs_op = obs.operation
         for edge in candidates:
             edge_data = edge.data or {}
-            # Heuristic match: edge.data may carry ``operation`` or
-            # ``path`` set by the static analyzers. Either field
-            # matching the observation's ``operation`` counts as a
-            # hit.
-            if (
-                edge_data.get("operation") == obs.operation
-                or edge_data.get("path") == obs.operation
-                or edge_data.get("route") == obs.operation
+            # Heuristic match: edge.data may carry ``operation`` /
+            # ``path`` / ``route`` set by the static analyzers. An
+            # OTel ``http.route`` is the *templated* path, but a
+            # static analyzer may have stored a literal one (or vice
+            # versa), so compare both raw and after the same
+            # path-template normalisation contract ids use —
+            # otherwise a runtime ``/api/orders/{id}`` never matches a
+            # stored ``/api/orders/42``.
+            if any(
+                _operation_matches(edge_data.get(k), obs_op)
+                for k in ("operation", "path", "route")
             ):
                 hit = edge
                 break

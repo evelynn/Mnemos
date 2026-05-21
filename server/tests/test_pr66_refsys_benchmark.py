@@ -218,6 +218,38 @@ def test_data_entity_extraction_precision_recall():
     assert recall >= th["data_entity_recall_min"]
 
 
+def test_decoy_file_yields_no_false_positives():
+    """``noise.ts`` is full of constructs that look extractable —
+    ``Array.prototype.find``, a commented-out ``fetch``, a capitalised
+    ``Math.max``, SQL keywords in prose, a locally-shadowed ``fetch``.
+    The analyzer must emit nothing for any of them, so precision is
+    proven under false-positive pressure rather than on a curated
+    corpus."""
+    node = _node_with_typescript()
+    if node is None:
+        pytest.skip("node + typescript not available")
+    assert (_TS_WEB / "src" / "noise.ts").exists()
+
+    contracts = {
+        cid
+        for rec in _run_analyzer(node, "contracts")
+        if rec["record_type"] == "contract"
+        and (cid := _norm_http(rec)) is not None
+    }
+    entities = {
+        rec["data"]["id"]
+        for rec in _run_analyzer(node, "data_access")
+        if rec["record_type"] == "data_entity"
+    }
+    gt = _ground_truth()
+    # Nothing from the decoy file leaked in — the totals are still
+    # exactly the labelled answer key.
+    assert contracts == set(gt["ts_statically_resolvable"])
+    assert entities == set(gt["data_entities"])
+    assert not any("legacy" in c for c in contracts)
+    assert "data.items" not in entities and "data.values" not in entities
+
+
 def test_data_access_emits_directional_edges():
     """READS vs WRITES must reflect the operation — a benchmark of
     the edge semantics, not just node discovery."""
