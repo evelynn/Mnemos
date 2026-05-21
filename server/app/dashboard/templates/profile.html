@@ -70,7 +70,7 @@
 <script>
 async function loadProfile() {
   const r = await fetch("/api/v1/auth/me");
-  if (!r.ok) { MnemosUI.showError("Profile load failed", r); return; }
+  if (!r.ok) { await MnemosUI.showError("Profile load failed", r); return; }
   const u = await r.json();
   document.getElementById("pf-username").value = u.username || "";
   document.getElementById("pf-role").value = u.role || "";

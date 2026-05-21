@@ -148,7 +148,7 @@ function _renderFindingsPaginated(out, rows) {
     + '<tbody id="findings-tbody"></tbody></table>'
     + '<p class="muted" id="findings-status"></p> '
     + `<button type="button" class="primary" id="findings-more" hidden>`
-    + `Show next ${_FINDINGS_PAGE_SIZE}</button>`;
+    + `${MnemosUI.t("Show next $1", { 1: _FINDINGS_PAGE_SIZE })}</button>`;
   const tbody = document.getElementById("findings-tbody");
   tbody.dataset.offset = "0";
   tbody._rows = rows;
@@ -226,7 +226,10 @@ function _showNextFindingsPage() {
   });
   tbody.dataset.offset = String(next);
   const status = document.getElementById("findings-status");
-  if (status) status.textContent = `Showing ${next} of ${total} findings.`;
+  if (status) {
+    status.textContent = MnemosUI.t(
+      "Showing $1 of $2 findings.", { 1: next, 2: total });
+  }
   const more = document.getElementById("findings-more");
   if (more) {
     more.hidden = next >= total;
@@ -281,8 +284,13 @@ async function rebuild() {
   const params = new URLSearchParams(window.location.search);
   const status = params.get("status");
   const severity = params.get("severity");
+  const project = params.get("project");
   if (status) document.getElementById("st").value = status;
   if (severity) document.getElementById("sev").value = severity;
+  if (project) document.getElementById("pid").value = project;
+  // A deep-link with a project arrives ready to load — match the
+  // graph / report tabs, which auto-render on ?project=.
+  if (project) loadFindings(new Event("submit"));
 })();
 </script>
 {% endblock %}

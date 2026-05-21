@@ -391,9 +391,12 @@ function renderGraphSvg() {
     const labelY = n.y + r + 12;
     return `<g class="node" data-id="${escapeHtml(n.id)}">
       <circle class="${cls}" cx="${n.x}" cy="${n.y}" r="${r}"
+              tabindex="0" role="button"
+              aria-label="${escapeHtml(n.label || n.id)}"
               onmouseenter="_showGraphTip(event, '${escapeHtml(n.id)}')"
               onmouseleave="_hideGraphTip()"
-              onclick="_prefillConfirm('node', '${escapeHtml(n.id)}')"></circle>
+              onclick="_prefillConfirm('node', '${escapeHtml(n.id)}')"
+              onkeydown="_nodeKey(event, '${escapeHtml(n.id)}')"></circle>
       <text class="node-label" x="${n.x}" y="${labelY}" text-anchor="middle">
         ${escapeHtml((n.label || n.id).slice(0, 18))}
       </text>
@@ -491,11 +494,11 @@ function renderGraphCanvas() {
 
 // Pointer hit-test for the Canvas backend — finds the nearest node
 // within a small radius and reuses the shared tooltip.
-function _canvasHover(ev) {
-  if (document.getElementById("gcanvas-2d").hidden) return;
+function _canvasNodeAt(ev) {
   const canvas = document.getElementById("gcanvas-2d");
+  if (canvas.hidden) return null;
   const rect = canvas.getBoundingClientRect();
-  if (!rect.width || !rect.height) return;
+  if (!rect.width || !rect.height) return null;
   const mx = (ev.clientX - rect.left) * (800 / rect.width);
   const my = (ev.clientY - rect.top) * (600 / rect.height);
   let best = null, bestD = 12 * 12;
@@ -504,13 +507,37 @@ function _canvasHover(ev) {
     const d = dx * dx + dy * dy;
     if (d < bestD) { bestD = d; best = n; }
   }
+  return best;
+}
+
+function _canvasHover(ev) {
+  const best = _canvasNodeAt(ev);
   if (best) _showGraphTip(ev, best.id);
   else _hideGraphTip();
+}
+
+// Clicking a node on the Canvas backend pre-fills the confirm-fact
+// form — without this, PR-67's click-to-confirm only worked on the
+// SVG backend (graphs of 200 nodes or fewer).
+function _canvasClick(ev) {
+  const best = _canvasNodeAt(ev);
+  if (best) _prefillConfirm("node", best.id);
+}
+
+// Keyboard equivalent of clicking an SVG node — the circles carry
+// tabindex/role=button, so Enter or Space pre-fills the confirm form.
+function _nodeKey(ev, nodeId) {
+  if (ev.key === "Enter" || ev.key === " ") {
+    ev.preventDefault();
+    _prefillConfirm("node", nodeId);
+  }
 }
 document.getElementById("gcanvas-2d")
   .addEventListener("mousemove", _canvasHover);
 document.getElementById("gcanvas-2d")
   .addEventListener("mouseleave", _hideGraphTip);
+document.getElementById("gcanvas-2d")
+  .addEventListener("click", _canvasClick);
 
 function _showGraphTip(ev, nodeId) {
   const n = _gState.nodes.find(x => x.id === nodeId);

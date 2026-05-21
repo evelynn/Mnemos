@@ -1403,6 +1403,12 @@
     "Findings by kind": "종류별 발견",
     "System-level narrative (L3)": "시스템 수준 서술 (L3)",
     "Analysis cost": "분석 비용",
+    // PR-71 — report stat-card + L3 labels that were English-only.
+    "Mean TTR": "평균 해결 시간",
+    "7-day delta": "7일 증감",
+    "Open questions:": "미해결 질문:",
+    "Show next $1": "다음 $1개 보기",
+    "Showing $1 of $2 findings.": "$2개 중 $1개 표시 중.",
     // PR-63 — ROI rollup.
     "Return on investment": "투자 수익 (ROI)",
     "risk points eliminated": "위험 점수 제거됨",

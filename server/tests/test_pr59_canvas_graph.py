@@ -103,13 +103,15 @@ def test_canvas_reads_theme_colours():
 
 def test_canvas_hit_test_for_tooltip():
     """The canvas has no DOM nodes, so hover uses a pointer hit-test
-    that maps client coords back into the 800×600 layout space."""
+    that maps client coords back into the 800×600 layout space.
+    PR-71 factored the hit-test into _canvasNodeAt, shared by hover
+    and click."""
     body = _read(_TPL / "graph.html")
     assert "function _canvasHover(" in body
-    idx = body.find("function _canvasHover(")
+    idx = body.find("function _canvasNodeAt(")
     slab = body[idx:idx + 900]
     assert "getBoundingClientRect()" in slab
-    assert "_showGraphTip(" in slab
+    assert "_showGraphTip(" in body
     # Listener wired to mousemove on the canvas.
     assert '.addEventListener("mousemove", _canvasHover)' in body
 
