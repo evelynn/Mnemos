@@ -103,6 +103,7 @@ async function loadFindings(ev) {
   const sev = document.getElementById("sev").value;
   const st = document.getElementById("st").value;
   if (!pid) return false;
+  MnemosUI.rememberProject(pid);
   const qs = new URLSearchParams();
   if (sev) qs.set("severity", sev);
   if (st) qs.set("status", st);

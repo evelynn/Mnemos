@@ -158,6 +158,7 @@ async function loadGraph(ev) {
   ev && ev.preventDefault();
   const pid = document.getElementById("gpid").value.trim();
   if (!pid) return false;
+  MnemosUI.rememberProject(pid);
   const kind = document.getElementById("gkind").value;
   const limit = document.getElementById("glimit").value || "200";
   const qs = new URLSearchParams({ limit });

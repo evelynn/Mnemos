@@ -551,7 +551,12 @@
     list.innerHTML = entries.slice(0, 20).map(function (e, i) {
       var sub = e.sublabel ? '<span class="cmdk-sub muted">' + escapeHtml(String(e.sublabel)) + '</span>' : "";
       var sc = e.shortcut ? '<kbd class="cmdk-sc">' + escapeHtml(e.shortcut) + '</kbd>' : "";
-      var kindBadge = e.kind === "project" ? '<span class="cmdk-kind">project</span>' : "";
+      // PR-54 — kind badge for project / node / finding search hits.
+      var kindBadge = "";
+      if (e.kind === "project" || e.kind === "node" || e.kind === "finding") {
+        kindBadge = '<span class="cmdk-kind cmdk-kind-' + e.kind + '">'
+          + escapeHtml(e.kind) + '</span>';
+      }
       return '<li class="cmdk-item ' + (i === selected ? "active" : "") + '" data-href="' + escapeHtml(e.href) + '">' +
         kindBadge +
         '<span class="cmdk-label">' + escapeHtml(e.label) + '</span>' +
@@ -592,13 +597,104 @@
     if (overlay) overlay.classList.remove("open");
   }
 
+  // PR-54 — global search. When the operator's query is ≥ 3 chars
+  // and a project context is known (last project they visited, or
+  // a ``?project=`` in the URL), the palette also queries the
+  // graph-node search API and the findings list, so a search for
+  // "payment" surfaces graph symbols + findings, not just nav
+  // shortcuts. Debounced 250ms so each keystroke doesn't fire a
+  // fetch.
+  var _paletteSearchTimer = null;
+
+  function _currentProjectContext() {
+    var fromUrl = new URLSearchParams(window.location.search).get("project");
+    if (fromUrl) return fromUrl;
+    try {
+      return localStorage.getItem("mnemos_last_project") || "";
+    } catch (_) {
+      return "";
+    }
+  }
+
+  // Pages call this when the operator picks a project, so the
+  // command palette's global search has a context to query.
+  function rememberProject(projectId) {
+    if (!projectId) return;
+    try { localStorage.setItem("mnemos_last_project", projectId); } catch (_) {}
+  }
+
+  async function _remoteSearch(query) {
+    var pid = _currentProjectContext();
+    if (!pid || query.length < 3) return [];
+    var entries = [];
+    try {
+      var gr = await fetch(
+        "/api/v1/projects/" + encodeURIComponent(pid)
+        + "/graph/search?limit=8&q=" + encodeURIComponent(query)
+      );
+      if (gr.ok) {
+        var nodes = await gr.json();
+        nodes.forEach(function (n) {
+          entries.push({
+            kind: "node",
+            label: n.id,
+            sublabel: n.kind,
+            href: "/graph?project=" + encodeURIComponent(pid),
+          });
+        });
+      }
+    } catch (_) {}
+    try {
+      var fr = await fetch(
+        "/api/v1/projects/" + encodeURIComponent(pid) + "/findings?limit=8"
+      );
+      if (fr.ok) {
+        var findings = await fr.json();
+        var qLower = query.toLowerCase();
+        findings
+          .filter(function (f) {
+            return (f.kind || "").toLowerCase().indexOf(qLower) !== -1
+              || (f.subject_node_id || "").toLowerCase().indexOf(qLower) !== -1;
+          })
+          .forEach(function (f) {
+            entries.push({
+              kind: "finding",
+              label: f.kind + " · " + (f.priority || ""),
+              sublabel: f.subject_node_id || "",
+              href: "/findings?project=" + encodeURIComponent(pid),
+            });
+          });
+      }
+    } catch (_) {}
+    return entries;
+  }
+
   function _onPaletteInput(ev) {
     var overlay = _paletteEl();
     if (!overlay || !overlay._entries) return;
-    var filtered = _filterPaletteEntries(overlay._entries, ev.target.value);
+    var query = ev.target.value;
+    var filtered = _filterPaletteEntries(overlay._entries, query);
     overlay._filtered = filtered;
     overlay._selected = 0;
     _renderPaletteResults(filtered, 0);
+    // Debounced remote search merged in on top of the static
+    // (nav + project) results.
+    if (_paletteSearchTimer) clearTimeout(_paletteSearchTimer);
+    if (query.length >= 3) {
+      _paletteSearchTimer = setTimeout(function () {
+        _remoteSearch(query).then(function (remote) {
+          // Guard: the operator may have typed more since the
+          // fetch started — only merge if the box still matches.
+          var input = document.getElementById("cmdk-input");
+          if (!input || input.value !== query) return;
+          var merged = _filterPaletteEntries(overlay._entries, query)
+            .concat(remote);
+          overlay._filtered = merged;
+          overlay._selected = 0;
+          _renderPaletteResults(merged, 0);
+        });
+      }, 250);
+    }
   }
 
   function _onPaletteKey(ev) {
@@ -1457,6 +1553,7 @@
     readNotifications: readNotifications,
     clearNotifications: clearNotifications,
     mountCommentThread: mountCommentThread,
+    rememberProject: rememberProject,
   };
   // Convenience global — many existing templates already call
   // ``escapeHtml(x)`` without a namespace prefix.

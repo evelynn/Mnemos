@@ -684,6 +684,11 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
   text-transform: uppercase;
   font-weight: 600;
 }
+/* PR-54 — colour the search-hit kind badge so node / finding /
+   project results are scannable at a glance. */
+.cmdk-kind-node    { background: var(--accent-soft); color: var(--accent-strong); }
+.cmdk-kind-finding { background: var(--warn-bg); color: var(--warn); }
+.cmdk-kind-project { background: var(--success-bg); color: var(--success); }
 .cmdk-sc, kbd {
   display: inline-block;
   font-family: var(--font-mono);
