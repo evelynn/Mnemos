@@ -799,6 +799,35 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
   resize: vertical;
 }
 
+/* PR-51 — system-health panel on the findings tab. */
+.health-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--sp-3);
+  margin: var(--sp-4) 0;
+}
+.health-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3);
+  background: var(--surface);
+}
+.health-card.health-index { border-left: 4px solid var(--accent); }
+.health-card h3 {
+  margin: 0 0 var(--sp-1);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.health-card .big {
+  font-size: 1.6rem;
+  font-weight: 600;
+}
+.health-card .big.ok   { color: var(--success); }
+.health-card .big.warn { color: var(--warn); }
+.health-card .big.fail { color: var(--danger); }
+
 /* PR-50 — finding priority pill + risk bar.
  *
  * Priority is the at-a-glance triage signal; the risk bar is the

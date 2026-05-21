@@ -1253,6 +1253,15 @@
     "Kind": "종류",
     "Subject": "대상",
     "Suggested fix": "권장 조치",
+    // PR-51 — system-health panel.
+    "Risk index": "위험 지수",
+    "mean risk of open findings": "미해결 발견 평균 위험도",
+    "P1 open": "P1 미해결",
+    "fix these first": "최우선 조치 대상",
+    "Open / total": "미해결 / 전체",
+    "Mean time to resolve": "평균 해결 시간",
+    "Last 7 days": "최근 7일",
+    "resolved − new": "해결 − 신규",
     // PR-41 — notification centre + responsive.
     "Notifications": "알림",
     "Clear all": "모두 지우기",

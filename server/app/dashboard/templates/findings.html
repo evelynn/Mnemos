@@ -15,9 +15,69 @@
   <button type="button" onclick="rebuild()" data-i18n="Rebuild">Rebuild</button>
   <button type="button" onclick="exportFindings()" data-i18n="Export CSV">Export CSV</button>
 </form>
+
+<!-- PR-51 — system-health panel (audit C). The risk index + the
+     P1-open count + the 7-day deltas turn the findings list into
+     a business dashboard an operator can report up from. -->
+<section id="health-panel" class="health-panel" hidden>
+  <div class="health-card health-index">
+    <h3 data-i18n="Risk index">Risk index</h3>
+    <div class="big" id="h-risk-index">—</div>
+    <span class="muted" data-i18n="mean risk of open findings">mean risk of open findings</span>
+  </div>
+  <div class="health-card">
+    <h3 data-i18n="P1 open">P1 open</h3>
+    <div class="big" id="h-p1">—</div>
+    <span class="muted" data-i18n="fix these first">fix these first</span>
+  </div>
+  <div class="health-card">
+    <h3 data-i18n="Open / total">Open / total</h3>
+    <div class="big" id="h-open">—</div>
+  </div>
+  <div class="health-card">
+    <h3 data-i18n="Mean time to resolve">Mean time to resolve</h3>
+    <div class="big" id="h-mttr">—</div>
+  </div>
+  <div class="health-card">
+    <h3 data-i18n="Last 7 days">Last 7 days</h3>
+    <div class="big" id="h-delta">—</div>
+    <span class="muted" data-i18n="resolved − new">resolved − new</span>
+  </div>
+</section>
+
 <div id="out"></div>
 
 <script>
+async function loadHealthPanel(pid) {
+  try {
+    const r = await fetch(`/api/v1/projects/${pid}/findings/summary`);
+    if (!r.ok) return;
+    const s = await r.json();
+    const panel = document.getElementById("health-panel");
+    panel.hidden = false;
+    // Risk index — colour-coded, low is good.
+    const idxEl = document.getElementById("h-risk-index");
+    idxEl.textContent = s.risk_index;
+    idxEl.className = "big " + (
+      s.risk_index >= 60 ? "fail" : s.risk_index >= 35 ? "warn" : "ok"
+    );
+    const p1El = document.getElementById("h-p1");
+    p1El.textContent = s.open_p1;
+    p1El.className = "big " + (s.open_p1 > 0 ? "fail" : "ok");
+    document.getElementById("h-open").textContent = `${s.open} / ${s.total}`;
+    document.getElementById("h-mttr").textContent =
+      s.mean_time_to_resolve_h != null
+        ? `${s.mean_time_to_resolve_h} h`
+        : "—";
+    // 7-day delta: resolved minus new. Positive = shrinking backlog.
+    const delta = (s.resolved_last_7d || 0) - (s.new_last_7d || 0);
+    const deltaEl = document.getElementById("h-delta");
+    deltaEl.textContent = (delta >= 0 ? "+" : "") + delta;
+    deltaEl.className = "big " + (delta >= 0 ? "ok" : "warn");
+    deltaEl.title = `${s.resolved_last_7d} resolved, ${s.new_last_7d} new`;
+  } catch (_) {}
+}
+
 async function loadFindings(ev) {
   ev.preventDefault();
   const pid = document.getElementById("pid").value.trim();
@@ -38,6 +98,8 @@ async function loadFindings(ev) {
   try {
     localStorage.setItem("mnemos_onboarding_step3_done", "1");
   } catch (_) {}
+  // PR-51 — load the system-health rollup alongside the list.
+  loadHealthPanel(pid);
   const out = document.getElementById("out");
   if (!Array.isArray(rows) || rows.length === 0) {
     out.innerHTML = '<p class="muted" data-i18n="No findings.">No findings.</p>';

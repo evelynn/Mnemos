@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -156,3 +156,100 @@ async def rebuild_findings(
         details=stats,
     )
     return stats
+
+
+@router.get(
+    "/api/v1/projects/{project_id}/findings/summary",
+    dependencies=[Depends(require_project_org())],
+)
+async def findings_summary(
+    project_id: uuid.UUID,
+    _: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Business-analysis rollup for the project (PR-51, audit C).
+
+    The 19th-round value audit scored "비즈니스 분석 기능" at
+    30/100 — the platform had no health overview, no trend, no
+    coverage metric. This endpoint is the single call the
+    dashboard's "System health" panel makes:
+
+      {
+        "total": int,
+        "open": int,
+        "by_priority": {"P1": n, "P2": n, "P3": n, "P4": n},
+        "by_status": {"open": n, "acknowledged": n, "resolved": n,
+                      "false_positive": n},
+        "by_kind": {"duplicate_endpoint": n, …},
+        "risk_index": int,          # 0-100 weighted health number
+        "mean_time_to_resolve_h": float | None,
+        "open_p1": int,             # the "fix these now" count
+        "resolved_last_7d": int,    # progress signal
+        "new_last_7d": int,         # influx signal
+      }
+
+    ``risk_index`` is the headline: the mean risk_score across all
+    *open* findings. A team chasing P1s down sees this number
+    fall week over week — that's the ROI signal the audit's C6
+    asked for.
+    """
+    from app.merge.risk import priority_label
+
+    rows = (
+        await db.execute(
+            select(Finding).where(Finding.project_id == project_id)
+        )
+    ).scalars().all()
+
+    by_priority = {"P1": 0, "P2": 0, "P3": 0, "P4": 0}
+    by_status: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
+    open_risk_total = 0
+    open_count = 0
+    open_p1 = 0
+    resolve_durations: list[float] = []
+    now = datetime.now(tz=timezone.utc)
+    week_ago = now - timedelta(days=7)
+    resolved_last_7d = 0
+    new_last_7d = 0
+
+    for f in rows:
+        by_status[f.status] = by_status.get(f.status, 0) + 1
+        by_kind[f.kind] = by_kind.get(f.kind, 0) + 1
+        is_open = f.status in {"open", "acknowledged"}
+        if is_open:
+            open_count += 1
+            open_risk_total += f.risk_score
+            label = priority_label(f.risk_score)
+            by_priority[label] += 1
+            if label == "P1":
+                open_p1 += 1
+        if f.first_seen_at and f.first_seen_at >= week_ago:
+            new_last_7d += 1
+        if f.resolved_at is not None:
+            if f.resolved_at >= week_ago:
+                resolved_last_7d += 1
+            if f.first_seen_at is not None:
+                hours = (f.resolved_at - f.first_seen_at).total_seconds() / 3600.0
+                if hours >= 0:
+                    resolve_durations.append(hours)
+
+    mttr = (
+        round(sum(resolve_durations) / len(resolve_durations), 1)
+        if resolve_durations
+        else None
+    )
+    risk_index = round(open_risk_total / open_count) if open_count else 0
+
+    return {
+        "total": len(rows),
+        "open": open_count,
+        "by_priority": by_priority,
+        "by_status": by_status,
+        "by_kind": by_kind,
+        "risk_index": risk_index,
+        "mean_time_to_resolve_h": mttr,
+        "open_p1": open_p1,
+        "resolved_last_7d": resolved_last_7d,
+        "new_last_7d": new_last_7d,
+    }
