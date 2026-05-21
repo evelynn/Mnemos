@@ -287,5 +287,42 @@ loadReady();
 loadSummary();
 loadMetricsSummary();
 loadActivity();
+
+// PR-57 — first-run guided tour. Fires once per browser; the
+// operator can re-trigger it from the Profile page.
+function runWelcomeTour() {
+  MnemosUI.startTour([
+    {
+      selector: null,
+      title: MnemosUI.t("Welcome to Mnemos"),
+      body: MnemosUI.t("Mnemos turns a large multi-language codebase into a queryable knowledge graph, then flags risks as prioritised findings. This 4-step tour shows the main surfaces."),
+    },
+    {
+      selector: '.sidebar nav a[href="/projects"]',
+      title: MnemosUI.t("1. Register a project"),
+      body: MnemosUI.t("Start here — add a GitLab project. Mnemos clones it, runs the analyzers, and builds the graph."),
+    },
+    {
+      selector: '.sidebar nav a[href="/findings"]',
+      title: MnemosUI.t("2. Review findings"),
+      body: MnemosUI.t("Findings are risks the analysis surfaced — sorted by a 0-100 risk score. Each one carries a suggested fix and a one-click 'Create plan' button."),
+    },
+    {
+      selector: '.sidebar nav a[href="/graph"]',
+      title: MnemosUI.t("3. Explore the graph"),
+      body: MnemosUI.t("The Graph tab visualises components and their CALLS / EXPOSES relationships. Solid edges are confirmed by runtime traces."),
+    },
+    {
+      selector: '.sidebar nav a[href="/report"]',
+      title: MnemosUI.t("4. Share the report"),
+      body: MnemosUI.t("The Report tab generates a printable one-pager — health, trend, and the system-level narrative — for a PM or lead."),
+    },
+  ]);
+}
+
+if (!MnemosUI.tourDone()) {
+  // Small delay so the dashboard has painted first.
+  setTimeout(runWelcomeTour, 700);
+}
 </script>
 {% endblock %}

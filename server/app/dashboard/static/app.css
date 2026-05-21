@@ -989,3 +989,101 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
 .verdict.clean::before { content: "✓ "; }
 .verdict.warn::before { content: "⚠ "; }
 .verdict.blocked::before { content: "⛔ "; }
+
+/* PR-57 — guided tour spotlight + contextual-help modal. */
+.tour-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.55);
+}
+.tour-spotlight {
+  position: fixed;
+  border-radius: var(--radius-md);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  border: 2px solid var(--accent);
+  pointer-events: none;
+  transition: all 0.2s ease-out;
+}
+.tour-pop {
+  position: fixed;
+  width: 320px;
+  background: var(--surface);
+  color: var(--text);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  padding: var(--sp-4);
+}
+.tour-pop h3 { margin: 0 0 var(--sp-2); font-size: 1rem; }
+.tour-pop p { margin: 0 0 var(--sp-3); font-size: 0.88rem; }
+.tour-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.tour-nav-btns { display: flex; gap: var(--sp-2); }
+.tour-nav button {
+  font-size: 0.82rem;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.tour-nav button.primary {
+  background: var(--accent);
+  color: var(--text-inverted);
+  border-color: var(--accent);
+}
+.tour-nav button:disabled { opacity: 0.4; cursor: default; }
+
+.help-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text-muted);
+  font-weight: 700;
+  font-size: 0.8rem;
+  cursor: pointer;
+  margin-left: var(--sp-2);
+}
+.help-btn:hover { background: var(--accent); color: var(--text-inverted); border-color: var(--accent); }
+.help-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  background: rgba(0, 0, 0, 0.45);
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 10vh;
+}
+.help-modal-box {
+  width: min(560px, calc(100vw - 32px));
+  background: var(--surface);
+  color: var(--text);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.help-modal-box header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-soft);
+}
+.help-modal-box header h3 { margin: 0; font-size: 1rem; }
+.help-modal-box header button {
+  background: transparent;
+  border: 0;
+  font-size: 1rem;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+#help-modal-body { padding: var(--sp-4); font-size: 0.9rem; }
+#help-modal-body h4 { margin: var(--sp-3) 0 var(--sp-1); }

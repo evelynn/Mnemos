@@ -1218,6 +1218,29 @@
     // Onboarding card
     "Welcome to Mnemos": "Mnemos에 오신 것을 환영합니다",
     "Register a GitLab project": "GitLab 프로젝트 등록",
+    // PR-57 — guided tour + help.
+    "Skip": "건너뛰기",
+    "Back": "이전",
+    "Next": "다음",
+    "Done": "완료",
+    "Help": "도움말",
+    "Replay welcome tour": "환영 투어 다시 보기",
+    "Replay the guided tour of the main dashboard surfaces.":
+      "주요 대시보드 화면의 가이드 투어를 다시 봅니다.",
+    "Mnemos turns a large multi-language codebase into a queryable knowledge graph, then flags risks as prioritised findings. This 4-step tour shows the main surfaces.":
+      "Mnemos 는 거대한 다중 언어 코드베이스를 조회 가능한 지식 그래프로 만들고, 위험을 우선순위가 매겨진 발견 항목으로 표시합니다. 이 4단계 투어가 주요 화면을 안내합니다.",
+    "1. Register a project": "1. 프로젝트 등록",
+    "Start here — add a GitLab project. Mnemos clones it, runs the analyzers, and builds the graph.":
+      "여기서 시작하세요 — GitLab 프로젝트를 추가합니다. Mnemos 가 클론하고, 분석기를 실행하고, 그래프를 만듭니다.",
+    "2. Review findings": "2. 발견 항목 검토",
+    "Findings are risks the analysis surfaced — sorted by a 0-100 risk score. Each one carries a suggested fix and a one-click 'Create plan' button.":
+      "발견 항목은 분석이 드러낸 위험으로, 0-100 위험 점수로 정렬됩니다. 각 항목은 권장 조치와 원클릭 '계획 생성' 버튼을 제공합니다.",
+    "3. Explore the graph": "3. 그래프 탐색",
+    "The Graph tab visualises components and their CALLS / EXPOSES relationships. Solid edges are confirmed by runtime traces.":
+      "Graph 탭은 컴포넌트와 CALLS / EXPOSES 관계를 시각화합니다. 실선 엣지는 런타임 트레이스로 확인된 것입니다.",
+    "4. Share the report": "4. 보고서 공유",
+    "The Report tab generates a printable one-pager — health, trend, and the system-level narrative — for a PM or lead.":
+      "Report 탭은 PM 또는 리드를 위한 인쇄 가능한 1페이지 보고서 — 건강, 추이, 시스템 수준 서술 — 를 생성합니다.",
     "Run the first analysis": "첫 분석 실행",
     "Review the results": "결과 검토",
     // Empty / status text
@@ -1539,8 +1562,149 @@
     });
   }
 
+  // ─── Guided tour + contextual help (PR-57, audit D4) ─────────────
+  //
+  // The value reassessment found D4 (learning curve) had *fallen*
+  // to 48 — five new tabs (graph, report, palette) without any
+  // teaching material. This layer adds two things:
+  //
+  //   1. ``MnemosUI.startTour(steps)`` — a vanilla spotlight tour.
+  //      Each step is {selector, title, body}; the engine dims the
+  //      page, highlights the target, and shows a tooltip with
+  //      Back / Next / Done. No library, no dependency.
+  //   2. ``MnemosUI.helpButton(html)`` — a "?" button a page drops
+  //      in its header; clicking it opens a modal with the page's
+  //      contextual help.
+  //
+  // The dashboard fires a one-time welcome tour on first visit
+  // (keyed off ``localStorage["mnemos_tour_done"]``).
+
+  function _ensureTourEls() {
+    var overlay = document.getElementById("tour-overlay");
+    if (overlay) return overlay;
+    overlay = document.createElement("div");
+    overlay.id = "tour-overlay";
+    overlay.className = "tour-overlay";
+    overlay.innerHTML =
+      '<div class="tour-spotlight" id="tour-spotlight"></div>'
+      + '<div class="tour-pop" id="tour-pop" role="dialog" aria-modal="true">'
+      + '<h3 id="tour-title"></h3>'
+      + '<p id="tour-body"></p>'
+      + '<div class="tour-nav">'
+      + '<span id="tour-progress" class="muted"></span>'
+      + '<span class="tour-nav-btns">'
+      + '<button type="button" id="tour-skip">' + t("Skip") + '</button>'
+      + '<button type="button" id="tour-back">' + t("Back") + '</button>'
+      + '<button type="button" id="tour-next" class="primary">' + t("Next") + '</button>'
+      + '</span></div></div>';
+    document.body.appendChild(overlay);
+    return overlay;
+  }
+
+  var _tourSteps = [];
+  var _tourIdx = 0;
+
+  function _renderTourStep() {
+    var step = _tourSteps[_tourIdx];
+    if (!step) return _endTour();
+    var spotlight = document.getElementById("tour-spotlight");
+    var pop = document.getElementById("tour-pop");
+    var target = step.selector
+      ? document.querySelector(step.selector)
+      : null;
+    document.getElementById("tour-title").textContent = step.title || "";
+    document.getElementById("tour-body").textContent = step.body || "";
+    document.getElementById("tour-progress").textContent =
+      (_tourIdx + 1) + " / " + _tourSteps.length;
+    document.getElementById("tour-back").disabled = _tourIdx === 0;
+    document.getElementById("tour-next").textContent =
+      _tourIdx === _tourSteps.length - 1 ? t("Done") : t("Next");
+    if (target) {
+      var r = target.getBoundingClientRect();
+      spotlight.style.display = "block";
+      spotlight.style.top = (r.top - 6) + "px";
+      spotlight.style.left = (r.left - 6) + "px";
+      spotlight.style.width = (r.width + 12) + "px";
+      spotlight.style.height = (r.height + 12) + "px";
+      // Place the popover below the target, or above if no room.
+      var below = r.bottom + 12;
+      pop.style.top = (below + 160 > window.innerHeight ? r.top - 170 : below) + "px";
+      pop.style.left = Math.max(12, Math.min(r.left, window.innerWidth - 320)) + "px";
+    } else {
+      spotlight.style.display = "none";
+      pop.style.top = "30vh";
+      pop.style.left = "calc(50vw - 160px)";
+    }
+  }
+
+  function _endTour() {
+    var overlay = document.getElementById("tour-overlay");
+    if (overlay) overlay.remove();
+    try { localStorage.setItem("mnemos_tour_done", "1"); } catch (_) {}
+  }
+
+  function startTour(steps) {
+    if (!steps || !steps.length) return;
+    _tourSteps = steps;
+    _tourIdx = 0;
+    var overlay = _ensureTourEls();
+    overlay.style.display = "block";
+    document.getElementById("tour-next").onclick = function () {
+      if (_tourIdx >= _tourSteps.length - 1) return _endTour();
+      _tourIdx += 1;
+      _renderTourStep();
+    };
+    document.getElementById("tour-back").onclick = function () {
+      if (_tourIdx > 0) { _tourIdx -= 1; _renderTourStep(); }
+    };
+    document.getElementById("tour-skip").onclick = _endTour;
+    _renderTourStep();
+  }
+
+  function tourDone() {
+    try { return localStorage.getItem("mnemos_tour_done") === "1"; }
+    catch (_) { return false; }
+  }
+
+  // Contextual help — a "?" button that opens a modal.
+  function helpButton(titleKey, bodyHtml) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "help-btn";
+    btn.setAttribute("aria-label", t("Help"));
+    btn.textContent = "?";
+    btn.addEventListener("click", function () {
+      var modal = document.getElementById("help-modal");
+      if (!modal) {
+        modal = document.createElement("div");
+        modal.id = "help-modal";
+        modal.className = "help-modal";
+        modal.innerHTML =
+          '<div class="help-modal-box">'
+          + '<header><h3 id="help-modal-title"></h3>'
+          + '<button type="button" id="help-modal-close" aria-label="'
+          + t("Close") + '">✕</button></header>'
+          + '<div id="help-modal-body"></div></div>';
+        document.body.appendChild(modal);
+        modal.addEventListener("click", function (ev) {
+          if (ev.target === modal
+              || ev.target.id === "help-modal-close") {
+            modal.style.display = "none";
+          }
+        });
+      }
+      document.getElementById("help-modal-title").textContent = t(titleKey);
+      document.getElementById("help-modal-body").innerHTML = bodyHtml;
+      modal.style.display = "flex";
+    });
+    return btn;
+  }
+
   window.MnemosUI = {
     showToast: showToast,
+    startTour: startTour,
+    tourDone: tourDone,
+    helpButton: helpButton,
     showError: showError,
     renderJson: renderJson,
     renderJsonFromScript: renderJsonFromScript,

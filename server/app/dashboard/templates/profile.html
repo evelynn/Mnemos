@@ -59,6 +59,14 @@
   </form>
 </section>
 
+<section>
+  <h2 data-i18n="Help">Help</h2>
+  <p class="muted" data-i18n="Replay the guided tour of the main dashboard surfaces.">
+    Replay the guided tour of the main dashboard surfaces.
+  </p>
+  <button type="button" id="replay-tour" data-i18n="Replay welcome tour">Replay welcome tour</button>
+</section>
+
 <script>
 async function loadProfile() {
   const r = await fetch("/api/v1/auth/me");
@@ -112,5 +120,11 @@ async function changePassword(ev) {
 }
 
 loadProfile();
+
+// PR-57 — let an operator replay the welcome tour.
+document.getElementById("replay-tour")?.addEventListener("click", function () {
+  try { localStorage.removeItem("mnemos_tour_done"); } catch (_) {}
+  window.location.href = "/";
+});
 </script>
 {% endblock %}
