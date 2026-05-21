@@ -5,11 +5,38 @@ deployment, last updated PR-37. Spec §1.5 — "register a real C# +
 TS + MSSQL/Oracle system via GUI → first full analysis in ≤ 8
 hours" — is the bar; this doc tells an operator how close we are.
 
-**Readiness estimate**: ~85-88% (PR-36). Every gap below the
-"What's *not* yet verified" header needs a staging environment
-(live Oracle/MSSQL DB, real GitLab dev server, ANTHROPIC_API_KEY) —
-not more code. The 12 e2e scenarios D1..D5 the audit pass
+**Readiness estimate**: ~88-90% (PR-66). The remaining gaps need a
+staging environment (live Oracle/MSSQL DB, real GitLab dev server,
+ANTHROPIC_API_KEY). The 12 e2e scenarios D1..D5 the audit pass
 identified are all closed by PR-32..PR-36.
+
+## Analyzer accuracy benchmark (PR-66)
+
+"Analyzer accuracy can't be verified without a staging environment"
+conflated a production *deployment* with *verification*. The
+static-analysis literature (NIST SAMATE / CAS tool evaluations)
+settles the question: you measure an analyzer against a *labelled
+corpus* with a known answer key and score precision / recall.
+
+``server/tests/fixtures/refsys/`` is that corpus — a small but
+realistically-shaped polyglot system: a TypeScript BFF that calls a
+C# API over HTTP and also reads/writes the database directly.
+``ground_truth.json`` is the answer key. ``test_pr66_refsys_
+benchmark.py`` runs the **real** TypeScript analyzer over it, joins
+the result against the C# analyzer's recorded output, and scores it:
+
+| Metric | Measured | Threshold |
+|---|---|---|
+| Contract extraction precision | 1.00 | ≥ 0.95 |
+| Contract extraction recall | 0.75 | ≥ 0.70 |
+| Data-entity extraction precision / recall | 1.00 / 1.00 | ≥ 0.95 / 1.00 |
+| Cross-language Contract joins (spec §2.2) | 3 | ≥ 3 |
+
+Recall is deliberately below 1.0: the corpus includes a dynamic
+template-literal URL that static analysis genuinely cannot resolve,
+so the figure reflects the real limitation rather than a curated
+best case. The benchmark is a CI regression guard — an analyzer
+change that drops a contract or invents a spurious one fails it.
 
 ## Headline
 
