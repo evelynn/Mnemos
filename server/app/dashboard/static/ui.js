@@ -1490,6 +1490,19 @@
     "Pipeline monitor": "파이프라인 모니터",
     "Recent runs": "최근 실행",
     "Register project": "프로젝트 등록",
+    // PR-58 — pipeline latency.
+    "Pipeline latency": "파이프라인 지연",
+    "Where the analysis time goes, averaged over recent runs. Tune the slowest stage first.":
+      "최근 실행 평균 기준 분석 시간 분포. 가장 느린 단계를 먼저 튜닝하세요.",
+    "Load latency": "지연 불러오기",
+    "No completed runs to measure yet.": "측정할 완료된 실행이 아직 없습니다.",
+    "runs analysed": "개 실행 분석됨",
+    "mean total": "평균 총시간",
+    "slowest": "가장 느림",
+    "Stage": "단계",
+    "Mean (s)": "평균 (초)",
+    "p95 (s)": "p95 (초)",
+    "Max (s)": "최대 (초)",
     "Sign in with SSO": "SSO 로 로그인",
     "Loaded shared approval context — paste the token to approve.":
       "공유된 승인 컨텍스트가 로드되었습니다 — 토큰을 붙여넣어 승인하세요.",

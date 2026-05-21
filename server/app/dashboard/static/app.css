@@ -1087,3 +1087,12 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
 }
 #help-modal-body { padding: var(--sp-4); font-size: 0.9rem; }
 #help-modal-body h4 { margin: var(--sp-3) 0 var(--sp-1); }
+
+/* PR-58 — pipeline latency bar. */
+.lat-bar {
+  display: inline-block;
+  height: 12px;
+  background: var(--accent);
+  border-radius: var(--radius-sm);
+  min-width: 2px;
+}

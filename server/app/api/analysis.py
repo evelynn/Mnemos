@@ -383,6 +383,114 @@ async def graph_certainty_breakdown(
 
 
 @router.get(
+    "/projects/{project_id}/pipeline_latency",
+    dependencies=[Depends(require_project_org())],
+)
+async def pipeline_latency(
+    project_id: uuid.UUID,
+    _: CurrentUser,
+    runs: int = 10,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Per-stage latency for the project's recent runs (PR-58,
+    audit A8).
+
+    The value audit's A8 finding: "Always-on latency 미측정 —
+    각 stage 타이밍은 analysis_stages 에 기록되지만 운영자에게
+    가시화 안 됨". Spec §1.5 promises "first full analysis in
+    ≤ 8 hours" — but an operator had no way to *see* where the
+    time goes.
+
+    Returns:
+
+      {
+        "runs_analysed": int,
+        "stages": [
+          {"name": str,
+           "mean_sec": float,
+           "max_sec": float,
+           "p95_sec": float,
+           "samples": int},
+          …
+        ],
+        "mean_total_sec": float | None,   # webhook→done wall clock
+        "slowest_stage": str | None,
+      }
+
+    The slowest-stage callout tells an operator which analyzer to
+    tune first.
+    """
+    # Most-recent N completed runs for the project.
+    recent_runs = (
+        await db.execute(
+            select(AnalysisRun.id, AnalysisRun.started_at, AnalysisRun.completed_at)
+            .where(AnalysisRun.project_id == project_id)
+            .order_by(AnalysisRun.created_at.desc())
+            .limit(max(1, min(runs, 100)))
+        )
+    ).all()
+    run_ids = [r[0] for r in recent_runs]
+
+    total_durations: list[float] = []
+    for _id, started, completed in recent_runs:
+        if started is not None and completed is not None:
+            secs = (completed - started).total_seconds()
+            if secs >= 0:
+                total_durations.append(secs)
+
+    per_stage: dict[str, list[float]] = {}
+    if run_ids:
+        stage_rows = (
+            await db.execute(
+                select(
+                    AnalysisStage.name,
+                    AnalysisStage.started_at,
+                    AnalysisStage.completed_at,
+                ).where(AnalysisStage.run_id.in_(run_ids))
+            )
+        ).all()
+        for name, started, completed in stage_rows:
+            if started is None or completed is None:
+                continue
+            secs = (completed - started).total_seconds()
+            if secs < 0:
+                continue
+            per_stage.setdefault(name, []).append(secs)
+
+    def _p95(values: list[float]) -> float:
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        idx = min(len(ordered) - 1, int(round(0.95 * (len(ordered) - 1))))
+        return round(ordered[idx], 2)
+
+    stages = []
+    for name, vals in sorted(
+        per_stage.items(), key=lambda kv: -sum(kv[1]) / max(1, len(kv[1]))
+    ):
+        stages.append(
+            {
+                "name": name,
+                "mean_sec": round(sum(vals) / len(vals), 2),
+                "max_sec": round(max(vals), 2),
+                "p95_sec": _p95(vals),
+                "samples": len(vals),
+            }
+        )
+
+    return {
+        "runs_analysed": len(recent_runs),
+        "stages": stages,
+        "mean_total_sec": (
+            round(sum(total_durations) / len(total_durations), 1)
+            if total_durations
+            else None
+        ),
+        "slowest_stage": stages[0]["name"] if stages else None,
+    }
+
+
+@router.get(
     "/projects/{project_id}/summaries",
     dependencies=[Depends(require_project_org())],
 )

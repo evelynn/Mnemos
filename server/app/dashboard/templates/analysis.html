@@ -35,6 +35,19 @@
 </section>
 
 <section>
+  <h2 data-i18n="Pipeline latency">Pipeline latency</h2>
+  <p class="muted" data-i18n="Where the analysis time goes, averaged over recent runs. Tune the slowest stage first.">
+    Where the analysis time goes, averaged over recent runs.
+    Tune the slowest stage first.
+  </p>
+  <form onsubmit="return loadLatency(event)">
+    <label><span data-i18n="Project ID">Project ID</span><input type="text" id="lpid" required placeholder="uuid" /></label>
+    <button class="primary" type="submit" data-i18n="Load latency">Load latency</button>
+  </form>
+  <div id="latency-box"></div>
+</section>
+
+<section>
   <h2 data-i18n="Recent runs">Recent runs</h2>
   <form onsubmit="return loadRuns(event)">
     <label><span data-i18n="Project ID">Project ID</span><input type="text" id="rpid" required placeholder="uuid" /></label>
@@ -373,5 +386,50 @@ function renderPipeline(stages) {
     if (form) form.dispatchEvent(new Event("submit"));
   }
 })();
+
+// PR-58 — pipeline latency panel (audit A8).
+async function loadLatency(ev) {
+  ev && ev.preventDefault();
+  const pid = document.getElementById("lpid").value.trim();
+  if (!pid) return false;
+  const box = document.getElementById("latency-box");
+  box.innerHTML = '<div class="skeleton skeleton-card"></div>';
+  const r = await fetch(`/api/v1/projects/${pid}/pipeline_latency?runs=10`);
+  if (!r.ok) { await MnemosUI.showError("Latency load failed", r); return false; }
+  const d = await r.json();
+  if (!d.stages.length) {
+    box.innerHTML = '<p class="muted" data-i18n="No completed runs to measure yet.">No completed runs to measure yet.</p>';
+    MnemosUI.applyI18n(box);
+    return false;
+  }
+  const maxMean = Math.max(1, ...d.stages.map(s => s.mean_sec));
+  let html = `<p class="muted">`
+    + `${d.runs_analysed} ` + MnemosUI.t("runs analysed")
+    + (d.mean_total_sec != null
+        ? ` · ` + MnemosUI.t("mean total") + `: ${d.mean_total_sec}s` : "")
+    + (d.slowest_stage
+        ? ` · ` + MnemosUI.t("slowest") + `: <code>${escapeHtml(d.slowest_stage)}</code>` : "")
+    + `</p>`;
+  html += '<table class="data"><thead><tr>'
+    + '<th data-i18n="Stage">Stage</th>'
+    + '<th data-i18n="Mean (s)">Mean (s)</th>'
+    + '<th data-i18n="p95 (s)">p95 (s)</th>'
+    + '<th data-i18n="Max (s)">Max (s)</th>'
+    + '<th></th></tr></thead><tbody>';
+  for (const s of d.stages) {
+    const w = Math.round((s.mean_sec / maxMean) * 200);
+    html += `<tr>
+      <td><code>${escapeHtml(s.name)}</code></td>
+      <td>${s.mean_sec}</td>
+      <td>${s.p95_sec}</td>
+      <td>${s.max_sec}</td>
+      <td><span class="lat-bar" style="width:${w}px"></span></td>
+    </tr>`;
+  }
+  html += "</tbody></table>";
+  box.innerHTML = html;
+  MnemosUI.applyI18n(box);
+  return false;
+}
 </script>
 {% endblock %}
