@@ -615,11 +615,20 @@ function dataEntityName(raw) {
   return parts[parts.length - 1];
 }
 
+// ORM infrastructure names — never a real table. A ``db.connection.
+// find()`` chain would otherwise emit ``data.connection``.
+const _NOT_ENTITY = new Set([
+  "connection", "connections", "entitymanager", "manager", "client",
+  "pool", "transaction", "trx", "queryrunner", "querybuilder",
+  "repository", "repositories", "datasource",
+]);
+
 function emitDataAccess(out, sf, fnNode, rawEntity, access, site, seen) {
   const name = dataEntityName(rawEntity);
   // A logical (name-keyed) entity id — the merge layer reconciles it
   // against the schema-qualified DataEntity the DB analyzers emit.
   if (!name || !/^[a-z_]\w*$/.test(name)) return;
+  if (_NOT_ENTITY.has(name)) return;
   const entityId = `data.${name}`;
   if (!seen.has(entityId)) {
     seen.add(entityId);
