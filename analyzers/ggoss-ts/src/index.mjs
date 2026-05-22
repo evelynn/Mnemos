@@ -543,10 +543,26 @@ const _JS_BUILTINS = new Set([
   "Date", "RegExp", "Error", "Reflect", "Proxy", "console", "Intl",
 ]);
 
-// Identifier names that mark a chain as a genuine ORM/DB client, so
-// ``prisma.user.findMany()`` is detected but ``node.children.find()``
-// — an ordinary array walk — is not.
-const _ORM_CLIENT = /^(prisma|prismaclient|db|dbclient|client|knex|orm|sequelize|datasource|repo|repository|conn|connection|pool|entitymanager|em)$/i;
+// Identifier names that mark a chain as a genuine ORM/DB client. Kept
+// deliberately tight after real-world testing: a loose list collides
+// (Angular Material's ``dataSource`` is not a database, a ``pool`` may
+// be a worker pool). The Prisma ``client.model.verb()`` shape rooted
+// in one of these is high-precision.
+const _ORM_CLIENT = /^(prisma|prismaclient|db|dbclient|knex|orm|sequelize)$/i;
+
+// Functions whose string argument is genuinely SQL. A string is only
+// scanned for tables when it is passed to one of these (or a ``sql``
+// tagged template) — a bare string literal that merely starts with
+// "Update ..." is prose, not a query.
+const _SQL_EXEC_FNS = new Set([
+  "query", "execute", "exec", "raw", "prepare", "unsafe",
+]);
+
+const _STRINGY = new Set([
+  ts.SyntaxKind.StringLiteral,
+  ts.SyntaxKind.NoSubstitutionTemplateLiteral,
+  ts.SyntaxKind.TemplateExpression,
+]);
 
 function _chainHasOrmClient(node) {
   // Walk a property-access / call chain collecting identifier names;
@@ -638,6 +654,19 @@ function emitDataAccess(out, sf, fnNode, rawEntity, access, site, seen) {
   );
 }
 
+function _scanSqlText(out, sf, fn, text, node, seen) {
+  if (!_looksLikeSql(text)) return;
+  const s = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+  const site = { line: s.line + 1, col: s.character + 1 };
+  for (const { re, access } of _SQL_TABLE) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      emitDataAccess(out, sf, fn, m[1], access, site, seen);
+    }
+  }
+}
+
 function cmdDataAccess(target, outPath) {
   const program = buildProgram(target);
   const out = openOutput(outPath);
@@ -653,27 +682,37 @@ function cmdDataAccess(target, outPath) {
       if (isFn) enclosingFn.push(node);
       const fn = enclosingFn[enclosingFn.length - 1] ?? null;
 
-      // (1) Raw SQL embedded in string / template literals.
+      // (1) Raw SQL in a ``sql`...` `` tagged template.
       if (
-        node.kind === ts.SyntaxKind.StringLiteral ||
-        node.kind === ts.SyntaxKind.NoSubstitutionTemplateLiteral ||
-        node.kind === ts.SyntaxKind.TemplateExpression
+        node.kind === ts.SyntaxKind.TaggedTemplateExpression &&
+        node.tag &&
+        /(^|\.)sql$/i.test(node.tag.getText(sf))
       ) {
-        const text = node.getText(sf);
-        if (_looksLikeSql(text)) {
-          const s = sf.getLineAndCharacterOfPosition(node.getStart(sf));
-          const site = { line: s.line + 1, col: s.character + 1 };
-          for (const { re, access } of _SQL_TABLE) {
-            re.lastIndex = 0;
-            let m;
-            while ((m = re.exec(text)) !== null) {
-              emitDataAccess(out, sf, fn, m[1], access, site, seen);
+        _scanSqlText(out, sf, fn, node.template.getText(sf), node, seen);
+      }
+
+      // (2) Raw SQL passed to a SQL-executing call — db.query("..."),
+      //     conn.execute("..."), exec("..."). A bare string literal
+      //     that merely starts with "Update ..." is prose, not a query,
+      //     so only these call sites are scanned.
+      if (node.kind === ts.SyntaxKind.CallExpression) {
+        const callee = node.expression;
+        let calleeName = null;
+        if (callee.kind === ts.SyntaxKind.PropertyAccessExpression) {
+          calleeName = callee.name.text.toLowerCase();
+        } else if (callee.kind === ts.SyntaxKind.Identifier) {
+          calleeName = callee.text.toLowerCase();
+        }
+        if (calleeName && _SQL_EXEC_FNS.has(calleeName)) {
+          for (const arg of node.arguments) {
+            if (_STRINGY.has(arg.kind)) {
+              _scanSqlText(out, sf, fn, arg.getText(sf), arg, seen);
             }
           }
         }
       }
 
-      // (2) ORM-style method calls. Two shapes, each gated to keep
+      // (3) ORM-style method calls. Two shapes, each gated to keep
       //     ordinary JS out: prisma.<model>.<verb>() — only when the
       //     chain roots in a recognised DB client — and <Model>.<verb>()
       //     statics — only for non-built-in capitalised receivers.

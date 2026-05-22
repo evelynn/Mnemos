@@ -43,7 +43,7 @@ def test_data_access_no_longer_a_stub():
     assert "leave the stub cleanly empty" not in body
     # The real implementation walks the program and emits records.
     idx = body.find("function cmdDataAccess(")
-    slab = body[idx:idx + 2600]
+    slab = body[idx:idx + 3800]
     assert "buildProgram(target)" in slab
     assert "emitDataAccess(" in slab
 
