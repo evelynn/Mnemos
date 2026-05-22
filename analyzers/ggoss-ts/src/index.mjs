@@ -56,7 +56,21 @@ function openOutput(outPath) {
   return fs.createWriteStream(outPath, { encoding: "utf-8" });
 }
 
-function walkFiles(dir, exts, collected = []) {
+const _SOURCE_EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+
+// Generated-output directories — never source, always skipped.
+const _SKIP_DIRS = new Set(["node_modules", "dist", "build", "coverage"]);
+
+// Test / fixture directory names. Normally analysed like any other
+// code, but excluded on the crash-retry path: a compiler-style repo
+// keeps intentionally-malformed files under these and they can trip a
+// hard assertion inside the TypeScript program builder.
+const _TEST_DIRS = new Set([
+  "tests", "test", "__tests__", "fixtures", "__fixtures__",
+  "spec", "specs", "e2e",
+]);
+
+function walkFiles(dir, exts, opts = {}, collected = []) {
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -65,9 +79,10 @@ function walkFiles(dir, exts, collected = []) {
     return collected;
   }
   for (const e of entries) {
-    if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+    if (e.name.startsWith(".") || _SKIP_DIRS.has(e.name)) continue;
+    if (opts.skipTests && _TEST_DIRS.has(e.name)) continue;
     const full = path.join(dir, e.name);
-    if (e.isDirectory()) walkFiles(full, exts, collected);
+    if (e.isDirectory()) walkFiles(full, exts, opts, collected);
     else if (exts.some((ext) => e.name.endsWith(ext))) collected.push(full);
   }
   return collected;
@@ -77,7 +92,7 @@ function cmdProbe(target) {
   if (!target || !fs.existsSync(target)) {
     return { applicable: false, reason: "path_not_found", files_found: 0 };
   }
-  const files = walkFiles(target, [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
+  const files = walkFiles(target, _SOURCE_EXTS);
   const hasTsconfig = fs.existsSync(path.join(target, "tsconfig.json"));
   const hasPkg = fs.existsSync(path.join(target, "package.json"));
   const applicable = files.length > 0 || hasTsconfig || hasPkg;
@@ -91,7 +106,7 @@ function cmdProbe(target) {
 }
 
 function cmdInventory(target) {
-  const files = walkFiles(target, [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
+  const files = walkFiles(target, _SOURCE_EXTS);
   return {
     files: files.slice(0, 5000).map((f) => path.relative(target, f)),
     modules: fs.existsSync(path.join(target, "package.json"))
@@ -115,34 +130,54 @@ function componentId(target) {
   }
 }
 
+const _PROGRAM_OPTS = {
+  allowJs: true,
+  checkJs: false,
+  target: ts.ScriptTarget.ES2022,
+  module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.NodeNext,
+  jsx: ts.JsxEmit.Preserve,
+  noEmit: true,
+  skipLibCheck: true,
+};
+
 function buildProgram(target) {
+  // Resolve the root file set. A plain tsconfig.json is honoured, but a
+  // solution-style one (project ``references``, an empty/near-empty
+  // ``files`` set) resolves to ~0 files — ``parseJsonConfigFileContent``
+  // does not follow references — so a monorepo would be analysed as
+  // empty. In that case, and when there is no tsconfig at all, walk the
+  // tree instead.
   const tsconfigPath = path.join(target, "tsconfig.json");
+  let files = null;
+  let options = _PROGRAM_OPTS;
   if (fs.existsSync(tsconfigPath)) {
     const raw = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
-    const parsed = ts.parseJsonConfigFileContent(
-      raw.config || {},
-      ts.sys,
-      target,
-    );
-    return ts.createProgram({
-      rootNames: parsed.fileNames,
-      options: parsed.options,
-    });
+    const parsed = ts.parseJsonConfigFileContent(raw.config || {}, ts.sys, target);
+    const hasRefs =
+      Array.isArray(raw.config?.references) && raw.config.references.length > 0;
+    if (!hasRefs && parsed.fileNames.length > 0) {
+      files = parsed.fileNames;
+      options = parsed.options;
+    }
   }
-  const files = walkFiles(target, [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
-  return ts.createProgram({
-    rootNames: files,
-    options: {
-      allowJs: true,
-      checkJs: false,
-      target: ts.ScriptTarget.ES2022,
-      module: ts.ModuleKind.ESNext,
-      moduleResolution: ts.ModuleResolutionKind.NodeNext,
-      jsx: ts.JsxEmit.Preserve,
-      noEmit: true,
-      skipLibCheck: true,
-    },
-  });
+  if (files === null) files = walkFiles(target, _SOURCE_EXTS);
+
+  try {
+    return ts.createProgram({ rootNames: files, options });
+  } catch (err) {
+    // A pathological source file — common in a compiler's own test
+    // corpus — can trip a hard assertion inside createProgram. Retry
+    // once without test / fixture directories so a normal codebase
+    // still yields a result instead of a zero-output crash.
+    reportError(
+      target,
+      `program build failed (${err.message}); retrying without test dirs`,
+      true,
+    );
+    const safe = walkFiles(target, _SOURCE_EXTS, { skipTests: true });
+    return ts.createProgram({ rootNames: safe, options: _PROGRAM_OPTS });
+  }
 }
 
 function symbolIdFor(sf, node, name) {
