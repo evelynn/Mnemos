@@ -349,14 +349,55 @@ function cmdCalls(target, outPath) {
   if (outPath) out.end();
 }
 
-function emitHttpContract(out, sf, node, method, url) {
-  const id = `http.${method.toUpperCase()}.${url}`;
+// HTTP verbs an Express/Koa-style router exposes as ``router.<verb>()``.
+const _HTTP_VERBS = new Set([
+  "get", "post", "put", "delete", "patch", "options", "head", "all",
+]);
+// NestJS method decorators that declare a route.
+const _HTTP_DECORATORS = new Set([
+  "Get", "Post", "Put", "Delete", "Patch", "Options", "Head", "All",
+]);
+
+function _decorators(node) {
+  if (typeof ts.getDecorators === "function") {
+    return ts.getDecorators(node) || [];
+  }
+  return (node.modifiers || []).filter(
+    (m) => m.kind === ts.SyntaxKind.Decorator,
+  );
+}
+
+function _decoratorInfo(dec, sf) {
+  // Return { name, arg } for @Name or @Name("arg"); arg is the first
+  // string-literal argument or null.
+  const e = dec.expression;
+  if (e.kind === ts.SyntaxKind.Identifier) return { name: e.text, arg: null };
+  if (
+    e.kind === ts.SyntaxKind.CallExpression &&
+    e.expression.kind === ts.SyntaxKind.Identifier
+  ) {
+    const a0 = e.arguments[0];
+    const arg =
+      a0 && a0.kind === ts.SyntaxKind.StringLiteral ? a0.text : null;
+    return { name: e.expression.text, arg };
+  }
+  return null;
+}
+
+function _joinRoute(prefix, route) {
+  const parts = [prefix, route].filter((p) => p && p !== "/");
+  return ("/" + parts.join("/")).replace(/\/+/g, "/");
+}
+
+function emitHttpContract(out, sf, node, method, url, relation, detectedBy) {
+  const path_ = url.startsWith("/") ? url : "/" + url;
+  const id = `http.${method.toUpperCase()}.${path_}`;
   const contract = {
     id,
     kind: "http_endpoint",
-    name: `${method.toUpperCase()} ${url}`,
-    spec: { method: method.toUpperCase(), path: url },
-    metadata: { detected_by: "ts_fetch_literal" },
+    name: `${method.toUpperCase()} ${path_}`,
+    spec: { method: method.toUpperCase(), path: path_ },
+    metadata: { detected_by: detectedBy },
     certainty: "inferred",
     created_by: [SOURCE_NAME],
   };
@@ -367,7 +408,8 @@ function emitHttpContract(out, sf, node, method, url) {
     envelope("edge", {
       source_id: callerId,
       target_id: id,
-      kind: "CALLS",
+      // A server route EXPOSES the contract; a client fetch CALLS it.
+      kind: relation,
       certainty: "inferred",
       created_by: [SOURCE_NAME],
       metadata: {},
@@ -381,7 +423,35 @@ function cmdContracts(target, outPath) {
 
   for (const sf of program.getSourceFiles()) {
     if (sf.isDeclarationFile || sf.fileName.includes("node_modules")) continue;
-    const visit = (node) => {
+    // ``prefix`` carries a NestJS @Controller('x') route prefix down
+    // into the class's methods.
+    const visit = (node, prefix) => {
+      let childPrefix = prefix;
+
+      // NestJS @Controller('cats') — sets the prefix for child methods.
+      if (node.kind === ts.SyntaxKind.ClassDeclaration) {
+        for (const dec of _decorators(node)) {
+          const info = _decoratorInfo(dec, sf);
+          if (info && info.name === "Controller") {
+            childPrefix = info.arg || "";
+          }
+        }
+      }
+
+      // NestJS @Get(':id') etc. on a method — the server EXPOSES it.
+      if (node.kind === ts.SyntaxKind.MethodDeclaration) {
+        for (const dec of _decorators(node)) {
+          const info = _decoratorInfo(dec, sf);
+          if (info && _HTTP_DECORATORS.has(info.name)) {
+            const route = _joinRoute(prefix, info.arg || "");
+            emitHttpContract(
+              out, sf, node, info.name, route, "EXPOSES",
+              "ts_nest_decorator",
+            );
+          }
+        }
+      }
+
       if (node.kind === ts.SyntaxKind.CallExpression) {
         const call = node;
         const expr = call.expression;
@@ -390,6 +460,7 @@ function cmdContracts(target, outPath) {
           (text === "fetch" || text.endsWith(".fetch")) &&
           call.arguments[0]?.kind === ts.SyntaxKind.StringLiteral
         ) {
+          // Client side — this code CALLS the contract.
           const url = call.arguments[0].text;
           let method = "GET";
           if (call.arguments[1]?.kind === ts.SyntaxKind.ObjectLiteralExpression) {
@@ -403,13 +474,31 @@ function cmdContracts(target, outPath) {
               }
             }
           }
-          emitHttpContract(out, sf, node, method, url);
+          emitHttpContract(
+            out, sf, node, method, url, "CALLS", "ts_fetch_literal",
+          );
+        } else if (expr.kind === ts.SyntaxKind.PropertyAccessExpression) {
+          // Express / Koa router — ``app.get("/path", handler)``. The
+          // path must start with "/" so ``map.get("key")`` and other
+          // ordinary ``.get()`` calls don't masquerade as routes.
+          const verb = expr.name.text.toLowerCase();
+          const a0 = call.arguments[0];
+          if (
+            _HTTP_VERBS.has(verb) &&
+            a0?.kind === ts.SyntaxKind.StringLiteral &&
+            a0.text.startsWith("/")
+          ) {
+            emitHttpContract(
+              out, sf, node, verb, a0.text, "EXPOSES",
+              "ts_express_route",
+            );
+          }
         }
       }
-      ts.forEachChild(node, visit);
+      ts.forEachChild(node, (c) => visit(c, childPrefix));
     };
     try {
-      visit(sf);
+      visit(sf, "");
     } catch (err) {
       reportError(sf.fileName, err.message);
     }
@@ -640,7 +729,7 @@ function cmdSchema() {
   return {
     schema: "https://mnemos.dev/analyzer/ggoss-ts/v1",
     record_types: ["symbol", "contract", "data_entity", "edge"],
-    emits_edges: ["CALLS", "READS", "WRITES"],
+    emits_edges: ["CALLS", "READS", "WRITES", "EXPOSES"],
   };
 }
 
