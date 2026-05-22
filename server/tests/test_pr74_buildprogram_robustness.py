@@ -99,7 +99,7 @@ def test_generated_dirs_skipped(tmp_path):
 def test_buildprogram_has_crash_retry():
     body = _ANALYZER.read_text(encoding="utf-8")
     idx = body.find("function buildProgram(")
-    slab = body[idx:idx + 1600]
+    slab = body[idx:idx + 2200]
     # createProgram is wrapped; on failure it retries without test dirs.
     assert "try {" in slab
     assert "catch (err)" in slab
@@ -109,6 +109,6 @@ def test_buildprogram_has_crash_retry():
 def test_solution_tsconfig_detection_present():
     body = _ANALYZER.read_text(encoding="utf-8")
     idx = body.find("function buildProgram(")
-    slab = body[idx:idx + 1600]
+    slab = body[idx:idx + 2200]
     assert "references" in slab
     assert "walkFiles(target, _SOURCE_EXTS)" in slab

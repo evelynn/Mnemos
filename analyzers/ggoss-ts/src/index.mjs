@@ -142,27 +142,30 @@ const _PROGRAM_OPTS = {
 };
 
 function buildProgram(target) {
-  // Resolve the root file set. A plain tsconfig.json is honoured, but a
-  // solution-style one (project ``references``, an empty/near-empty
-  // ``files`` set) resolves to ~0 files — ``parseJsonConfigFileContent``
-  // does not follow references — so a monorepo would be analysed as
-  // empty. In that case, and when there is no tsconfig at all, walk the
-  // tree instead.
+  // An analyzer must see *all* the code, not the subset a project's
+  // build tsconfig happens to scope. Real repos make that distinction
+  // bite: astro's root tsconfig is solution-style (project references,
+  // ~0 files), and next.js' root tsconfig ``include``s only its test
+  // suite — trusting either analyses the wrong thing. So the file set
+  // always comes from a directory walk; a tsconfig contributes only
+  // its compilerOptions (jsx / paths / target).
+  let options = { ..._PROGRAM_OPTS };
   const tsconfigPath = path.join(target, "tsconfig.json");
-  let files = null;
-  let options = _PROGRAM_OPTS;
   if (fs.existsSync(tsconfigPath)) {
-    const raw = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
-    const parsed = ts.parseJsonConfigFileContent(raw.config || {}, ts.sys, target);
-    const hasRefs =
-      Array.isArray(raw.config?.references) && raw.config.references.length > 0;
-    if (!hasRefs && parsed.fileNames.length > 0) {
-      files = parsed.fileNames;
-      options = parsed.options;
+    try {
+      const raw = ts.readConfigFile(tsconfigPath, ts.sys.readFile);
+      const parsed = ts.parseJsonConfigFileContent(
+        raw.config || {}, ts.sys, target,
+      );
+      // _PROGRAM_OPTS wins for the flags analysis depends on (noEmit,
+      // allowJs, skipLibCheck); the tsconfig keeps jsx / paths / target.
+      options = { ...parsed.options, ..._PROGRAM_OPTS };
+    } catch {
+      // A malformed tsconfig is not fatal — the defaults analyse fine.
     }
   }
-  if (files === null) files = walkFiles(target, _SOURCE_EXTS);
 
+  const files = walkFiles(target, _SOURCE_EXTS);
   try {
     return ts.createProgram({ rootNames: files, options });
   } catch (err) {
@@ -176,7 +179,7 @@ function buildProgram(target) {
       true,
     );
     const safe = walkFiles(target, _SOURCE_EXTS, { skipTests: true });
-    return ts.createProgram({ rootNames: safe, options: _PROGRAM_OPTS });
+    return ts.createProgram({ rootNames: safe, options });
   }
 }
 
@@ -251,6 +254,27 @@ function cmdSymbols(target, outPath) {
         case ts.SyntaxKind.FunctionDeclaration: {
           const n = node;
           if (n.name) emitSymbol(out, sf, n, "function", n.name.text, compId);
+          break;
+        }
+        case ts.SyntaxKind.VariableDeclaration: {
+          // Modern JS/TS exports functions as ``const f = () => {}`` /
+          // ``const f = function () {}`` — not FunctionDeclaration. A
+          // 10-project benchmark showed missing this loses most of a
+          // codebase's symbols (next.js: 1.7k from 21k files).
+          const n = node;
+          const init = n.initializer;
+          if (
+            n.name &&
+            n.name.kind === ts.SyntaxKind.Identifier &&
+            init &&
+            (init.kind === ts.SyntaxKind.ArrowFunction ||
+              init.kind === ts.SyntaxKind.FunctionExpression ||
+              init.kind === ts.SyntaxKind.ClassExpression)
+          ) {
+            const kind =
+              init.kind === ts.SyntaxKind.ClassExpression ? "class" : "function";
+            emitSymbol(out, sf, n, kind, n.name.text, compId);
+          }
           break;
         }
         case ts.SyntaxKind.MethodDeclaration:
