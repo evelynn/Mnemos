@@ -389,8 +389,17 @@ function _joinRoute(prefix, route) {
   return ("/" + parts.join("/")).replace(/\/+/g, "/");
 }
 
+function _normalizeUrl(url) {
+  // Drop query string and fragment — they are call-site data, not part
+  // of the contract identity. An absolute URL (an external dependency)
+  // keeps its scheme+host; a relative one gets a single leading slash.
+  const bare = url.split("?")[0].split("#")[0];
+  if (/^https?:\/\//i.test(bare)) return bare;
+  return bare.startsWith("/") ? bare : "/" + bare;
+}
+
 function emitHttpContract(out, sf, node, method, url, relation, detectedBy) {
-  const path_ = url.startsWith("/") ? url : "/" + url;
+  const path_ = _normalizeUrl(url);
   const id = `http.${method.toUpperCase()}.${path_}`;
   const contract = {
     id,
