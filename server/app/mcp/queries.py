@@ -6,6 +6,7 @@ cannot drift — both call the same helpers.
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -14,6 +15,53 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.findings import Finding, Summary
 from app.models.graph import Edge, Node
+
+_TOKEN = re.compile(r"[A-Za-z0-9]+")
+
+
+def _tokenize(query: str | None) -> list[str]:
+    """Split a free-text query into lowercased alphanumeric terms.
+
+    A symbol search for "payment retry" must find ``retryPayment`` —
+    the old substring match needed the literal phrase. Tokenising lets
+    each term match independently.
+    """
+    return [t.lower() for t in _TOKEN.findall(query or "")]
+
+
+def _score_symbol(
+    terms: list[str], name: str | None, sym_id: str, signature: str | None
+) -> float:
+    """Lexical relevance of a symbol to the query terms.
+
+    Term-coverage scoring weighted by field — a hit in the name ranks
+    well above one in the id or signature, an exact name match highest.
+    Returns 0 when no term matched. This is the BM25-ish lexical half
+    of spec §11.3's search; the vector half needs an embedding model.
+    """
+    if not terms:
+        return 0.0
+    name_l = (name or "").lower()
+    id_l = (sym_id or "").lower()
+    sig_l = (signature or "").lower()
+    score = 0.0
+    matched = 0
+    for t in terms:
+        if t in name_l:
+            score += 3.0
+            if name_l == t:
+                score += 2.0
+            matched += 1
+        elif t in id_l:
+            score += 1.5
+            matched += 1
+        elif t in sig_l:
+            score += 0.5
+            matched += 1
+    # Every term matched somewhere — a strong signal.
+    if matched == len(terms):
+        score += 1.0
+    return score
 
 
 async def search_symbols(
@@ -25,17 +73,35 @@ async def search_symbols(
     top_k: int = 20,
 ) -> list[dict[str, Any]]:
     top_k = max(1, min(top_k, 200))
+    terms = _tokenize(query)
     stmt = (
         select(Node)
         .where(Node.project_id == project_id, Node.valid_to.is_(None))
-        .limit(top_k)
     )
     if kind:
         stmt = stmt.where(Node.kind == kind)
-    if query:
-        like = f"%{query}%"
-        stmt = stmt.where(or_(Node.id.ilike(like), Node.data["name"].astext.ilike(like)))
-    rows = (await session.execute(stmt)).scalars().all()
+    if terms:
+        # Candidate set — any term matching id / name / signature. The
+        # ranking below (not SQL) decides the order.
+        conds = []
+        for t in terms:
+            like = f"%{t}%"
+            conds.append(Node.id.ilike(like))
+            conds.append(Node.data["name"].astext.ilike(like))
+            conds.append(Node.data["signature"].astext.ilike(like))
+        stmt = stmt.where(or_(*conds))
+    # Cap the candidate scan so a huge graph stays bounded.
+    rows = (await session.execute(stmt.limit(2000))).scalars().all()
+
+    scored: list[tuple[float, Node]] = []
+    for r in rows:
+        d = r.data or {}
+        s = _score_symbol(terms, d.get("name"), r.id, d.get("signature"))
+        if terms and s <= 0:
+            continue
+        scored.append((s, r))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+
     return [
         {
             "symbol_id": r.id,
@@ -43,9 +109,10 @@ async def search_symbols(
             "component_id": (r.data or {}).get("component_id"),
             "kind": r.kind,
             "certainty": r.certainty,
+            "score": round(s, 2),
             "excerpt": (r.data or {}).get("signature"),
         }
-        for r in rows
+        for s, r in scored[:top_k]
     ]
 
 
@@ -90,6 +157,21 @@ async def get_symbol(
             .limit(1001)
         )
     ).all()
+    # L1 summary, when the analysis loop has generated one — spec
+    # §11.3 lists it on get_symbol so an agent can read what the
+    # symbol *does* without re-reading the source.
+    l1 = (
+        await session.execute(
+            select(Summary)
+            .where(
+                Summary.project_id == project_id,
+                Summary.target_id == symbol_id,
+                Summary.level == 1,
+                Summary.superseded_by.is_(None),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
     return {
         "symbol": {
             "id": node.id,
@@ -97,6 +179,7 @@ async def get_symbol(
             "data": node.data,
             "certainty": node.certainty,
         },
+        "l1_summary": l1.summary if l1 is not None else None,
         "neighbors": {
             "callers_count": len(callers),
             "callees_count": len(callees),
