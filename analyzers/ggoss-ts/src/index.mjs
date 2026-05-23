@@ -135,7 +135,11 @@ const _PROGRAM_OPTS = {
   checkJs: false,
   target: ts.ScriptTarget.ES2022,
   module: ts.ModuleKind.ESNext,
-  moduleResolution: ts.ModuleResolutionKind.NodeNext,
+  // Bundler resolution is lenient enough that ``from "./lib"`` works
+  // without a ``.js`` suffix — important because the TypeChecker can
+  // then follow import aliases and CALLS edges resolve to the real
+  // declaration in lib.ts instead of an "unknown" alias dead-end.
+  moduleResolution: ts.ModuleResolutionKind.Bundler ?? ts.ModuleResolutionKind.NodeNext,
   jsx: ts.JsxEmit.Preserve,
   noEmit: true,
   skipLibCheck: true,
@@ -298,17 +302,54 @@ function cmdSymbols(target, outPath) {
   if (outPath) out.end();
 }
 
-function emitCallEdges(out, sf, caller, callSite, calleeName) {
+function _resolveCalleeId(checker, callExpr) {
+  // Resolve the call's expression back to the declaring symbol via the
+  // TypeChecker and produce the same ``ts:<basename>:<name>@L:C`` id
+  // ``cmdSymbols`` emits — so CALLS edges actually JOIN with symbol
+  // nodes. Returns null for unresolved / external / built-in calls.
+  try {
+    let sym = checker.getSymbolAtLocation(callExpr.expression);
+    if (!sym) return null;
+    // Follow import aliases to the original declaration — otherwise
+    // ``ts:main.ts:helper@…`` (the import binding) is returned instead
+    // of ``ts:lib.ts:helper@…`` (the real function).
+    if (sym.flags & ts.SymbolFlags.Alias) {
+      try { sym = checker.getAliasedSymbol(sym); } catch { /* keep sym */ }
+    }
+    for (const decl of sym.declarations || []) {
+      const declSf = decl.getSourceFile && decl.getSourceFile();
+      if (!declSf || declSf.isDeclarationFile) continue;
+      if (declSf.fileName.includes("node_modules")) continue;
+      // FunctionDeclaration / MethodDeclaration / VariableDeclaration
+      // with a plain identifier name — the same shapes cmdSymbols
+      // emits as symbols.
+      const nm = decl.name;
+      if (nm && nm.kind === ts.SyntaxKind.Identifier) {
+        return symbolIdFor(declSf, decl, nm.text);
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function emitCallEdges(out, sf, caller, callSite, calleeId, calleeName) {
   const callerId = symbolIdFor(sf, caller, caller.name?.text ?? "<anonymous>");
   const start = sf.getLineAndCharacterOfPosition(callSite.getStart(sf));
+  // Resolved callee → joinable symbol id, asserted certainty.
+  // Unresolved → ``ts:extern:<name>`` so external/built-in calls are
+  // distinct from intra-project ones and clearly inferred.
+  const resolved = calleeId != null;
   const data = {
     source_id: callerId,
-    target_id: `ts:callee:${calleeName}`,
+    target_id: resolved ? calleeId : `ts:extern:${calleeName}`,
     kind: "CALLS",
-    certainty: "asserted",
+    certainty: resolved ? "asserted" : "inferred",
     created_by: [SOURCE_NAME],
     metadata: {
       invocation_site: { line: start.line + 1, col: start.character + 1 },
+      callee_resolved: resolved,
     },
   };
   writeLine(out, envelope("edge", data));
@@ -316,6 +357,7 @@ function emitCallEdges(out, sf, caller, callSite, calleeName) {
 
 function cmdCalls(target, outPath) {
   const program = buildProgram(target);
+  const checker = program.getTypeChecker();
   const out = openOutput(outPath);
 
   for (const sf of program.getSourceFiles()) {
@@ -330,11 +372,12 @@ function cmdCalls(target, outPath) {
         const call = node;
         const caller = enclosingFn[enclosingFn.length - 1];
         if (caller) {
-          const callee =
+          const calleeName =
             call.expression.kind === ts.SyntaxKind.Identifier
               ? call.expression.text
               : call.expression.getText(sf);
-          emitCallEdges(out, sf, caller, call, callee);
+          const calleeId = _resolveCalleeId(checker, call);
+          emitCallEdges(out, sf, caller, call, calleeId, calleeName);
         }
       }
       ts.forEachChild(node, visit);
