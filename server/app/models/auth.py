@@ -106,6 +106,12 @@ class Secret(Base):
     kind: Mapped[str] = mapped_column(String, nullable=False)
     ciphertext: Mapped[bytes] = mapped_column(nullable=False)
     iv: Mapped[bytes] = mapped_column(nullable=False)
+    # Org scoping (PR-88). Without it ``GET /secrets`` returned every
+    # tenant's ciphertext metadata to any logged-in user (§2.8). Nullable
+    # so the alembic backfill can run online; subsequent inserts MUST set it.
+    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

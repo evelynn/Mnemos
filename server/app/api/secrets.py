@@ -9,7 +9,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
-from app.auth.deps import CurrentUser
 from app.auth.rbac import require_admin
 from app.db import get_session
 from app.models.auth import Secret, User
@@ -60,9 +59,21 @@ def _to_out(s: Secret) -> SecretOut:
 
 @router.get("")
 async def list_secrets(
-    _: CurrentUser, db: AsyncSession = Depends(get_session)
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_session),
 ) -> list[SecretOut]:
-    result = await db.execute(select(Secret).order_by(Secret.created_at.desc()))
+    # Admin-only AND scoped to the caller's org: the old route returned
+    # every tenant's ciphertext metadata to any logged-in user (§2.8).
+    # Pre-PR-88 rows have ``organization_id IS NULL`` and are treated
+    # as belonging to the legacy default-org pool — visible to any
+    # admin, since they predate org isolation.
+    stmt = select(Secret).order_by(Secret.created_at.desc())
+    if user.organization_id is not None:
+        stmt = stmt.where(
+            (Secret.organization_id == user.organization_id)
+            | Secret.organization_id.is_(None)
+        )
+    result = await db.execute(stmt)
     return [_to_out(s) for s in result.scalars().all()]
 
 
@@ -74,7 +85,11 @@ async def create_secret(
 ) -> SecretOut:
     ciphertext, iv = encrypt(body.value)
     secret = Secret(
-        label=body.label, kind=body.kind, ciphertext=ciphertext, iv=iv
+        label=body.label,
+        kind=body.kind,
+        ciphertext=ciphertext,
+        iv=iv,
+        organization_id=user.organization_id,
     )
     db.add(secret)
     try:
