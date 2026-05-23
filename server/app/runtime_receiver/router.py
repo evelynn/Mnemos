@@ -10,9 +10,11 @@ in PR-25).
 
 from __future__ import annotations
 
+import hmac
+import os
 import uuid
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,12 +49,39 @@ async def _resolve_org_and_project(
         return None, None
 
 
+def _check_otlp_bearer(authorization: str | None) -> None:
+    """Reject any OTLP trace that doesn't carry the deployment's shared
+    bearer. Fail-closed: if ``MNEMOS_OTLP_TOKEN`` isn't set in the
+    environment, no trace is accepted — the prior open default let any
+    process on the OTLP port poison ``runtime_observations`` and lift
+    edges to ``exercised=true`` for another tenant (§14.3)."""
+    expected = os.environ.get("MNEMOS_OTLP_TOKEN") or ""
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="otlp_token_not_configured",
+        )
+    prefix = "Bearer "
+    presented = (
+        authorization[len(prefix):]
+        if authorization and authorization.startswith(prefix)
+        else ""
+    )
+    if not presented or not hmac.compare_digest(presented, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid_otlp_token",
+        )
+
+
 @router.post("/traces")
 async def receive_traces(
     request: Request,
     db: AsyncSession = Depends(get_session),
+    authorization: str | None = Header(default=None),
     x_mnemos_organization_id: str | None = Header(default=None),
 ) -> JSONResponse:
+    _check_otlp_bearer(authorization)
     body = await request.json()
     spans_seen = 0
     for resource_span in body.get("resourceSpans", []) or []:

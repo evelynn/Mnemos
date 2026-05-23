@@ -111,11 +111,19 @@ async def gitlab_webhook(
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     expected = await _secret(db)
-    if expected:
-        if not x_gitlab_token or not hmac.compare_digest(x_gitlab_token, expected):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_webhook_token"
-            )
+    # Fail-closed: a webhook secret MUST be configured. The earlier
+    # "if expected" was an open default — a fresh install with the
+    # setting unset accepted forged GitLab events and enqueued
+    # analyses against any project id in the payload (§2.5).
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="webhook_secret_not_configured",
+        )
+    if not x_gitlab_token or not hmac.compare_digest(x_gitlab_token, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_webhook_token"
+        )
 
     body = await request.json()
     object_kind = body.get("object_kind")
