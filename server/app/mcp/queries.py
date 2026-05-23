@@ -284,13 +284,70 @@ async def impact_analysis(
         if not next_frontier:
             break
         frontier = next_frontier
+    # Fan out from every affected symbol to the DataEntities they
+    # touch (READS/WRITES) — was a `[]` stub. Tests are flagged by a
+    # ``data.is_test`` marker on the Node, falling back to a name
+    # heuristic. ``runtime_exercised`` is true iff any edge along the
+    # caller chain carries the OTLP-stamped exercised flag.
+    affected_set = {symbol_id, *direct, *transitive}
+    data_rows = (
+        await session.execute(
+            select(Edge.source_id, Edge.target_id, Edge.kind, Edge.data).where(
+                Edge.project_id == project_id,
+                Edge.source_id.in_(affected_set),
+                Edge.kind.in_(("READS", "WRITES")),
+                Edge.valid_to.is_(None),
+            )
+        )
+    ).all()
+    affected_data_entities = sorted({row[1] for row in data_rows})
+
+    runtime_exercised = any(
+        str((row[3] or {}).get("exercised", "")).lower() == "true"
+        for row in data_rows
+    )
+    if not runtime_exercised:
+        # Also check the call edges in the chain.
+        chk = (
+            await session.execute(
+                select(Edge.data).where(
+                    Edge.project_id == project_id,
+                    Edge.source_id.in_(affected_set),
+                    Edge.kind == "CALLS",
+                    Edge.valid_to.is_(None),
+                ).limit(2000)
+            )
+        ).all()
+        runtime_exercised = any(
+            str((row[0] or {}).get("exercised", "")).lower() == "true"
+            for row in chk
+        )
+
+    test_rows = (
+        await session.execute(
+            select(Node.id, Node.data).where(
+                Node.project_id == project_id,
+                Node.id.in_(affected_set),
+                Node.valid_to.is_(None),
+            )
+        )
+    ).all()
+    affected_tests: list[str] = []
+    opaque_components: list[str] = []
+    for nid, ndata in test_rows:
+        d = ndata or {}
+        if d.get("is_test") or "test" in nid.lower() or "spec" in nid.lower():
+            affected_tests.append(nid)
+        if d.get("is_opaque") or d.get("kind") == "OpaqueComponent":
+            opaque_components.append(nid)
+
     return {
         "directly_affected": direct,
         "transitively_affected": transitive,
-        "affected_tests": [],
-        "affected_data_entities": [],
-        "opaque_components_touched": [],
-        "runtime_exercised": False,
+        "affected_tests": sorted(set(affected_tests)),
+        "affected_data_entities": affected_data_entities,
+        "opaque_components_touched": sorted(set(opaque_components)),
+        "runtime_exercised": runtime_exercised,
     }
 
 
@@ -395,6 +452,51 @@ async def find_runtime_path(
         if not frontier:
             break
     return {"common_paths": [{"frequency": 1, "chain": chain}]}
+
+
+async def get_data_access(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    symbol_id: str,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """List the DataEntities a symbol READS / WRITES (spec §11.3).
+
+    The data has been in the graph since PR-61 (READS/WRITES edges
+    from analyzer ``data_access``) but no Q&A tool surfaced it — an
+    agent asking "where does this function touch the DB?" got only
+    static caller hops back from ``find_callees`` with no entity
+    info. This is the missing tool.
+    """
+    limit = max(1, min(limit, 1000))
+    rows = (
+        await session.execute(
+            select(Edge).where(
+                Edge.project_id == project_id,
+                Edge.source_id == symbol_id,
+                Edge.kind.in_(("READS", "WRITES")),
+                Edge.valid_to.is_(None),
+            ).limit(limit)
+        )
+    ).scalars().all()
+
+    reads: list[dict[str, Any]] = []
+    writes: list[dict[str, Any]] = []
+    for e in rows:
+        item = {
+            "entity_id": e.target_id,
+            "certainty": e.certainty,
+            "exercised": str((e.data or {}).get("exercised", "")).lower() == "true",
+            "access_site": (e.data or {}).get("access_site"),
+        }
+        (writes if e.kind == "WRITES" else reads).append(item)
+    return {
+        "symbol_id": symbol_id,
+        "reads": reads,
+        "writes": writes,
+        "truncated": len(rows) >= limit,
+    }
 
 
 async def get_contract(

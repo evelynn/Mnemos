@@ -35,6 +35,7 @@ from app.mcp.queries import (
     find_callers,
     find_runtime_path,
     get_contract,
+    get_data_access,
     get_module_summary,
     get_symbol,
     impact_analysis,
@@ -117,6 +118,22 @@ _TOOLS = [
             "type": "object",
             "properties": {"contract_id": {"type": "string"}},
             "required": ["contract_id"],
+        },
+    ),
+    Tool(
+        name="get_data_access",
+        description=(
+            "List DataEntities this symbol reads / writes — spec §11.3. "
+            "Returns {reads, writes, truncated}; each item carries "
+            "certainty, exercised flag and the access site."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "symbol_id": {"type": "string"},
+                "limit": {"type": "integer", "default": 200},
+            },
+            "required": ["symbol_id"],
         },
     ),
     Tool(
@@ -346,6 +363,13 @@ def build_server(project_id: uuid.UUID) -> Server:
                 )
                 if result is None:
                     result = {"error": "not_found"}
+            elif name == "get_data_access":
+                result = await get_data_access(
+                    db,
+                    project_id=project_id,
+                    symbol_id=arguments["symbol_id"],
+                    limit=arguments.get("limit", 200),
+                )
             elif name == "read_file":
                 from app.mcp.file_read import read_project_file
 
