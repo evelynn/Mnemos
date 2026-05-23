@@ -26,7 +26,7 @@ def _read(p: Path) -> str:
 
 def test_plan_from_finding_endpoint_defined():
     body = _read(_APP / "api" / "plans.py")
-    assert '@router.post("/api/v1/findings/{finding_id}/plan")' in body
+    assert '"/api/v1/findings/{finding_id}/plan"' in body
     assert "async def plan_from_finding(" in body
 
 

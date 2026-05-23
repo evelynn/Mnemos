@@ -9,7 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
-from app.auth.org_scope import require_project_org
+from app.auth.org_scope import require_project_org, resolve_project_org, same_org
+from app.auth.rbac import require_operator
 from app.db import get_session
 from app.mcp.queries import impact_analysis
 from app.models.findings import Finding
@@ -122,7 +123,10 @@ async def submit_plan(
     return _out(plan)
 
 
-@router.post("/api/v1/findings/{finding_id}/plan")
+@router.post(
+    "/api/v1/findings/{finding_id}/plan",
+    dependencies=[Depends(require_operator)],
+)
 async def plan_from_finding(
     finding_id: uuid.UUID,
     user: CurrentUser,
@@ -293,15 +297,29 @@ async def list_plans(
     return [_out(r) for r in rows]
 
 
+async def _plan_in_user_org(db, user, plan_id):
+    """Load a plan iff it belongs to the caller's org; 404 otherwise.
+    Returns the Plan. Mirrors the pattern PR-60 used for findings —
+    /plans routes key off plan_id, so require_project_org (which needs
+    a project_id path param) can't gate them; the org check is inline."""
+    plan = (
+        await db.execute(select(Plan).where(Plan.id == plan_id))
+    ).scalar_one_or_none()
+    if plan is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    org_id = await resolve_project_org(db, plan.project_id)
+    if not same_org(user, org_id):
+        raise HTTPException(status_code=404, detail="not_found")
+    return plan
+
+
 @router.get("/api/v1/plans/{plan_id}")
 async def get_plan(
     plan_id: uuid.UUID,
-    _: CurrentUser,
+    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> PlanOut:
-    plan = (await db.execute(select(Plan).where(Plan.id == plan_id))).scalar_one_or_none()
-    if plan is None:
-        raise HTTPException(status_code=404, detail="not_found")
+    plan = await _plan_in_user_org(db, user, plan_id)
     return _out(plan)
 
 
@@ -310,16 +328,17 @@ class PlanDecision(BaseModel):
     feedback: str | None = None
 
 
-@router.post("/api/v1/plans/{plan_id}/decide")
+@router.post(
+    "/api/v1/plans/{plan_id}/decide",
+    dependencies=[Depends(require_operator)],
+)
 async def decide_plan(
     plan_id: uuid.UUID,
     body: PlanDecision,
     user: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> PlanOut:
-    plan = (await db.execute(select(Plan).where(Plan.id == plan_id))).scalar_one_or_none()
-    if plan is None:
-        raise HTTPException(status_code=404, detail="not_found")
+    plan = await _plan_in_user_org(db, user, plan_id)
     status_map = {"approve": "approved", "reject": "rejected", "regenerate": "pending_approval"}
     plan.status = status_map[body.status]
     if body.status == "approve":
