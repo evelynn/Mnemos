@@ -13,6 +13,7 @@ the feature code, not this module.
 
 from __future__ import annotations
 
+import hmac
 import time
 
 from prometheus_client import (
@@ -131,10 +132,12 @@ def _route_template(request: Request) -> str:
 async def metrics_endpoint(request: "Request") -> Response:
     """Serve the Prometheus scrape endpoint.
 
-    Authentication: when ``METRICS_BEARER_TOKEN`` is set, requests must
-    present ``Authorization: Bearer <token>``. Empty (default) leaves
-    the endpoint open — only safe when /metrics is locked down at the
-    reverse proxy or only reachable from the monitoring network.
+    Authentication is fail-closed: ``METRICS_BEARER_TOKEN`` MUST be set
+    and the request must present ``Authorization: Bearer <token>``.
+    Metrics labels carry project ids and actor handles — leaving the
+    scrape open by default lets anyone with reachability directory-list
+    every tenant (§14.3). A localhost-only loopback exception keeps
+    same-host monitoring sidecars working without a token.
 
     Supports multiprocess (uvicorn --workers N) when the
     ``PROMETHEUS_MULTIPROC_DIR`` env var is set — otherwise falls back
@@ -145,9 +148,13 @@ async def metrics_endpoint(request: "Request") -> Response:
     from app.config import get_settings
 
     expected = get_settings().metrics_bearer_token
+    client = request.client
+    is_loopback = bool(client) and client.host in ("127.0.0.1", "::1", "localhost")
+    if not expected and not is_loopback:
+        return Response(status_code=503, content=b"metrics_token_not_configured")
     if expected:
         provided = request.headers.get("authorization", "")
-        if provided != f"Bearer {expected}":
+        if not hmac.compare_digest(provided, f"Bearer {expected}"):
             return Response(status_code=401, content=b"unauthorized")
 
     if os.getenv("PROMETHEUS_MULTIPROC_DIR"):
