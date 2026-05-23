@@ -497,6 +497,28 @@ def build_server(project_id: uuid.UUID) -> Server:
     return server
 
 
+def _require_mcp_token() -> None:
+    """Fail-closed startup gate (spec §11.6).
+
+    A bare ``ggoss-mcp --project <uuid>`` over stdio used to grant any
+    process that could spawn the binary full read of that project,
+    including data tools. The server now requires
+    ``MNEMOS_MCP_TOKEN`` to be set in the environment — the platform
+    sets it when it intentionally launches the MCP server; an
+    operator running it by hand sets it themselves. An unset env is a
+    misconfiguration and the binary refuses to start.
+    """
+    import os
+    import sys
+
+    if not os.environ.get("MNEMOS_MCP_TOKEN"):
+        sys.stderr.write(
+            "{\"level\":\"error\",\"message\":\"MNEMOS_MCP_TOKEN_required\","
+            "\"recoverable\":false}\n"
+        )
+        sys.exit(2)
+
+
 async def _run(project_id: uuid.UUID) -> None:
     server = build_server(project_id)
     async with stdio_server() as (reader, writer):
@@ -504,6 +526,7 @@ async def _run(project_id: uuid.UUID) -> None:
 
 
 def main() -> None:
+    _require_mcp_token()
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True, help="project UUID")
     args = parser.parse_args()
