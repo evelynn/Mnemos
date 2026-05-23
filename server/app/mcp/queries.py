@@ -10,7 +10,7 @@ import re
 import uuid
 from typing import Any
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.findings import Finding, Summary
@@ -187,37 +187,94 @@ async def get_symbol(
     }
 
 
+def _edge_out(e: Edge) -> dict[str, Any]:
+    return {
+        "caller_id": e.source_id,
+        "callee_id": e.target_id,
+        "certainty": e.certainty,
+        # Spec §11.3 — every edge surfaces whether OTLP confirmed it.
+        "exercised": str((e.data or {}).get("exercised", "")).lower() == "true",
+        "site": (e.data or {}).get("invocation_site"),
+    }
+
+
+async def _walk_calls(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    start: str,
+    direction: str,  # "callers" → walk source from target=current
+    transitive: bool,
+    max_depth: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Shared BFS used by both find_callers and find_callees.
+
+    Returns ``{edges, truncated, depth_reached}``. When ``transitive``
+    is false a single hop is returned, matching the simple-find shape.
+    ``truncated`` flips to true when the ``limit`` cap is hit.
+    """
+    max_depth = max(1, min(max_depth, 5))
+    limit = max(1, min(limit, 1000))
+    edges: list[dict[str, Any]] = []
+    seen_nodes: set[str] = {start}
+    frontier: list[str] = [start]
+    truncated = False
+    depth_reached = 0
+    for depth in range(1, max_depth + 1):
+        if not frontier:
+            break
+        if direction == "callers":
+            cond = (Edge.target_id.in_(frontier),)
+        else:
+            cond = (Edge.source_id.in_(frontier),)
+        rows = (
+            await session.execute(
+                select(Edge).where(
+                    Edge.project_id == project_id,
+                    Edge.kind == "CALLS",
+                    Edge.valid_to.is_(None),
+                    *cond,
+                ).limit(limit + 1)
+            )
+        ).scalars().all()
+        depth_reached = depth
+        if not rows:
+            break
+        next_frontier: list[str] = []
+        for e in rows:
+            if len(edges) >= limit:
+                truncated = True
+                break
+            edges.append(_edge_out(e))
+            nxt = e.source_id if direction == "callers" else e.target_id
+            if nxt not in seen_nodes:
+                seen_nodes.add(nxt)
+                next_frontier.append(nxt)
+        if truncated or not transitive:
+            break
+        frontier = next_frontier
+    return {"edges": edges, "truncated": truncated, "depth_reached": depth_reached}
+
+
 async def find_callers(
     session: AsyncSession,
     *,
     project_id: uuid.UUID,
     symbol_id: str,
     limit: int = 100,
-) -> list[dict[str, Any]]:
-    limit = max(1, min(limit, 1000))
-    rows = (
-        await session.execute(
-            select(Edge)
-            .where(
-                and_(
-                    Edge.project_id == project_id,
-                    Edge.target_id == symbol_id,
-                    Edge.kind == "CALLS",
-                    Edge.valid_to.is_(None),
-                )
-            )
-            .limit(limit)
-        )
-    ).scalars().all()
-    return [
-        {
-            "caller_id": e.source_id,
-            "callee_id": e.target_id,
-            "certainty": e.certainty,
-            "site": (e.data or {}).get("invocation_site"),
-        }
-        for e in rows
-    ]
+    transitive: bool = False,
+    max_depth: int = 3,
+) -> dict[str, Any]:
+    return await _walk_calls(
+        session,
+        project_id=project_id,
+        start=symbol_id,
+        direction="callers",
+        transitive=transitive,
+        max_depth=max_depth,
+        limit=limit,
+    )
 
 
 async def find_callees(
@@ -226,31 +283,18 @@ async def find_callees(
     project_id: uuid.UUID,
     symbol_id: str,
     limit: int = 100,
-) -> list[dict[str, Any]]:
-    limit = max(1, min(limit, 1000))
-    rows = (
-        await session.execute(
-            select(Edge)
-            .where(
-                and_(
-                    Edge.project_id == project_id,
-                    Edge.source_id == symbol_id,
-                    Edge.kind == "CALLS",
-                    Edge.valid_to.is_(None),
-                )
-            )
-            .limit(limit)
-        )
-    ).scalars().all()
-    return [
-        {
-            "caller_id": e.source_id,
-            "callee_id": e.target_id,
-            "certainty": e.certainty,
-            "site": (e.data or {}).get("invocation_site"),
-        }
-        for e in rows
-    ]
+    transitive: bool = False,
+    max_depth: int = 3,
+) -> dict[str, Any]:
+    return await _walk_calls(
+        session,
+        project_id=project_id,
+        start=symbol_id,
+        direction="callees",
+        transitive=transitive,
+        max_depth=max_depth,
+        limit=limit,
+    )
 
 
 async def impact_analysis(
@@ -260,11 +304,15 @@ async def impact_analysis(
     symbol_id: str,
     max_depth: int = 3,
 ) -> dict[str, Any]:
-    """Transitive caller walk. Tests and data impacts land in Weeks 5-6."""
+    """Transitive caller walk + data / test / runtime impacts."""
     max_depth = max(1, min(max_depth, 5))
     direct = [
         e["caller_id"]
-        for e in await find_callers(session, project_id=project_id, symbol_id=symbol_id, limit=500)
+        for e in (
+            await find_callers(
+                session, project_id=project_id, symbol_id=symbol_id, limit=500
+            )
+        )["edges"]
     ]
     seen = set(direct)
     frontier = list(direct)
@@ -272,9 +320,10 @@ async def impact_analysis(
     for _depth in range(max_depth - 1):
         next_frontier: list[str] = []
         for node in frontier:
-            for caller in await find_callers(
+            walk = await find_callers(
                 session, project_id=project_id, symbol_id=node, limit=500
-            ):
+            )
+            for caller in walk["edges"]:
                 cid = caller["caller_id"]
                 if cid in seen:
                     continue

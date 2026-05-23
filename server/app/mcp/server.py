@@ -74,24 +74,38 @@ _TOOLS = [
     ),
     Tool(
         name="find_callers",
-        description="List CALLS edges whose target is this symbol.",
+        description=(
+            "List CALLS edges whose target is this symbol. With "
+            "transitive=true, walks the caller graph up to max_depth. "
+            "Each edge surfaces certainty and the OTLP exercised flag; "
+            "the response carries truncated + depth_reached."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "symbol_id": {"type": "string"},
                 "limit": {"type": "integer", "default": 100},
+                "transitive": {"type": "boolean", "default": False},
+                "max_depth": {"type": "integer", "default": 3},
             },
             "required": ["symbol_id"],
         },
     ),
     Tool(
         name="find_callees",
-        description="List CALLS edges whose source is this symbol.",
+        description=(
+            "List CALLS edges whose source is this symbol. With "
+            "transitive=true, walks downstream up to max_depth. Each "
+            "edge carries exercised; response has truncated + "
+            "depth_reached."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
                 "symbol_id": {"type": "string"},
                 "limit": {"type": "integer", "default": 100},
+                "transitive": {"type": "boolean", "default": False},
+                "max_depth": {"type": "integer", "default": 3},
             },
             "required": ["symbol_id"],
         },
@@ -340,6 +354,8 @@ def build_server(project_id: uuid.UUID) -> Server:
                     project_id=project_id,
                     symbol_id=arguments["symbol_id"],
                     limit=int(arguments.get("limit", 100)),
+                    transitive=bool(arguments.get("transitive", False)),
+                    max_depth=int(arguments.get("max_depth", 3)),
                 )
             elif name == "find_callees":
                 result = await find_callees(
@@ -347,6 +363,8 @@ def build_server(project_id: uuid.UUID) -> Server:
                     project_id=project_id,
                     symbol_id=arguments["symbol_id"],
                     limit=int(arguments.get("limit", 100)),
+                    transitive=bool(arguments.get("transitive", False)),
+                    max_depth=int(arguments.get("max_depth", 3)),
                 )
             elif name == "impact_analysis":
                 result = await impact_analysis(
