@@ -287,8 +287,22 @@ async def run_retention_purge(ctx: dict) -> dict[str, int] | None:
 # the longest stage budget plus a margin. The orchestrator's per-stage
 # ``time_budget_sec`` defaults to 1800s (30 min); the maximum pipeline
 # walks ~12 stages, so 6h is the soft ceiling beyond which a running
-# row almost certainly means a worker crash.
-_STALE_RUN_AFTER_SEC = 6 * 60 * 60
+# row almost certainly means a worker crash. Operators on monorepos
+# that legitimately exceed this can override via env without forking
+# the cron job code.
+def _stale_run_after_sec() -> int:
+    import os
+    raw = os.environ.get("MNEMOS_STALE_RUN_AFTER_SEC", "")
+    try:
+        n = int(raw)
+        if n > 0:
+            return n
+    except ValueError:
+        pass
+    return 6 * 60 * 60
+
+
+_STALE_RUN_AFTER_SEC = _stale_run_after_sec()
 
 
 async def _reset_stale_runs(session: AsyncSession) -> dict[str, int]:

@@ -25,7 +25,7 @@ def _read() -> str:
 def test_runtime_path_frequency_is_real():
     body = _read()
     idx = body.find("async def find_runtime_path(")
-    slab = body[idx:idx + 2000]
+    slab = body[idx:idx + 3000]
     assert "hit_count" in slab
     # The "frequency: 1" stub is gone.
     assert "min(hit_counts)" in slab

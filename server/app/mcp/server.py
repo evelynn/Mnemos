@@ -47,14 +47,17 @@ _TOOLS = [
     Tool(
         name="search_symbols",
         description=(
-            "Search symbols by substring over id and data.name. "
-            "Vector+BM25 ranking lands in Week 6."
+            "Search symbols by ranked multi-term lexical match over id, "
+            "name and signature (PR-80 BM25-ish; PR-90 fuses vector "
+            "when MNEMOS_EMBEDDING_PROVIDER is configured). Optional "
+            "kind / component_id filters per spec §11.3."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
                 "kind": {"type": "string", "nullable": True},
+                "component_id": {"type": "string", "nullable": True},
                 "top_k": {"type": "integer", "default": 20},
             },
             "required": ["query"],
@@ -243,14 +246,17 @@ _TOOLS = [
     Tool(
         name="find_runtime_path",
         description=(
-            "BFS over exercised CALLS edges starting at a contract. Shows "
-            "chains that were observed in telemetry."
+            "BFS over exercised CALLS edges starting at a contract. Returns "
+            "common paths with the bottleneck OTLP hit count as frequency. "
+            "Optional time_window (e.g. '7d') drops edges last seen before "
+            "the window — per spec §11.3."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "entry_contract_id": {"type": "string"},
                 "max_depth": {"type": "integer", "default": 6},
+                "time_window": {"type": "string", "nullable": True},
             },
             "required": ["entry_contract_id"],
         },
@@ -338,6 +344,7 @@ def build_server(project_id: uuid.UUID) -> Server:
                     project_id=project_id,
                     query=arguments.get("query", ""),
                     kind=arguments.get("kind"),
+                    component_id=arguments.get("component_id"),
                     top_k=int(arguments.get("top_k", 20)),
                 )
             elif name == "get_symbol":
@@ -447,6 +454,7 @@ def build_server(project_id: uuid.UUID) -> Server:
                     project_id=project_id,
                     entry_contract_id=arguments["entry_contract_id"],
                     max_depth=int(arguments.get("max_depth", 6)),
+                    time_window=arguments.get("time_window"),
                 )
             elif name == "submit_plan":
                 result = await submit_plan_tool(

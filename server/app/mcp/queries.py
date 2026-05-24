@@ -71,6 +71,7 @@ async def search_symbols(
     project_id: uuid.UUID,
     query: str,
     kind: str | None = None,
+    component_id: str | None = None,
     top_k: int = 20,
 ) -> list[dict[str, Any]]:
     top_k = max(1, min(top_k, 200))
@@ -81,6 +82,9 @@ async def search_symbols(
     )
     if kind:
         stmt = stmt.where(Node.kind == kind)
+    if component_id:
+        # Spec §11.3 filter — scope the search to a single component.
+        stmt = stmt.where(Node.data["component_id"].astext == component_id)
     if terms:
         # Candidate set — any term matching id / name / signature. The
         # ranking below (not SQL) decides the order.
@@ -537,14 +541,38 @@ async def get_module_summary(
     }
 
 
+_TIME_WINDOW_SUFFIXES = {"h": 3600, "d": 86400, "w": 7 * 86400}
+
+
+def _parse_time_window(s: str | None) -> int | None:
+    """Parse spec §11.3 ``time_window`` like ``"7d"`` / ``"24h"`` /
+    ``"4w"`` to seconds. Returns None when no/invalid window — the
+    caller treats that as "no time filter"."""
+    if not s:
+        return None
+    s = s.strip().lower()
+    if len(s) < 2 or s[-1] not in _TIME_WINDOW_SUFFIXES:
+        return None
+    try:
+        n = int(s[:-1])
+    except ValueError:
+        return None
+    return n * _TIME_WINDOW_SUFFIXES[s[-1]] if n > 0 else None
+
+
 async def find_runtime_path(
     session: AsyncSession,
     *,
     project_id: uuid.UUID,
     entry_contract_id: str,
     max_depth: int = 6,
+    time_window: str | None = None,
 ) -> dict[str, Any]:
     """Return reachable symbols from a contract via exercised edges.
+
+    ``time_window`` (spec §11.3, e.g. ``"7d"``) filters out edges whose
+    ``last_seen_at`` predates the window — otherwise an edge exercised
+    once six months ago leaks into "common paths today".
 
     ``frequency`` is the bottleneck OTLP hit count along the chain —
     ``min(edge.data.hit_count)`` over the steps taken. The earlier
@@ -552,21 +580,30 @@ async def find_runtime_path(
     ``hit_count`` per observation, so the real value is queryable.
     """
     max_depth = max(1, min(max_depth, 10))
+    window_sec = _parse_time_window(time_window)
     frontier = [entry_contract_id]
     seen: set[str] = {entry_contract_id}
     chain: list[str] = []
     hit_counts: list[int] = []
+    cutoff_iso: str | None = None
+    if window_sec is not None:
+        from datetime import datetime, timedelta, timezone
+
+        cutoff_iso = (
+            datetime.now(tz=timezone.utc) - timedelta(seconds=window_sec)
+        ).isoformat()
     for _ in range(max_depth):
-        rows = (
-            await session.execute(
-                select(Edge).where(
-                    Edge.project_id == project_id,
-                    Edge.source_id.in_(frontier),
-                    Edge.valid_to.is_(None),
-                    Edge.data["exercised"].astext == "true",
-                )
-            )
-        ).scalars().all()
+        stmt = select(Edge).where(
+            Edge.project_id == project_id,
+            Edge.source_id.in_(frontier),
+            Edge.valid_to.is_(None),
+            Edge.data["exercised"].astext == "true",
+        )
+        if cutoff_iso is not None:
+            # last_seen_at lives in Edge.data; compare ISO strings
+            # (RFC-3339 ISO compares correctly when both are tz-aware).
+            stmt = stmt.where(Edge.data["last_seen_at"].astext >= cutoff_iso)
+        rows = (await session.execute(stmt)).scalars().all()
         frontier = []
         for e in rows:
             if e.target_id in seen:
