@@ -86,6 +86,85 @@ def _prompt_password() -> str:
         return p1
 
 
+async def _verify() -> int:
+    """One-command boot self-test (PR-102). Mirrors /health/ready but
+    runs from the CLI on a freshly-built image, so an operator can
+    catch a bad env / missing analyzer / wrong-rotated FERNET_KEY
+    BEFORE the first webhook arrives. Returns 0 if every hard-fail
+    check passes; 1 otherwise. Soft warnings (missing analyzer
+    binaries) print but don't change the exit code."""
+    import shutil as _shutil
+    import sys as _sys
+
+    from app.config import get_settings
+
+    failures: list[str] = []
+
+    # 1) config — get_settings re-runs the PR-97 SECRET_KEY guard.
+    try:
+        s = get_settings()
+    except RuntimeError as exc:
+        print(f"FAIL  config: {exc}", file=_sys.stderr)
+        return 1
+    print(f"ok    config: mnemos_env={s.mnemos_env}")
+
+    # 2) DB connect.
+    try:
+        from app.db import SessionLocal
+        from sqlalchemy import text
+
+        async with SessionLocal() as db:
+            await db.execute(text("SELECT 1"))
+        print("ok    database")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL  database: {exc.__class__.__name__}: {exc}", file=_sys.stderr)
+        failures.append("database")
+
+    # 3) Redis connect.
+    try:
+        from app.db import get_redis
+
+        r = await get_redis()
+        pong = await r.ping()
+        if not pong:
+            raise RuntimeError("no pong")
+        print("ok    redis")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL  redis: {exc.__class__.__name__}: {exc}", file=_sys.stderr)
+        failures.append("redis")
+
+    # 4) Crypto round-trip — catches a wrong-rotated FERNET_KEY.
+    try:
+        from app.safety.crypto import decrypt, encrypt
+
+        probe = "mnemos-verify-probe"
+        ct, iv = encrypt(probe)
+        if decrypt(ct, iv) != probe:
+            raise RuntimeError("round_trip_mismatch")
+        print("ok    crypto: round_trip")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL  crypto: {exc.__class__.__name__}: {exc}", file=_sys.stderr)
+        failures.append("crypto")
+
+    # 5) Analyzer binaries on PATH (advisory).
+    from app.analyzers.registry import _BINARIES
+
+    missing = [b for b in _BINARIES.values() if _shutil.which(b) is None]
+    if missing:
+        print(
+            f"warn  analyzers missing on PATH: {','.join(missing)} "
+            "(stages will skip; run `docker compose --profile analyzers build`)"
+        )
+    else:
+        print("ok    analyzers: all present")
+
+    if failures:
+        print(f"\nverify FAILED: {','.join(failures)}", file=_sys.stderr)
+        return 1
+    print("\nverify OK")
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -117,6 +196,15 @@ def main() -> None:
         "--dry-run", action="store_true", help="count without writing changes"
     )
 
+    sub.add_parser(
+        "verify",
+        help=(
+            "boot self-test: env (FERNET_KEY/SECRET_KEY/MNEMOS_ENV), "
+            "DB + Redis connect, crypto round-trip, analyzer binaries "
+            "on PATH. Non-zero exit on a hard fail."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.cmd == "create-user":
@@ -130,6 +218,9 @@ def main() -> None:
         rc = asyncio.run(
             _rotate_fernet_key(args.old_key, args.new_key, args.dry_run)
         )
+        sys.exit(rc)
+    if args.cmd == "verify":
+        rc = asyncio.run(_verify())
         sys.exit(rc)
 
 
