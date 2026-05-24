@@ -92,6 +92,15 @@ break_glass_grants_total = Counter(
     labelnames=("action",),
 )
 
+# PR-94 — append-only audit (§14.4) failures. The previous logger
+# swallowed write errors silently; this counter + the structured log
+# entry give an operator a visible "audit went dark" signal.
+audit_write_failures_total = Counter(
+    "mnemos_audit_write_failures_total",
+    "Audit-log inserts that failed (and were rolled back) per action.",
+    labelnames=("action",),
+)
+
 
 class PrometheusMiddleware(BaseHTTPMiddleware):
     """Records the HTTP counter and histogram for every handled request.
