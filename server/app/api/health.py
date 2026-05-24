@@ -38,18 +38,62 @@ async def ready() -> JSONResponse:
     db_ok, db_msg = await _check_db()
     redis_ok, redis_msg = await _check_redis()
     worker_ok, worker_msg = await _check_worker()
+    # PR-99 deep checks: ``crypto`` catches a wrong-rotated FERNET_KEY
+    # before secrets start failing; ``analyzers`` surfaces which
+    # language binaries are missing on PATH so an operator knows
+    # which images to install. Both are advisory — they don't flip
+    # overall=503 unless crypto is broken (secrets can't decrypt).
+    crypto_ok, crypto_msg = _check_crypto()
+    analyzers_status, analyzers_msg = _check_analyzers()
 
     parts = {
         "database": {"ok": db_ok, "message": db_msg},
         "redis": {"ok": redis_ok, "message": redis_msg},
         "worker": {"ok": worker_ok, "message": worker_msg},
+        "crypto": {"ok": crypto_ok, "message": crypto_msg},
+        "analyzers": {"ok": analyzers_status, "message": analyzers_msg},
     }
-    overall = db_ok and redis_ok and worker_ok
+    # Analyzers being partially installed is degraded-but-running.
+    # Crypto failing means every secret decrypt will throw → 503.
+    overall = db_ok and redis_ok and worker_ok and crypto_ok
     status = 200 if overall else 503
     return JSONResponse(
         status_code=status,
         content={"status": "ok" if overall else "degraded", "checks": parts},
     )
+
+
+def _check_crypto() -> tuple[bool, str]:
+    """Encrypt + decrypt a known plaintext via the configured KMS so
+    a rotated-incorrectly FERNET_KEY surfaces here, not on the first
+    secret read."""
+    try:
+        from app.safety.crypto import decrypt, encrypt
+
+        probe = b"mnemos-health-probe"
+        ct, iv = encrypt(probe.decode())
+        out = decrypt(ct, iv)
+        return out.encode() == probe, "ok"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{exc.__class__.__name__}: {exc}"
+
+
+def _check_analyzers() -> tuple[bool, str]:
+    """Probe each language's analyzer binary on PATH. Returns the
+    list of missing binaries — analyzers being partially installed
+    is normal in Phase-1 (the operator may deliberately skip ones
+    they don't have a language for) so this is advisory."""
+    import shutil as _shutil
+
+    from app.analyzers.registry import _BINARIES
+
+    missing = sorted(
+        binary for binary in _BINARIES.values()
+        if _shutil.which(binary) is None
+    )
+    if not missing:
+        return True, "all_present"
+    return True, "missing: " + ",".join(missing)
 
 
 async def _check_db() -> tuple[bool, str]:
