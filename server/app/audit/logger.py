@@ -1,3 +1,4 @@
+import json
 import logging
 import uuid
 from typing import Any
@@ -8,6 +9,44 @@ from app.db import SessionLocal
 from app.models.audit import AuditLog
 
 log = logging.getLogger(__name__)
+
+# Hard cap on the serialised ``details`` JSON. MCP tool calls can pass
+# tens of KB of args; the audit table is hot, so a few thousand bytes
+# is plenty and anything bigger is replaced with a marker pointing at
+# the original size. Override with MNEMOS_AUDIT_DETAILS_CAP if needed.
+_DETAILS_CAP_BYTES = 4096
+
+
+def _cap_details(details: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Replace an oversized ``details`` payload with a small marker so
+    the audit row stays compact. The original size is preserved so an
+    operator looking at the trace knows the call really did pass that
+    much data."""
+    if details is None:
+        return None
+    import os
+
+    try:
+        cap = int(os.environ.get("MNEMOS_AUDIT_DETAILS_CAP", "")) or _DETAILS_CAP_BYTES
+    except ValueError:
+        cap = _DETAILS_CAP_BYTES
+    try:
+        # No ``default=str`` — JSONB only accepts pure JSON types, so a
+        # payload that needs coercion is a contract bug; surface it as
+        # a marker rather than silently stringifying via default=str.
+        serialised = json.dumps(details)
+    except (TypeError, ValueError):
+        return {"truncated": True, "reason": "not_json_serialisable"}
+    if len(serialised.encode("utf-8")) <= cap:
+        return details
+    return {
+        "truncated": True,
+        "original_bytes": len(serialised.encode("utf-8")),
+        "cap_bytes": cap,
+        # Keep just the top-level keys — they're usually the agent's
+        # tool-name + small scalars; bulky inputs ride inside.
+        "keys": list(details.keys()) if isinstance(details, dict) else None,
+    }
 
 
 async def record(
@@ -30,7 +69,7 @@ async def record(
         action=action,
         target=target,
         project_id=project_id,
-        details=details,
+        details=_cap_details(details),
     )
     if session is not None:
         # Caller-managed transaction: ride it. If the caller's commit
