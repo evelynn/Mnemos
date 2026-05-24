@@ -95,6 +95,7 @@ def create_app() -> FastAPI:
     app.include_router(artifacts_api.router)
     app.include_router(data_api.router)
     app.include_router(data_api.query_router)
+    app.include_router(data_api.query_log_router)
     app.include_router(findings_api.router)
     app.include_router(plans_api.router)
     app.include_router(diffs_api.router)

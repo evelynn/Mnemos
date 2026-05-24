@@ -246,6 +246,51 @@ async def refresh_sample(
     }
 
 
+query_log_router = APIRouter(
+    tags=["data"],
+    dependencies=[Depends(require_project_org())],
+)
+
+
+@query_log_router.get("/api/v1/projects/{project_id}/data_query_log")
+async def list_data_query_log(
+    project_id: uuid.UUID,
+    _: CurrentUser,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Spec §13.2: ``GET /api/v1/projects/{id}/data_query_log``.
+
+    The audit reviewer flagged this endpoint as spec'd but absent.
+    Returns the project's recorded ``data.query`` runs newest first —
+    SQL, purpose, requester, row count, execution time, error. The
+    ``DataQueryLog`` rows already exist; this is the read surface.
+    """
+    limit = max(1, min(limit, 500))
+    rows = (
+        await db.execute(
+            select(DataQueryLog)
+            .where(DataQueryLog.project_id == project_id)
+            .order_by(DataQueryLog.executed_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return [
+        {
+            "id": str(r.id),
+            "db_component_id": r.db_component_id,
+            "sql": r.sql,
+            "purpose": r.purpose,
+            "requester": r.requester,
+            "row_count": r.row_count,
+            "execution_ms": r.execution_ms,
+            "error": r.error,
+            "executed_at": r.executed_at.isoformat(),
+        }
+        for r in rows
+    ]
+
+
 query_router = APIRouter(
     prefix="/api/v1/projects/{project_id}/data",
     tags=["data"],
