@@ -456,6 +456,15 @@ async def get_module_summary(
     ).scalar_one_or_none()
     if row is None:
         return None
+    # Certainty rollup — spec §11.3 mandates the
+    # {verified, asserted, inferred} breakdown so an agent can tell
+    # how trustworthy the narrative's evidence is.
+    breakdown = {"verified": 0, "asserted": 0, "inferred": 0}
+    for claim in row.claims or []:
+        for ev in (claim.get("evidence") or []) if isinstance(claim, dict) else []:
+            c = ev.get("certainty") if isinstance(ev, dict) else None
+            if c in breakdown:
+                breakdown[c] += 1
     return {
         "target_id": row.target_id,
         "level": row.level,
@@ -463,6 +472,7 @@ async def get_module_summary(
         "detailed": row.detailed,
         "claims": row.claims,
         "open_questions": row.open_questions,
+        "certainty_breakdown": breakdown,
         "generated_at": row.generated_at.isoformat(),
         "model_used": row.model_used,
     }
@@ -475,11 +485,18 @@ async def find_runtime_path(
     entry_contract_id: str,
     max_depth: int = 6,
 ) -> dict[str, Any]:
-    """Return reachable symbols from a contract, restricted to exercised edges."""
+    """Return reachable symbols from a contract via exercised edges.
+
+    ``frequency`` is the bottleneck OTLP hit count along the chain —
+    ``min(edge.data.hit_count)`` over the steps taken. The earlier
+    hardcoded ``1`` was a stub; PR-25's reconcile already increments
+    ``hit_count`` per observation, so the real value is queryable.
+    """
     max_depth = max(1, min(max_depth, 10))
     frontier = [entry_contract_id]
     seen: set[str] = {entry_contract_id}
     chain: list[str] = []
+    hit_counts: list[int] = []
     for _ in range(max_depth):
         rows = (
             await session.execute(
@@ -498,9 +515,18 @@ async def find_runtime_path(
             seen.add(e.target_id)
             frontier.append(e.target_id)
             chain.append(e.target_id)
+            try:
+                hit_counts.append(int((e.data or {}).get("hit_count", 0)))
+            except (TypeError, ValueError):
+                hit_counts.append(0)
         if not frontier:
             break
-    return {"common_paths": [{"frequency": 1, "chain": chain}]}
+    frequency = min(hit_counts) if hit_counts else 0
+    return {
+        "common_paths": [
+            {"frequency": frequency, "chain": chain, "depth": len(chain)}
+        ],
+    }
 
 
 async def get_data_access(
