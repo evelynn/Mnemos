@@ -90,7 +90,7 @@ def test_search_symbols_is_ranked():
         Path(__file__).resolve().parents[1] / "app" / "mcp" / "queries.py"
     ).read_text(encoding="utf-8")
     idx = body.find("async def search_symbols(")
-    slab = body[idx:idx + 2000]
+    slab = body[idx:idx + 5500]
     assert "_tokenize(query)" in slab
     assert "_score_symbol(" in slab
     assert "scored.sort(" in slab

@@ -40,6 +40,14 @@ dev = [
     "mypy>=1.10",
     "httpx>=0.27",
 ]
+# Vector / semantic search — spec §11.3 "벡터 + BM25 앙상블 (RRF)".
+# Optional so a base install stays slim. Activate with
+# ``pip install mnemos-platform[search]``, run alembic 0022 to add
+# the embedding column, then set MNEMOS_EMBEDDING_PROVIDER + the
+# provider's key (VOYAGE_API_KEY / OPENAI_API_KEY).
+search = [
+    "pgvector>=0.3",
+]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

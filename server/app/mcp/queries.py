@@ -10,6 +10,7 @@ import re
 import uuid
 from typing import Any
 
+import sqlalchemy as sa
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -101,6 +102,64 @@ async def search_symbols(
             continue
         scored.append((s, r))
     scored.sort(key=lambda pair: pair[0], reverse=True)
+
+    # Vector half (spec §11.3) — when MNEMOS_EMBEDDING_PROVIDER is
+    # configured AND nodes carry stored embeddings (alembic 0022), the
+    # query is embedded and cosine-similar nodes are merged into the
+    # ranking via RRF. Disabled deployments keep the pure-lexical path
+    # above — no behaviour change without the env flag.
+    from app.mcp.embeddings import (
+        EMBEDDING_DIM,
+        embed_query,
+        is_enabled,
+        rrf_fuse,
+    )
+
+    by_id = {r.id: (s, r) for s, r in scored}
+    if terms and is_enabled():
+        try:
+            qvec = await embed_query(query)
+        except Exception:  # noqa: BLE001
+            qvec = None
+        if qvec is not None and len(qvec) == EMBEDDING_DIM:
+            # Defer the import: pgvector is optional and only imported
+            # when the operator has installed the [search] extra.
+            try:
+                from pgvector.sqlalchemy import Vector  # noqa: F401
+
+                vec_rows = (
+                    await session.execute(
+                        sa.text(
+                            "SELECT id FROM nodes "
+                            "WHERE project_id = :pid AND valid_to IS NULL "
+                            "  AND embedding IS NOT NULL "
+                            "ORDER BY embedding <=> (:q)::vector "
+                            "LIMIT :k"
+                        ),
+                        {
+                            "pid": str(project_id),
+                            "q": "[" + ",".join(str(x) for x in qvec) + "]",
+                            "k": top_k * 4,
+                        },
+                    )
+                ).all()
+                vector_ranked = [row[0] for row in vec_rows]
+                lexical_ranked = [r.id for _, r in scored]
+                fused = rrf_fuse(lexical_ranked, vector_ranked)
+                # Re-order using the fused score, keeping only entries
+                # we have a Node for (lexical candidate set).
+                rebuilt: list[tuple[float, Node]] = []
+                for sid, fscore in fused:
+                    if sid in by_id:
+                        _, node = by_id[sid]
+                        rebuilt.append((fscore, node))
+                if rebuilt:
+                    scored = rebuilt
+            except Exception:  # noqa: BLE001
+                # pgvector missing or column absent — fall back to
+                # pure-lexical silently; an operator who set the env
+                # without running the migration just gets PR-80.
+                pass
 
     return [
         {
