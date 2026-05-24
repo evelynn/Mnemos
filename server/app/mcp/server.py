@@ -490,11 +490,80 @@ def build_server(project_id: uuid.UUID) -> Server:
                 details={"arguments": arguments},
             )
 
-        import json
-
-        return [TextContent(type="text", text=json.dumps(result, default=str))]
+        return [TextContent(type="text", text=_cap_response(result))]
 
     return server
+
+
+# Spec §11.7 — every tool response must be capped so a god-object's
+# 1000-row caller list doesn't blow the agent's context window. The
+# old json.dumps was unconditional and uncapped.
+_MAX_RESPONSE_BYTES = 50 * 1024
+
+
+def _cap_response(result, max_bytes: int = _MAX_RESPONSE_BYTES) -> str:
+    """Serialise ``result`` to JSON; if too large, halve the largest
+    list field until it fits and append ``response_truncated`` markers
+    so the agent knows what to ask for next.
+
+    Single-pass on the original ``result`` so ``truncated_total``
+    always reports the real input size (not the post-halve size from a
+    naive recursion)."""
+    import json
+
+    text = json.dumps(result, default=str)
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+
+    if isinstance(result, dict):
+        biggest_key, biggest_len = None, 0
+        for k, v in result.items():
+            if isinstance(v, list) and len(v) > biggest_len:
+                biggest_key, biggest_len = k, len(v)
+        if biggest_key:
+            keep = biggest_len
+            while keep > 0:
+                keep //= 2
+                shrunk = {
+                    **result,
+                    biggest_key: result[biggest_key][:keep],
+                    "response_truncated": True,
+                    "truncated_field": biggest_key,
+                    "truncated_kept": keep,
+                    "truncated_total": biggest_len,
+                }
+                txt2 = json.dumps(shrunk, default=str)
+                if len(txt2.encode("utf-8")) <= max_bytes:
+                    return txt2
+            return json.dumps({
+                biggest_key: [],
+                "response_truncated": True,
+                "truncated_field": biggest_key,
+                "truncated_kept": 0,
+                "truncated_total": biggest_len,
+            })
+
+    if isinstance(result, list):
+        total = len(result)
+        keep = total
+        while keep > 0:
+            keep //= 2
+            txt2 = json.dumps(
+                {
+                    "items": result[:keep],
+                    "response_truncated": True,
+                    "truncated_kept": keep,
+                    "truncated_total": total,
+                },
+                default=str,
+            )
+            if len(txt2.encode("utf-8")) <= max_bytes:
+                return txt2
+
+    return json.dumps({
+        "response_truncated": True,
+        "reason": "scalar_exceeds_cap",
+    })
 
 
 def _require_mcp_token() -> None:
