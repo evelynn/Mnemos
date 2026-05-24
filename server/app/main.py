@@ -103,6 +103,7 @@ def create_app() -> FastAPI:
     app.include_router(comments_api.router)
     app.include_router(onboarding_api.router)
     app.include_router(audit_api.router)
+    app.include_router(audit_api.mcp_router)
     app.include_router(webhooks_api.router)
     app.include_router(otlp_router)
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")

@@ -155,7 +155,10 @@ async def patch_finding(
 
 @router.post(
     "/api/v1/projects/{project_id}/findings/rebuild",
-    dependencies=[Depends(require_project_org())],
+    dependencies=[
+        Depends(require_project_org()),
+        Depends(require_operator),
+    ],
 )
 async def rebuild_findings(
     project_id: uuid.UUID,

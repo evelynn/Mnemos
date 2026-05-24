@@ -65,3 +65,77 @@ async def list_audit(
         )
         for row in result.scalars().all()
     ]
+
+
+# ---------------------------------------------------------------------------
+# Spec §13.2 — MCP session listing (PR-93).
+# ---------------------------------------------------------------------------
+
+mcp_router = APIRouter(prefix="/api/v1", tags=["mcp"])
+
+
+@mcp_router.get("/mcp_sessions")
+async def list_mcp_sessions(
+    _: CurrentUser,
+    limit: int = Query(default=50, ge=1, le=500),
+    db: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Recent MCP tool calls grouped per actor — the spec §13.2
+    "MCP sessions" read surface. There is no dedicated session table;
+    we surface the audit-log view (actor + first / last call + count),
+    which is what an operator needs to answer "who is talking to my
+    server right now?".
+    """
+    from sqlalchemy import func as _func
+
+    stmt = (
+        select(
+            AuditLog.actor,
+            _func.min(AuditLog.occurred_at).label("first_seen"),
+            _func.max(AuditLog.occurred_at).label("last_seen"),
+            _func.count(AuditLog.id).label("call_count"),
+        )
+        .where(AuditLog.action.like("mcp.tool.%"))
+        .group_by(AuditLog.actor)
+        .order_by(_func.max(AuditLog.occurred_at).desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).all()
+    return [
+        {
+            "actor": row.actor,
+            "first_seen": row.first_seen.isoformat() if row.first_seen else None,
+            "last_seen": row.last_seen.isoformat() if row.last_seen else None,
+            "call_count": int(row.call_count),
+        }
+        for row in rows
+    ]
+
+
+@mcp_router.get("/mcp_sessions/{actor}/requests")
+async def mcp_session_requests(
+    actor: str,
+    _: CurrentUser,
+    limit: int = Query(default=100, ge=1, le=500),
+    db: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Per-session request log — spec §13.2's drill-down. Returns
+    recent ``mcp.tool.*`` audit entries for the given actor."""
+    stmt = (
+        select(AuditLog)
+        .where(AuditLog.actor == actor, AuditLog.action.like("mcp.tool.%"))
+        .order_by(AuditLog.occurred_at.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return [
+        {
+            "id": r.id,
+            "action": r.action,
+            "target": r.target,
+            "project_id": str(r.project_id) if r.project_id else None,
+            "details": r.details,
+            "occurred_at": r.occurred_at.isoformat(),
+        }
+        for r in rows
+    ]
