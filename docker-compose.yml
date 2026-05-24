@@ -78,13 +78,51 @@ services:
       - platform_data:/var/lib/mnemos
       - repos_data:/var/lib/mnemos/repos
 
+  # Analyzer build targets — ``docker compose --profile analyzers build``
+  # populates the five images the platform invokes via ``docker run``.
+  # Skipping the profile leaves the analyzer binaries absent on PATH;
+  # PR-98's runner now degrades gracefully (per-stage skip + audit) in
+  # that case instead of crashing, and /health/ready reports which
+  # binaries are missing (PR-99).
   analyzer-csharp:
     profiles: ["analyzers"]
     build:
       context: ./analyzers/ggoss-csharp
       dockerfile: Dockerfile
     image: mnemos/ggoss-csharp:latest
-    entrypoint: ["true"]  # built on-demand; the platform invokes via docker run
+    entrypoint: ["true"]
+
+  analyzer-ts:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-ts
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-ts:latest
+    entrypoint: ["true"]
+
+  analyzer-sql-mssql:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-sql-mssql
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-sql-mssql:latest
+    entrypoint: ["true"]
+
+  analyzer-sql-oracle:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-sql-oracle
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-sql-oracle:latest
+    entrypoint: ["true"]
+
+  analyzer-binary-dotnet:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-binary-dotnet
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-binary-dotnet:latest
+    entrypoint: ["true"]
 
 volumes:
   postgres_data:

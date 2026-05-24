@@ -115,6 +115,12 @@ python -c "import secrets; print(f'SECRET_KEY={secrets.token_urlsafe(48)}')" \
 docker compose up -d
 docker compose exec platform alembic upgrade head
 
+# Build the five language-analyzer images (one-time; the platform
+# invokes them via `docker run`). Omitting this step leaves their
+# stages reporting "analyzer_binary_not_found" instead of crashing —
+# /api/v1/health/ready lists which are missing.
+docker compose --profile analyzers build
+
 # create the first admin
 docker compose exec platform python -m app.cli create-user --username admin --role admin
 
