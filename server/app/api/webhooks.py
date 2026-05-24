@@ -43,11 +43,41 @@ from app.orchestrator.queue import get_queue
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 _SETTING_KEY = "gitlab_webhook_secret"
+# Label used when storing the GitLab webhook secret in the encrypted
+# ``secrets`` table — spec §2.8 "no plaintext credentials". Resolution
+# is encrypted-first; the legacy ``PlatformSetting`` JSON storage is
+# read as a fallback so existing deployments keep working until they
+# rotate the secret into the new table.
+_SECRET_LABEL = "gitlab_webhook_secret"
 
 
 async def _secret(db: AsyncSession) -> str | None:
+    # Preferred path — encrypted Secret row, decrypted on use. Avoids
+    # storing the HMAC key as a plaintext JSON setting (platform
+    # review #12). Looked up by canonical label.
+    from app.models.auth import Secret
+    from app.safety.crypto import decrypt
+
+    enc = (
+        await db.execute(select(Secret).where(Secret.label == _SECRET_LABEL))
+    ).scalar_one_or_none()
+    if enc is not None:
+        try:
+            return decrypt(enc.ciphertext, enc.iv)
+        except Exception:  # noqa: BLE001
+            # A failed decrypt is a configuration problem — log loud
+            # but don't crash the receiver. Falls through to the
+            # legacy PlatformSetting path so a bad rotation doesn't
+            # silently strand all webhook traffic.
+            import logging
+            logging.getLogger(__name__).exception(
+                "gitlab_webhook_secret decrypt failed"
+            )
+
     row = (
-        await db.execute(select(PlatformSetting).where(PlatformSetting.key == _SETTING_KEY))
+        await db.execute(
+            select(PlatformSetting).where(PlatformSetting.key == _SETTING_KEY)
+        )
     ).scalar_one_or_none()
     if row is None:
         return None
