@@ -99,13 +99,36 @@ class AnalyzerRunner:
 
         proc_env = _build_env(env)
 
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(cwd) if cwd else None,
-            env=proc_env,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(cwd) if cwd else None,
+                env=proc_env,
+            )
+        except FileNotFoundError as exc:
+            # PR-98: graceful degradation — when the analyzer binary
+            # isn't on PATH (docker image missing, Phase-1 deploy
+            # without the analyzer extra image), yield a structured
+            # recoverable error and exit 0-ish from the runner's
+            # perspective. The orchestrator marks the stage skipped,
+            # never crashes the whole run.
+            yield RunRecord(
+                stream="stderr",
+                payload={
+                    "level": "error",
+                    "message": (
+                        f"analyzer_binary_not_found: {self.binary!r} "
+                        f"({exc.strerror or 'No such file or directory'}). "
+                        "Install the analyzer image or remove the language "
+                        "from the project's stage list."
+                    ),
+                    "recoverable": True,
+                    "binary": self.binary,
+                },
+            )
+            return
 
         async def _drain(stream: asyncio.StreamReader | None, tag: str):
             if stream is None:

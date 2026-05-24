@@ -208,10 +208,19 @@ async def test_analyzer_stdout_and_stderr_interleave_freely(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_analyzer_missing_binary_raises_filenotfound(tmp_path):
+async def test_analyzer_missing_binary_yields_recoverable_error(tmp_path):
+    """PR-98 graceful degradation — when the analyzer image isn't
+    installed (Phase-1 deploys without the analyzer extra), the
+    runner yields a structured stderr record instead of propagating
+    FileNotFoundError, so the orchestrator marks the stage skipped
+    without crashing the run."""
     runner = AnalyzerRunner("/nonexistent/path/to/analyzer-binary")
-    with pytest.raises(FileNotFoundError):
-        await runner.run_collect("symbols", str(tmp_path))
+    records = await runner.run_collect("symbols", str(tmp_path))
+    err_records = [r for r in records if r.stream == "stderr"]
+    assert err_records, "missing binary should yield a stderr RunRecord"
+    msg = err_records[0].payload.get("message", "")
+    assert msg.startswith("analyzer_binary_not_found")
+    assert err_records[0].payload.get("recoverable") is True
 
 
 # ---------------------------------------------------------------------------
