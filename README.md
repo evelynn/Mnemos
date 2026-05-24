@@ -101,8 +101,16 @@ not one-shot analysis. The three request types are co-equal:
 
 ```bash
 cp .env.example .env
+
+# Generate FERNET_KEY (encrypts the secrets table).
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" \
   | xargs -I{} sh -c 'echo "FERNET_KEY={}" >> .env'
+
+# Generate SECRET_KEY (signs the session cookie). The default placeholder
+# in .env.example is forgeable — the platform refuses to start in
+# production until you replace it with a random string.
+python -c "import secrets; print(f'SECRET_KEY={secrets.token_urlsafe(48)}')" \
+  >> .env
 
 docker compose up -d
 docker compose exec platform alembic upgrade head
