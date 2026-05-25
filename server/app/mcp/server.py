@@ -50,7 +50,11 @@ _TOOLS = [
             "Search symbols by ranked multi-term lexical match over id, "
             "name and signature (PR-80 BM25-ish; PR-90 fuses vector "
             "when MNEMOS_EMBEDDING_PROVIDER is configured). Optional "
-            "kind / component_id filters per spec §11.3."
+            "kind / component_id filters per spec §11.3.\n\n"
+            "Use when: starting from a fuzzy name (\"the order-processing "
+            "function\") and you need a symbol_id to feed into the other "
+            "tools. Don't call this if you already have a fully-qualified "
+            "symbol_id — go straight to get_symbol."
         ),
         inputSchema={
             "type": "object",
@@ -67,7 +71,12 @@ _TOOLS = [
         name="get_symbol",
         description=(
             "Fetch a symbol plus caller/callee counts. Body source is not "
-            "returned — Claude Code reads files directly."
+            "returned — Claude Code reads files directly.\n\n"
+            "Use when: you have a symbol_id and want the high-level shape "
+            "(signature, file path, callsite counts, L1 summary). The "
+            "right next step before find_callers/find_callees, since the "
+            "caller/callee counts tell you whether transitive=true is "
+            "going to be cheap or huge."
         ),
         inputSchema={
             "type": "object",
@@ -81,7 +90,13 @@ _TOOLS = [
             "List CALLS edges whose target is this symbol. With "
             "transitive=true, walks the caller graph up to max_depth. "
             "Each edge surfaces certainty and the OTLP exercised flag; "
-            "the response carries truncated + depth_reached."
+            "the response carries truncated + depth_reached.\n\n"
+            "Use when: \"who calls X?\" — answering a change-impact "
+            "question. transitive=false (default) is the cheap direct-"
+            "caller list; flip transitive=true only when you need the "
+            "full upstream tree (e.g. \"would removing X break "
+            "anything?\"). Combine with the exercised flag to focus on "
+            "callers actually hit in production."
         ),
         inputSchema={
             "type": "object",
@@ -100,7 +115,12 @@ _TOOLS = [
             "List CALLS edges whose source is this symbol. With "
             "transitive=true, walks downstream up to max_depth. Each "
             "edge carries exercised; response has truncated + "
-            "depth_reached."
+            "depth_reached.\n\n"
+            "Use when: \"what does X depend on?\" — understanding what a "
+            "function actually does before changing it. transitive=true "
+            "is useful for \"what's the blast radius of X's side "
+            "effects?\". For data dependencies specifically, prefer "
+            "get_data_access — it filters to READS/WRITES edges."
         ),
         inputSchema={
             "type": "object",
@@ -117,7 +137,13 @@ _TOOLS = [
         name="impact_analysis",
         description=(
             "Transitive caller walk. Returns directly + transitively affected "
-            "symbols. Test/data impacts arrive in later phases."
+            "symbols. Test/data impacts arrive in later phases.\n\n"
+            "Use when: a Plan proposes changing X and you need the "
+            "\"things that might break\" list for the diff's risk "
+            "summary. This is a higher-level wrapper over "
+            "find_callers(transitive=true) — prefer impact_analysis for "
+            "the standard \"impact report\" output shape; use find_"
+            "callers when you need the raw edge list with certainties."
         ),
         inputSchema={
             "type": "object",
@@ -130,7 +156,16 @@ _TOOLS = [
     ),
     Tool(
         name="get_contract",
-        description="Fetch a Contract node plus its exposers and callers.",
+        description=(
+            "Fetch a Contract node plus its exposers and callers.\n\n"
+            "Use when: you have an HTTP path / gRPC method / message-bus "
+            "topic id and want to know who serves it AND who consumes "
+            "it. The exposers list is the answer to \"which service "
+            "owns this endpoint?\"; callers is \"who would I break by "
+            "changing the contract?\". For the implementation behind "
+            "an exposer, follow up with get_symbol on the returned "
+            "node ids."
+        ),
         inputSchema={
             "type": "object",
             "properties": {"contract_id": {"type": "string"}},
@@ -142,7 +177,13 @@ _TOOLS = [
         description=(
             "List DataEntities this symbol reads / writes — spec §11.3. "
             "Returns {reads, writes, truncated}; each item carries "
-            "certainty, exercised flag and the access site."
+            "certainty, exercised flag and the access site.\n\n"
+            "Use when: writing a data-flow doc or assessing a privacy "
+            "review (\"does this function touch user PII?\"). The "
+            "writes list is the most useful side — anything that "
+            "*mutates* a DataEntity is where data-quality regressions "
+            "start. For the entity's schema and sample data, follow up "
+            "with get_data_entity + get_sample_data."
         ),
         inputSchema={
             "type": "object",
@@ -158,7 +199,13 @@ _TOOLS = [
         description=(
             "Read a file from the platform's repo mirror at /var/lib/mnemos/repos. "
             "Supply start_line + end_line to stream a window of a huge file; "
-            "omitted range returns the first 2000 lines plus truncated=true."
+            "omitted range returns the first 2000 lines plus truncated=true.\n\n"
+            "Use when: a graph query (search_symbols / get_symbol) gave "
+            "you a file_path + line_range and you need the actual code. "
+            "This reads the platform's snapshot, NOT a live filesystem, "
+            "so what you see is the mirror at the last analysis run's "
+            "git_sha. Pin to a narrow line range to fit in the response "
+            "cap (§11.7, 50 KB)."
         ),
         inputSchema={
             "type": "object",
@@ -173,7 +220,14 @@ _TOOLS = [
     ),
     Tool(
         name="get_data_entity",
-        description="Fetch a DataEntity node plus sample availability.",
+        description=(
+            "Fetch a DataEntity node plus sample availability.\n\n"
+            "Use when: you have a DataEntity id (\"db.schema.table\") "
+            "from a graph query and need its column list, "
+            "sensitivity flag, and whether a sample exists. The "
+            "sensitivity flag matters: if true, get_sample_data will "
+            "refuse — escalate via the dashboard's data tab instead."
+        ),
         inputSchema={
             "type": "object",
             "properties": {"entity_id": {"type": "string"}},
@@ -184,7 +238,13 @@ _TOOLS = [
         name="get_sample_data",
         description=(
             "Return the most recent masked sample for a DataEntity. "
-            "Refuses sensitive entities."
+            "Refuses sensitive entities.\n\n"
+            "Use when: you need to see the *shape* of real data (a few "
+            "representative rows) to write a correct query or "
+            "transformation. Masked per the platform's masking_rules "
+            "+ baseline PII regex (RRN/phone/card/email replaced). "
+            "Sensitive entities return 403 — that's intentional, "
+            "don't retry with different params."
         ),
         inputSchema={
             "type": "object",
@@ -197,7 +257,14 @@ _TOOLS = [
     ),
     Tool(
         name="get_column_stats",
-        description="Return stored stats for a single column from the latest sample.",
+        description=(
+            "Return stored stats for a single column from the latest sample.\n\n"
+            "Use when: you need null-rate / distinct-count / min-max for "
+            "a column — to decide \"is this column safe to use as a "
+            "join key?\" or \"is this nullable in practice?\". Cheaper "
+            "than get_sample_data when you only need aggregates, not "
+            "individual rows."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -209,7 +276,14 @@ _TOOLS = [
     ),
     Tool(
         name="search_data",
-        description="Scan stored samples for values matching a regex.",
+        description=(
+            "Scan stored samples for values matching a regex.\n\n"
+            "Use when: \"which table holds this specific value?\" — "
+            "tracking down where a specific reference id, error code, "
+            "or magic constant lives in data. Scans masked samples only "
+            "(so PII won't match) — use a value you'd expect to see "
+            "verbatim (status code, sentinel string, foreign key prefix)."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -221,7 +295,15 @@ _TOOLS = [
     ),
     Tool(
         name="list_findings",
-        description="List current Findings; filter by severity/status.",
+        description=(
+            "List current Findings; filter by severity/status.\n\n"
+            "Use when: prioritising work — \"what should I fix this "
+            "sprint?\". Default sort is risk score descending, so the "
+            "first results are the P1s. Pass status=\"open\" to "
+            "exclude acknowledged/resolved noise. Each finding "
+            "carries a remediation hint + cwe_id — feed those into "
+            "submit_plan when starting a fix."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -233,7 +315,16 @@ _TOOLS = [
     ),
     Tool(
         name="get_module_summary",
-        description="Return the current L1/L2/L3 summary for a target node.",
+        description=(
+            "Return the current L1/L2/L3 summary for a target node.\n\n"
+            "Use when: orienting in unfamiliar code — \"what does this "
+            "module do, at a glance?\". L1 ≈ a sentence per symbol, "
+            "L2 ≈ a paragraph per module, L3 ≈ system-level narrative. "
+            "Start at level=2 for most tasks; L3 is for cross-system "
+            "context and L1 for quick lookups. Falls back to a stub "
+            "when ANTHROPIC_API_KEY is unset — that's signalled by "
+            "certainty=\"asserted\" in the response."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -249,7 +340,12 @@ _TOOLS = [
             "BFS over exercised CALLS edges starting at a contract. Returns "
             "common paths with the bottleneck OTLP hit count as frequency. "
             "Optional time_window (e.g. '7d') drops edges last seen before "
-            "the window — per spec §11.3."
+            "the window — per spec §11.3.\n\n"
+            "Use when: \"what actually happens when this endpoint is "
+            "hit?\" — answering with real production behaviour, not the "
+            "static call graph. Pass time_window=\"7d\" to scope to "
+            "recent activity (e.g. excluding deprecated paths). For the "
+            "static graph alone, use find_callees instead."
         ),
         inputSchema={
             "type": "object",
@@ -265,7 +361,13 @@ _TOOLS = [
         name="submit_plan",
         description=(
             "Submit a Plan for Gate A approval. Creates a worktree at "
-            "/var/lib/mnemos/worktrees/<plan>/."
+            "/var/lib/mnemos/worktrees/<plan>/.\n\n"
+            "Use when: you've decided on a fix and want to start "
+            "editing code. The plan must include the spec (the *why*), "
+            "tasks (the *what*), and target_component_id (the *where*). "
+            "Worktree is created on approval — until then no file "
+            "edits land. After approval, edit_file_in_worktree + "
+            "run_in_sandbox + submit_diff is the loop."
         ),
         inputSchema={
             "type": "object",
@@ -282,7 +384,13 @@ _TOOLS = [
         name="edit_file_in_worktree",
         description=(
             "Apply string-edits to a file inside the plan's worktree. Rejects "
-            "unapproved plans and paths that escape the worktree root."
+            "unapproved plans and paths that escape the worktree root.\n\n"
+            "Use when: making the code change a Gate-A-approved plan "
+            "calls for. Operates strictly inside /var/lib/mnemos/"
+            "worktrees/<plan>/; the production mirror is untouched "
+            "until Gate B approves the resulting diff. Each edit is a "
+            "{old_string, new_string} pair; old_string must match "
+            "exactly once."
         ),
         inputSchema={
             "type": "object",
@@ -296,7 +404,16 @@ _TOOLS = [
     ),
     Tool(
         name="run_in_sandbox",
-        description="Run an allowlisted command inside the plan worktree.",
+        description=(
+            "Run an allowlisted command inside the plan worktree.\n\n"
+            "Use when: verifying a change you just made with "
+            "edit_file_in_worktree — running tests (\"pytest -k\"), a "
+            "linter, or a build. Allowlist is per-project; commands "
+            "outside it are rejected with a list of allowed prefixes. "
+            "Network is off, filesystem is read-only outside /scratch, "
+            "and the timeout caps long runs. Output is captured and "
+            "returned for self-review."
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -311,7 +428,13 @@ _TOOLS = [
         name="submit_diff",
         description=(
             "Submit the plan worktree's current diff for Gate B approval. "
-            "Auto self-review runs and returns findings."
+            "Auto self-review runs and returns findings.\n\n"
+            "Use when: edits + tests + lint look right and you want a "
+            "human to approve the merge. Self-review (impact analysis, "
+            "data-access check, rule set) runs before the submission "
+            "is filed — fix any blocking findings before resubmitting. "
+            "Attach test_results + self_review_notes so the approver "
+            "doesn't have to re-derive your reasoning."
         ),
         inputSchema={
             "type": "object",

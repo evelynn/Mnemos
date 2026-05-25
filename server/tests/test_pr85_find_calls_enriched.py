@@ -77,6 +77,9 @@ def test_impact_analysis_uses_new_edges_shape():
 def test_mcp_tool_schema_advertises_new_params():
     body = _read(_APP / "mcp" / "server.py")
     idx = body.find('name="find_callers"')
-    slab = body[idx:idx + 700]
+    # PR-105 grew the description block — bump the slab so the
+    # input-schema params (which sit after the description) stay
+    # in range.
+    slab = body[idx:idx + 1800]
     assert '"transitive"' in slab
     assert '"max_depth"' in slab
