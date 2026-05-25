@@ -117,6 +117,10 @@ async function load(ev) {
     return false;
   }
   out.innerHTML = rows.map(renderSubmission).join("");
+  // PR-106 — gate the dynamically-rendered action buttons too.
+  // The Approve / Reject buttons need operator role; without
+  // re-gating after innerHTML, a viewer would click and 403.
+  MnemosUI.gateByRole(out);
   setTimeout(mountSubmissionComments, 0);
   return false;
 }
@@ -133,6 +137,10 @@ async function loadFiltered(verdict) {
     return;
   }
   out.innerHTML = rows.map(renderSubmission).join("");
+  // PR-106 — gate the dynamically-rendered action buttons too.
+  // The Approve / Reject buttons need operator role; without
+  // re-gating after innerHTML, a viewer would click and 403.
+  MnemosUI.gateByRole(out);
   setTimeout(mountSubmissionComments, 0);
 }
 
@@ -160,8 +168,8 @@ function renderSubmission(s) {
     ${mrBadge}
     <div class="actions">
       ${verdict === 'blocked' && window.MNEMOS_USER_ROLE_HINT === 'admin' ? `<button onclick="issueGrant('${s.id}')">Issue break-glass grant (admin)</button>` : ""}
-      <button class="primary" onclick="approve('${s.id}', ${verdict === 'blocked'})">${verdict === 'blocked' ? 'Approve with token' : 'Approve → MR'}</button>
-      <button class="danger" onclick="reject('${s.id}')">Reject</button>
+      <button class="primary" data-required-role="operator" onclick="approve('${s.id}', ${verdict === 'blocked'})">${verdict === 'blocked' ? 'Approve with token' : 'Approve → MR'}</button>
+      <button class="danger" data-required-role="operator" onclick="reject('${s.id}')">Reject</button>
     </div>
     <div data-comment-thread data-target="${s.id}" data-mount="diff_submission:${s.id}"></div>
   </section>`;

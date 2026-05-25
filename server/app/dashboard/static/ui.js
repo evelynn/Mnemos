@@ -1247,6 +1247,8 @@
     "Triage now": "지금 처리",
     "Top open P1 findings — fix these first.":
       "현재 열려 있는 P1 발견 항목 — 이것부터 해결하세요.",
+    // PR-106 — RBAC role-gated tooltip.
+    "$1 role required.": "$1 권한이 필요합니다.",
     // Empty / status text
     "No analysis runs yet. Start one from the Analysis tab.":
       "아직 분석 실행이 없습니다. Analysis 탭에서 시작하세요.",
@@ -1599,9 +1601,79 @@
     }
   }
 
+  // ─── PR-106 RBAC visibility ──────────────────────────────────────
+  //
+  // Pre-PR pattern: pages either rendered an admin-only button
+  // unconditionally (so a viewer clicked it and got a 403 toast) or
+  // hand-rolled ``window.MNEMOS_USER_ROLE_HINT === 'admin'`` checks
+  // inline (so the page silently dropped the button — confusing
+  // because the viewer has no clue what they're missing).
+  //
+  // ``gateByRole`` is the one place that decision lives. An element
+  // tagged ``data-required-role="admin"`` (or ``operator``) becomes
+  // disabled with a tooltip when the user's role is insufficient.
+  // Role precedence: admin > operator > viewer. The platform's
+  // backend STILL enforces — this layer only surfaces the wall so
+  // the user sees it before they hit it.
+
+  var _ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
+
+  function _userRoleHint() {
+    var r = (typeof window !== "undefined" && window.MNEMOS_USER_ROLE_HINT) || "";
+    return String(r).toLowerCase();
+  }
+
+  function _roleAllows(actual, required) {
+    var a = _ROLE_RANK[actual] || 0;
+    var r = _ROLE_RANK[required] || 0;
+    return a >= r;
+  }
+
+  function gateByRole(root) {
+    var scope = root || document;
+    var actual = _userRoleHint();
+    var nodes = scope.querySelectorAll("[data-required-role]");
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var req = (el.getAttribute("data-required-role") || "").toLowerCase();
+      if (!req) continue;
+      if (_roleAllows(actual, req)) {
+        // The user qualifies — restore default state in case a
+        // prior gate pass disabled it (e.g. after a role change in
+        // the same tab).
+        el.removeAttribute("aria-disabled");
+        el.classList.remove("role-gated");
+        // Only re-enable buttons; an <a> never had a disabled
+        // attribute to clear.
+        if (el.tagName === "BUTTON" || el.tagName === "INPUT") {
+          el.disabled = false;
+        }
+        if (el.dataset.gatedTitle) {
+          el.title = el.dataset.gatedOriginalTitle || "";
+          delete el.dataset.gatedTitle;
+        }
+      } else {
+        el.setAttribute("aria-disabled", "true");
+        el.classList.add("role-gated");
+        if (el.tagName === "BUTTON" || el.tagName === "INPUT") {
+          el.disabled = true;
+        }
+        // Preserve any pre-existing tooltip so we can restore it
+        // if the user's role is upgraded mid-session.
+        if (!el.dataset.gatedTitle) {
+          el.dataset.gatedOriginalTitle = el.title || "";
+          el.dataset.gatedTitle = "1";
+        }
+        var label = req.charAt(0).toUpperCase() + req.slice(1);
+        el.title = t("$1 role required.", { role: label });
+      }
+    }
+  }
+
   if (typeof document !== "undefined") {
     document.addEventListener("DOMContentLoaded", function () {
       applyI18n();
+      gateByRole();
       // Reflect chosen locale in <html lang> for screen readers.
       try {
         document.documentElement.lang = _resolveLocale();
@@ -1767,6 +1839,7 @@
     t: t,
     setLocale: setLocale,
     applyI18n: applyI18n,
+    gateByRole: gateByRole,
     icon: icon,
     exportCsv: exportCsv,
     notify: notify,

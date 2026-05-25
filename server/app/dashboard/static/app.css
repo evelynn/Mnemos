@@ -307,6 +307,18 @@ button.danger {
   background: var(--danger-button); color: var(--surface); border: 0; padding: 0.45rem 0.9rem;
   border-radius: 4px; cursor: pointer;
 }
+/* PR-106 — role-gated visibility. ``MnemosUI.gateByRole`` adds
+   ``.role-gated`` to any element whose required role exceeds the
+   current user's. The element is still rendered (so a viewer can
+   *see* the affordance that's reserved for higher roles) but
+   disabled and visibly dimmed; the hover tooltip names the role.
+   This replaces the silent-drop pattern that confused new users. */
+.role-gated {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: grayscale(0.4);
+}
+.role-gated:hover { opacity: 0.5; }
 .danger-banner {
   background: var(--danger-banner); color: var(--surface); padding: 0.6rem 0.9rem; border-radius: 4px;
 }
