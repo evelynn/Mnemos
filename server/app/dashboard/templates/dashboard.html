@@ -149,21 +149,22 @@ a.stat-link:focus-visible {
 </style>
 
 <script>
-function updateOnboarding(projectCount) {
+function updateOnboarding(projectCount, observed) {
   const onb = document.getElementById("onboarding-card");
   if (!onb) return;
-  // Step 1 is done iff at least one project exists. The session
-  // storage flags from projects.html/analysis.html are advisory —
-  // the source of truth is the platform's view of the world.
+  // PR-108 — the source of truth is the platform, not localStorage.
+  // Pre-PR ``step2Done`` was set by a click handler in
+  // analysis.html / findings.html → localStorage; a user who
+  // completed those steps on Firefox saw the card forever on Chrome.
+  // Now we derive from the same API counts the stat cards use:
+  //   step 1: at least one project exists
+  //   step 2: at least one completed analysis run exists
+  //   step 3: at least one finding exists
+  // ``observed`` is passed by loadSummary which already iterates
+  // the project list — no extra fetches.
   const step1Done = projectCount > 0;
-  let step2Done = false, step3Done = false;
-  try {
-    // 8th-round audit Critical UX-1: state lives in localStorage now
-    // (not sessionStorage) so opening /findings in a new tab still
-    // reflects the step on the dashboard tab that's been open.
-    step2Done = localStorage.getItem("mnemos_onboarding_step2_done") === "1";
-    step3Done = localStorage.getItem("mnemos_onboarding_step3_done") === "1";
-  } catch (_) {}
+  const step2Done = !!(observed && observed.hasCompletedRun);
+  const step3Done = !!(observed && observed.hasFinding);
   const apply = (id, done, current) => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -184,16 +185,14 @@ async function loadSummary() {
     const r = await fetch("/api/v1/projects");
     const rows = r.ok ? await r.json() : [];
     document.getElementById("stat-projects").textContent = rows.length;
-    // Reveal the onboarding guide when the org has no projects.
-    // Closes the 5th-round UX-Crit-1 finding: new operators saw
-    // "Projects: 0" with no hint of what to do next.
-    // P2-9 onboarding auto-progression — show the guide whenever a
-    // step is incomplete, not just when ``projects.length === 0``.
-    // The card collapses itself once all three steps are done.
-    updateOnboarding(rows.length);
 
     // Walk projects to aggregate recent runs + open findings.
     let runs = 0, findings = 0;
+    // PR-108 — track onboarding-step completion from observed
+    // platform state (not localStorage), so a fresh browser sees
+    // the right step lit up immediately.
+    let hasCompletedRun = false;
+    let hasFinding = false;
     const since = Date.now() - 7 * 24 * 3600 * 1000;
     for (const p of rows) {
       try {
@@ -201,13 +200,30 @@ async function loadSummary() {
         if (rr.ok) {
           const runRows = await rr.json();
           runs += runRows.filter(r => new Date(r.created_at || r.started_at || 0).getTime() > since).length;
+          if (!hasCompletedRun) {
+            // A "completed" run is anything that finished its
+            // pipeline — failed runs still count for onboarding
+            // purposes because the operator DID get analysis to
+            // try running. Only the perpetually-running ones
+            // don't help.
+            hasCompletedRun = runRows.some(r => (
+              r.status === "completed" || r.status === "failed"
+            ));
+          }
         }
       } catch {}
       try {
         const fr = await fetch(`/api/v1/projects/${p.id}/findings?status=open`);
-        if (fr.ok) findings += (await fr.json()).length;
+        if (fr.ok) {
+          const frows = await fr.json();
+          findings += frows.length;
+          if (!hasFinding && frows.length > 0) hasFinding = true;
+        }
       } catch {}
     }
+    // Reveal/refresh the onboarding card now we have the real
+    // counts. The card collapses itself when all 3 steps are done.
+    updateOnboarding(rows.length, { hasCompletedRun, hasFinding });
     document.getElementById("stat-runs").textContent = runs;
     document.getElementById("stat-findings").textContent = findings;
     const fEl = document.getElementById("stat-findings");

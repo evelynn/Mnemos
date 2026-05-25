@@ -56,7 +56,10 @@ def test_dashboard_reveals_onboarding_when_no_projects():
     # into a multi-step state machine. The onboarding card now reveals
     # whenever any step is incomplete, not just on a literally empty
     # project list.
-    assert "updateOnboarding(rows.length)" in body
+    # PR-108 — the call site grew a second argument carrying
+    # observed-from-API completion flags, replacing the old
+    # localStorage source-of-truth.
+    assert "updateOnboarding(rows.length, { hasCompletedRun, hasFinding })" in body
     assert "step1Done = projectCount > 0" in body
 
 

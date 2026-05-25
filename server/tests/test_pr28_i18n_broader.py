@@ -105,10 +105,23 @@ def test_onboarding_state_uses_localstorage():
         assert "localStorage.setItem(\"mnemos_onboarding_step" in body
 
 
-def test_dashboard_reads_onboarding_state_from_localstorage():
+def test_dashboard_reads_onboarding_state_from_api_state():
+    """PR-108 — onboarding step 2/3 completion was sourced from
+    localStorage flags written by analysis.html/findings.html
+    click handlers. That broke on a fresh browser (Firefox after
+    Chrome, post-cache-clear) and was vulnerable to one user
+    inheriting another's session-stamp.
+
+    Dashboard now derives completion from API observation during
+    the existing loadSummary walk: ``hasCompletedRun`` and
+    ``hasFinding``. The localStorage reads are gone."""
     body = _read(_TPL / "dashboard.html")
-    assert 'localStorage.getItem("mnemos_onboarding_step2_done")' in body
-    assert 'localStorage.getItem("mnemos_onboarding_step3_done")' in body
+    assert "hasCompletedRun" in body
+    assert "hasFinding" in body
+    # The old localStorage reads must be gone — leaving them in
+    # as a second source of truth defeats the fix.
+    assert 'localStorage.getItem("mnemos_onboarding_step2_done")' not in body
+    assert 'localStorage.getItem("mnemos_onboarding_step3_done")' not in body
 
 
 # ---------------------------------------------------------------------------
