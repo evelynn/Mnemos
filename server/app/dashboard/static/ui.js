@@ -514,6 +514,7 @@
       { label: "Findings",    href: "/findings",    shortcut: "g f", icon: "" },
       { label: "Audit",       href: "/audit",       shortcut: "",     icon: "" },
       { label: "Settings",    href: "/settings",    shortcut: "g s", icon: "" },
+      { label: "Health",      href: "/health",      shortcut: "g h", icon: "" },
       { label: "Profile",     href: "/profile",     shortcut: "",     icon: "" },
     ];
     var entries = nav.map(function (n) { return Object.assign({ kind: "nav" }, n); });
@@ -785,7 +786,7 @@
   var _gPending = 0;
   var _G_MAP = {
     "d": "/", "p": "/projects", "a": "/analysis", "t": "/data",
-    "r": "/diffs", "f": "/findings", "s": "/settings",
+    "r": "/diffs", "f": "/findings", "s": "/settings", "h": "/health",
   };
 
   // ─── Icons (PR-41) ────────────────────────────────────────────────
@@ -1249,6 +1250,14 @@
       "현재 열려 있는 P1 발견 항목 — 이것부터 해결하세요.",
     // PR-106 — RBAC role-gated tooltip.
     "$1 role required.": "$1 권한이 필요합니다.",
+    // PR-107 — health UI page.
+    "Platform health": "플랫폼 상태",
+    "Health": "상태",
+    "Refresh": "새로고침",
+    "Overall": "전체",
+    "Operational counts (24h)": "운영 카운트 (24시간)",
+    "Metric": "지표",
+    "Value": "값",
     // Empty / status text
     "No analysis runs yet. Start one from the Analysis tab.":
       "아직 분석 실행이 없습니다. Analysis 탭에서 시작하세요.",
