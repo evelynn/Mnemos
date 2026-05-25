@@ -19,6 +19,19 @@
   </p>
 </section>
 
+<!-- PR-103 — "Triage now" landing card. The dashboard's first-screen
+     answer to the operator's real question: *what do I fix first?*
+     Aggregates the top three P1 findings across every project in the
+     org and renders them with one-click drill-down. Hidden when none
+     are open so a calm system looks calm. -->
+<section id="triage-card" class="triage" hidden>
+  <h2 data-i18n="Triage now">Triage now</h2>
+  <p class="muted" data-i18n="Top open P1 findings — fix these first.">
+    Top open P1 findings — fix these first.
+  </p>
+  <ol id="triage-list" class="triage-list"></ol>
+</section>
+
 <section class="summary-grid">
   <a class="stat-card stat-link" href="/projects" aria-label="Manage projects">
     <h3>Projects</h3>
@@ -107,6 +120,32 @@ a.stat-link:focus-visible {
   outline: 2px solid #1f6feb;
   outline-offset: 2px;
 }
+/* PR-103 — triage card. Red-tinted to read as "act now" without
+   being alarming when empty (the whole card hides in that case). */
+.triage {
+  border: 1px solid #f1c0c0;
+  background: #fff7f7;
+  border-radius: 6px;
+  padding: 0.9rem 1rem;
+  margin: 0 0 1rem;
+}
+.triage h2 { margin: 0 0 0.3rem; font-size: 1.1rem; color: #7a1818; }
+.triage .triage-list { margin: 0.5rem 0 0; padding-left: 1.2rem; }
+.triage .triage-item { margin: 0.35rem 0; }
+.triage .triage-priority {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  background: #7a1818;
+  color: #fff;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+.triage .triage-item a { color: #1f3a5f; text-decoration: none; }
+.triage .triage-item a:hover { text-decoration: underline; }
+.triage .triage-where { color: #57606a; font-size: 0.85rem; }
 </style>
 
 <script>
@@ -255,6 +294,65 @@ async function loadMetricsSummary() {
   }
 }
 
+// PR-103 — render top open P1 findings on the dashboard's first
+// screen. Pure presentation; exported on `window.MnemosTriage` so
+// the test can drive it with a hand-built payload without spinning
+// up the network.
+function renderTriage(findings) {
+  const card = document.getElementById("triage-card");
+  const list = document.getElementById("triage-list");
+  if (!card || !list) return;
+  const top = (findings || [])
+    .filter(f => f && f.priority === "P1" && f.status === "open")
+    .slice(0, 3);
+  if (top.length === 0) {
+    card.hidden = true;
+    list.innerHTML = "";
+    return;
+  }
+  card.hidden = false;
+  list.innerHTML = top.map(f => {
+    const where = f.subject_node_id || f.subject_edge_id || "";
+    const url = "/findings?project=" + encodeURIComponent(f.project_id)
+      + "&focus=" + encodeURIComponent(f.id);
+    return `<li class="triage-item">
+      <span class="triage-priority">P1</span>
+      <a href="${url}">${escapeHtml(f.kind || "finding")}</a>
+      ${where ? `<span class="triage-where"> — ${escapeHtml(String(where))}</span>` : ""}
+    </li>`;
+  }).join("");
+}
+
+async function loadTriage() {
+  try {
+    const r = await fetch("/api/v1/projects");
+    if (!r.ok) return;
+    const projects = await r.json();
+    const all = [];
+    // Cap the fan-out to avoid N+1 storms on huge orgs — 20 projects
+    // × top-5 findings each is plenty to find the org-wide top 3.
+    for (const p of projects.slice(0, 20)) {
+      try {
+        const fr = await fetch(
+          `/api/v1/projects/${p.id}/findings?status=open&sort=risk&limit=5`
+        );
+        if (fr.ok) {
+          const rows = await fr.json();
+          for (const f of rows) all.push(f);
+        }
+      } catch (_) {}
+    }
+    all.sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0));
+    renderTriage(all);
+  } catch (_) {
+    // Non-fatal — card stays hidden.
+  }
+}
+
+// Expose for tests that simulate empty / error / populated payloads
+// without standing up the API.
+window.MnemosTriage = { renderTriage: renderTriage };
+
 async function loadActivity() {
   try {
     const r = await fetch("/api/v1/audit?limit=15");
@@ -287,6 +385,7 @@ loadReady();
 loadSummary();
 loadMetricsSummary();
 loadActivity();
+loadTriage();
 
 // PR-57 — first-run guided tour. Fires once per browser; the
 // operator can re-trigger it from the Profile page.

@@ -1243,6 +1243,10 @@
       "Report 탭은 PM 또는 리드를 위한 인쇄 가능한 1페이지 보고서 — 건강, 추이, 시스템 수준 서술 — 를 생성합니다.",
     "Run the first analysis": "첫 분석 실행",
     "Review the results": "결과 검토",
+    // PR-103 — "Triage now" landing card.
+    "Triage now": "지금 처리",
+    "Top open P1 findings — fix these first.":
+      "현재 열려 있는 P1 발견 항목 — 이것부터 해결하세요.",
     // Empty / status text
     "No analysis runs yet. Start one from the Analysis tab.":
       "아직 분석 실행이 없습니다. Analysis 탭에서 시작하세요.",
