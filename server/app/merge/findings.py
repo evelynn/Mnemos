@@ -362,5 +362,32 @@ async def run_all(session: AsyncSession, project_id: uuid.UUID) -> dict[str, int
         "schema_mismatches": await detect_schema_mismatches(session, project_id),
         "opaque_failing": await detect_opaque_failing_components(session, project_id),
     }
+    # PR-104 — snapshot the newly-inserted Finding instances *before*
+    # commit clears them out of ``session.new``. Existing-finding
+    # updates (the in-place last_seen_at / risk_score path above)
+    # land in ``session.dirty`` instead, so they're correctly
+    # excluded — operators only want to hear about first sightings,
+    # not "this thing is still here".
+    new_findings = [o for o in session.new if isinstance(o, Finding)]
     await session.commit()
+    if new_findings:
+        # Refresh so the notifier sees server-assigned IDs in the
+        # drill-down URL.
+        for f in new_findings:
+            try:
+                await session.refresh(f)
+            except Exception:  # noqa: BLE001
+                # A refresh failure is harmless — the notifier just
+                # gets an empty id and links to /findings root.
+                pass
+        try:
+            from app.notify.outbound import notify_new_findings
+
+            await notify_new_findings(new_findings)
+        except Exception:  # noqa: BLE001
+            # Notifier is best-effort; its own internal handler
+            # already logs + bumps a metric. Catching here too is
+            # belt-and-braces so a config error never breaks merge.
+            import logging
+            logging.getLogger(__name__).exception("notify_new_findings raised")
     return stats

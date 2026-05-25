@@ -61,6 +61,17 @@ class Settings(BaseSettings):
     # Retained for forward-compatibility; unused by the current backends.
     kms_key_arn: str = Field(default="")
 
+    # PR-104 — outbound webhook for new P1 findings. Empty disables
+    # notifications. Body is a small JSON envelope (project id, kind,
+    # risk score, drill-down URL) — Slack incoming-webhook format
+    # is the most common target. Best-effort: a failure is logged +
+    # audited but never blocks the finding write.
+    notify_webhook_url: str = Field(default="")
+    # The base URL operators want in notification links — usually the
+    # public hostname Mnemos serves on. Falls back to a relative path
+    # so links still work when an operator forgets to set it.
+    notify_link_base: str = Field(default="")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

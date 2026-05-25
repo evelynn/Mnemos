@@ -101,6 +101,16 @@ audit_write_failures_total = Counter(
     labelnames=("action",),
 )
 
+# PR-104 — outbound notifier delivery failures. The webhook is
+# best-effort by design (a flaky receiver must not block the
+# merge stage's commit), but operators still want to see when it
+# silently stops working.
+notify_failures_total = Counter(
+    "mnemos_notify_failures_total",
+    "Outbound notifier POSTs that failed or returned non-2xx, per finding kind.",
+    labelnames=("kind",),
+)
+
 
 class PrometheusMiddleware(BaseHTTPMiddleware):
     """Records the HTTP counter and histogram for every handled request.
