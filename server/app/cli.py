@@ -205,6 +205,24 @@ def main() -> None:
         ),
     )
 
+    seed = sub.add_parser(
+        "seed-demo",
+        help=(
+            "PR-109 — populate a realistic demo dataset (org + project "
+            "+ graph + findings + runs) so a new operator can explore "
+            "the dashboard without registering GitLab. Idempotent. "
+            "Refuses on MNEMOS_ENV=production unless --force."
+        ),
+    )
+    seed.add_argument(
+        "--force", action="store_true",
+        help="allow seeding on MNEMOS_ENV=production (use with care).",
+    )
+    seed.add_argument(
+        "--keep", action="store_true",
+        help="skip the destructive prelude — keep prior demo rows.",
+    )
+
     args = parser.parse_args()
 
     if args.cmd == "create-user":
@@ -222,6 +240,24 @@ def main() -> None:
     if args.cmd == "verify":
         rc = asyncio.run(_verify())
         sys.exit(rc)
+    if args.cmd == "seed-demo":
+        from app.seed_demo import seed_demo
+
+        try:
+            summary = asyncio.run(seed_demo(force=args.force, keep=args.keep))
+        except RuntimeError as exc:
+            print(f"seed-demo refused: {exc}", file=sys.stderr)
+            sys.exit(2)
+        print("seed-demo OK:")
+        for k, v in summary.items():
+            print(f"  {k}: {v}")
+        if "password" in summary:
+            print("")
+            print("=" * 60)
+            print(f"  Login: {summary['user']} / {summary['password']}")
+            print("  ↑ printed ONCE — save it before clearing the terminal.")
+            print("=" * 60)
+        sys.exit(0)
 
 
 if __name__ == "__main__":
