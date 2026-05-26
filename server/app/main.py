@@ -42,12 +42,28 @@ _STATIC_DIR = Path(__file__).parent / "dashboard" / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Boot-time guards. Both checks are cheap, fail-fast, and protect
+    # Boot-time guards. All checks are cheap, fail-fast, and protect
     # invariants the rest of the code already assumes — better to refuse
     # to start than to serve traffic with a broken contract.
     from app.safety.dialects import assert_registry_aligned
 
     assert_registry_aligned()
+
+    # PR-110 — startup self-verify. Mirror the CLI ``verify`` checks
+    # so a misconfigured platform refuses to boot instead of coming
+    # up and serving 503s on /health/ready. Hard fails (config,
+    # crypto round-trip) raise; soft fails (DB / Redis briefly
+    # unavailable, missing analyzer binaries) only log a warning.
+    #
+    # Opt-out via MNEMOS_SKIP_STARTUP_VERIFY=1 — useful for
+    # tooling that imports ``app`` without a live env (e.g. CI
+    # smoke that just generates the OpenAPI schema).
+    import os
+    if os.environ.get("MNEMOS_SKIP_STARTUP_VERIFY") != "1":
+        from app.startup_verify import run_startup_verify
+
+        await run_startup_verify()
+
     yield
     # Flush cached singletons so SIGTERM shutdown stays clean.
     await close_redis()
