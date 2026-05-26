@@ -515,6 +515,7 @@
       { label: "Audit",       href: "/audit",       shortcut: "",     icon: "" },
       { label: "Settings",    href: "/settings",    shortcut: "g s", icon: "" },
       { label: "Health",      href: "/health",      shortcut: "g h", icon: "" },
+      { label: "Docs",        href: "/docs",        shortcut: "g k", icon: "" },
       { label: "Profile",     href: "/profile",     shortcut: "",     icon: "" },
     ];
     var entries = nav.map(function (n) { return Object.assign({ kind: "nav" }, n); });
@@ -787,6 +788,7 @@
   var _G_MAP = {
     "d": "/", "p": "/projects", "a": "/analysis", "t": "/data",
     "r": "/diffs", "f": "/findings", "s": "/settings", "h": "/health",
+    "k": "/docs",
   };
 
   // ─── Icons (PR-41) ────────────────────────────────────────────────
@@ -1258,6 +1260,14 @@
     "Operational counts (24h)": "운영 카운트 (24시간)",
     "Metric": "지표",
     "Value": "값",
+    // PR-113 — docs index page.
+    "Docs": "문서",
+    "Documentation": "문서",
+    "Operator guides": "운영자 가이드",
+    "Design docs": "설계 문서",
+    "Pick a document on the left.": "왼쪽에서 문서를 선택하세요.",
+    "Document not found.": "문서를 찾을 수 없습니다.",
+    "Failed to load document.": "문서 불러오기 실패.",
     // Empty / status text
     "No analysis runs yet. Start one from the Analysis tab.":
       "아직 분석 실행이 없습니다. Analysis 탭에서 시작하세요.",

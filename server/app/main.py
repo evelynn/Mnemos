@@ -13,6 +13,7 @@ from app.api import comments as comments_api
 from app.api import onboarding as onboarding_api
 from app.api import data as data_api
 from app.api import diffs as diffs_api
+from app.api import docs_index as docs_index_api
 from app.api import findings as findings_api
 from app.api import gdpr as gdpr_api
 from app.api import health as health_api
@@ -121,6 +122,7 @@ def create_app() -> FastAPI:
     app.include_router(audit_api.router)
     app.include_router(audit_api.mcp_router)
     app.include_router(webhooks_api.router)
+    app.include_router(docs_index_api.router)
     app.include_router(otlp_router)
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
     app.include_router(dashboard_router)

@@ -1,0 +1,203 @@
+{% extends "_layout.html" %}
+{% block title %}Docs — Mnemos{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1 data-i18n="Documentation">Documentation</h1>
+</header>
+
+<p class="muted" data-i18n="docs-blurb">
+  In-tree documentation surfaced from the platform's own filesystem.
+  Pick an operator guide to onboard; the design docs explain how
+  Mnemos works internally.
+</p>
+
+<section class="docs-layout">
+  <nav class="docs-nav" id="docs-nav" aria-label="Documents list">
+    <div class="muted" data-i18n="Loading…">Loading…</div>
+  </nav>
+  <article id="docs-body" class="docs-body">
+    <p class="muted" data-i18n="Pick a document on the left.">Pick a document on the left.</p>
+  </article>
+</section>
+
+<style>
+.docs-layout {
+  display: grid; gap: 1.5rem;
+  grid-template-columns: 280px 1fr;
+  margin-top: 1rem;
+}
+@media (max-width: 800px) {
+  .docs-layout { grid-template-columns: 1fr; }
+}
+.docs-nav h3 {
+  margin: 1rem 0 0.4rem; font-size: 0.85rem;
+  color: #57606a; text-transform: uppercase; letter-spacing: 0.04em;
+}
+.docs-nav ul { list-style: none; padding: 0; margin: 0; }
+.docs-nav li { margin: 0.2rem 0; }
+.docs-nav a {
+  display: block; padding: 0.4rem 0.6rem; border-radius: 4px;
+  color: #1f3a5f; text-decoration: none; border-left: 3px solid transparent;
+}
+.docs-nav a:hover { background: #f3f4f6; }
+.docs-nav a.active {
+  background: #eef2f8; border-left-color: #1f6feb; font-weight: 600;
+}
+.docs-body {
+  border: 1px solid #d0d7de; border-radius: 6px;
+  padding: 1.2rem 1.6rem; background: #fff; min-height: 360px;
+}
+.docs-body pre {
+  background: #f6f8fa; padding: 0.75rem 1rem; border-radius: 4px;
+  overflow-x: auto; font-size: 0.85rem;
+}
+.docs-body code {
+  background: #f6f8fa; padding: 0.05rem 0.3rem;
+  border-radius: 3px; font-size: 0.9em;
+}
+.docs-body pre code { background: transparent; padding: 0; }
+.docs-body h1 { margin-top: 0; }
+.docs-body h2 { margin-top: 1.5rem; border-bottom: 1px solid #eaecef; padding-bottom: 0.3rem; }
+.docs-body table {
+  border-collapse: collapse; margin: 0.5rem 0;
+}
+.docs-body th, .docs-body td {
+  border: 1px solid #d0d7de; padding: 0.4rem 0.8rem;
+}
+.docs-body th { background: #f6f8fa; }
+</style>
+
+<script>
+// Tiny markdown → HTML pass. We don't pull in a full library
+// because we control the input (in-tree docs we wrote ourselves)
+// and want the response cap to stay tight. Handles: headings,
+// fenced code blocks, inline code, links, lists, simple tables.
+// Anything else (HTML in markdown, complex nested lists) renders
+// as-is — operators can still ``cat`` the file for the raw view.
+function _esc(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function renderMarkdown(md) {
+  const lines = md.split("\n");
+  const out = [];
+  let inCode = false, inTable = false, inList = false;
+  let buf = [];
+  const flushList = () => { if (inList) { out.push("</ul>"); inList = false; } };
+  const flushTable = () => {
+    if (!inTable) return;
+    out.push("<table>");
+    buf.forEach((cells, i) => {
+      const tag = i === 0 ? "th" : "td";
+      // Skip the separator row (---|---).
+      if (cells.every(c => /^[-:\s]+$/.test(c))) return;
+      out.push("<tr>" + cells.map(c => `<${tag}>${_inline(c.trim())}</${tag}>`).join("") + "</tr>");
+    });
+    out.push("</table>");
+    buf = []; inTable = false;
+  };
+  const _inline = (s) => {
+    s = _esc(s);
+    // Inline code first so the link regex doesn't eat backticks.
+    s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    return s;
+  };
+
+  for (const line of lines) {
+    if (line.startsWith("```")) {
+      flushList(); flushTable();
+      if (inCode) { out.push("</code></pre>"); inCode = false; }
+      else { out.push('<pre><code>'); inCode = true; }
+      continue;
+    }
+    if (inCode) { out.push(_esc(line)); continue; }
+
+    if (/^#{1,6}\s/.test(line)) {
+      flushList(); flushTable();
+      const level = line.match(/^(#+)/)[1].length;
+      out.push(`<h${level}>${_inline(line.slice(level + 1))}</h${level}>`);
+      continue;
+    }
+    if (line.includes("|") && line.trim().startsWith("|")) {
+      flushList();
+      const cells = line.trim().split("|").slice(1, -1);
+      if (!inTable) { buf = []; inTable = true; }
+      buf.push(cells);
+      continue;
+    } else {
+      flushTable();
+    }
+    if (/^\s*[-*]\s/.test(line)) {
+      flushTable();
+      if (!inList) { out.push("<ul>"); inList = true; }
+      out.push("<li>" + _inline(line.replace(/^\s*[-*]\s/, "")) + "</li>");
+      continue;
+    }
+    flushList();
+    if (line.trim() === "") { out.push(""); continue; }
+    out.push("<p>" + _inline(line) + "</p>");
+  }
+  flushList(); flushTable();
+  if (inCode) out.push("</code></pre>");
+  return out.join("\n");
+}
+
+async function loadDocsList() {
+  const nav = document.getElementById("docs-nav");
+  try {
+    const r = await fetch("/api/v1/docs");
+    if (!r.ok) { nav.innerHTML = '<p class="muted">Failed to load docs list.</p>'; return; }
+    const rows = await r.json();
+    const byCat = {};
+    for (const d of rows) (byCat[d.category] ||= []).push(d);
+    let html = "";
+    const CAT_LABEL = { operator: "Operator guides", design: "Design docs" };
+    for (const cat of ["operator", "design"]) {
+      if (!byCat[cat]) continue;
+      html += `<h3>${MnemosUI.t(CAT_LABEL[cat] || cat)}</h3><ul>`;
+      for (const d of byCat[cat]) {
+        html += `<li><a href="#${encodeURIComponent(d.slug)}" data-slug="${d.slug}">${escapeHtml(d.title)}</a></li>`;
+      }
+      html += "</ul>";
+    }
+    nav.innerHTML = html;
+    nav.addEventListener("click", (e) => {
+      const a = e.target.closest("a[data-slug]");
+      if (!a) return;
+      e.preventDefault();
+      loadDoc(a.dataset.slug);
+    });
+    const initial = (location.hash || "").slice(1);
+    if (initial && document.querySelector(`a[data-slug="${initial}"]`)) {
+      loadDoc(initial);
+    }
+  } catch {
+    nav.innerHTML = '<p class="muted">Failed to load docs list.</p>';
+  }
+}
+
+async function loadDoc(slug) {
+  const body = document.getElementById("docs-body");
+  body.innerHTML = '<p class="muted">' + MnemosUI.t("Loading…") + '</p>';
+  document.querySelectorAll('#docs-nav a').forEach(a => a.classList.toggle('active', a.dataset.slug === slug));
+  location.hash = "#" + slug;
+  try {
+    const r = await fetch(`/api/v1/docs/${encodeURIComponent(slug)}`);
+    if (!r.ok) {
+      body.innerHTML = '<p class="muted">' + MnemosUI.t("Document not found.") + '</p>';
+      return;
+    }
+    const md = await r.text();
+    body.innerHTML = renderMarkdown(md);
+    body.scrollTop = 0;
+  } catch {
+    body.innerHTML = '<p class="muted">' + MnemosUI.t("Failed to load document.") + '</p>';
+  }
+}
+
+loadDocsList();
+// Export for tests.
+window.MnemosDocs = { renderMarkdown };
+</script>
+{% endblock %}
