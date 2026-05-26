@@ -1,0 +1,7 @@
+{
+  "name": "sample-ts-project",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Accuracy fixture for ggoss-ts. Hand-curated expected.json sits beside this; running the analyzer against ./src should reproduce every symbol/edge in expected.json within the precision/recall floor."
+}
