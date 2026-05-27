@@ -57,6 +57,11 @@ _ANALYZERS: dict[str, dict[str, Any]] = {
         "verb": "symbols",
         "kinds": {"class", "interface", "function", "type", "enum", "method"},
     },
+    "py": {
+        "binary": "ggoss-py",
+        "verb": "symbols",
+        "kinds": {"class", "function", "method", "async_function"},
+    },
     "csharp": {
         "binary": "ggoss-csharp",
         "verb": "symbols",
@@ -171,20 +176,32 @@ def _bare_symbol_name(s: str) -> str:
     """Strip the analyzer's id wrapper to just the symbol name.
 
     Inputs we've actually seen:
-      ts:orders.ts:createOrder@34:1   →  createOrder
-      ts:extern:this.rows.push        →  this.rows.push
-      contract:POST /orders           →  POST /orders
-      createOrder                     →  createOrder  (already bare)
+      ts:orders.ts:createOrder@34:1     →  createOrder
+      ts:extern:this.rows.push          →  push   (last dotted segment)
+      py:.../orders.py:OrdersRepo.add@21 → add   (qual_name's tail)
+      contract:POST /orders             →  POST /orders
+      createOrder                       →  createOrder
+
+    Two-stage strip:
+      1. drop the ``@line[:col]`` suffix some analyzers attach
+      2. take everything after the last ``:`` (id prefix removal)
+      3. take everything after the last ``.`` (qualified-name tail) —
+         this matches how operators write fixture edges:
+         ``OrdersRepo.add`` → ``add``.
     """
     if not s:
         return ""
-    # Trim ``@line:col`` suffix that ggoss-ts attaches.
     if "@" in s:
         s = s.split("@", 1)[0]
-    # Take the last ``:``-separated segment, which is the symbol
-    # name proper. Falls through when the id has no prefix.
     if ":" in s:
         s = s.rsplit(":", 1)[-1]
+    # Only strip the dotted prefix when the result is a valid
+    # identifier-ish tail — avoids destroying paths like
+    # ``POST /orders`` or display names that legitimately contain
+    # a dot in the middle (``a.b.c`` → ``c`` is what we want for
+    # method calls AND for module-qualified ids).
+    if "." in s and s.rsplit(".", 1)[-1].replace("_", "").isalnum():
+        s = s.rsplit(".", 1)[-1]
     return s
 
 
@@ -229,8 +246,11 @@ def run_analyzer(
     # (development environments where ``docker compose build``
     # hasn't been run). We look for ``analyzers/<binary>/src/``.
     fallback_node = _ROOT.parent.parent / "analyzers" / "ggoss-ts" / "src" / "index.mjs"
+    fallback_py = _ROOT.parent.parent / "analyzers" / "ggoss-py" / "src" / "ggoss_py.py"
     if shutil.which(binary) is None and binary == "ggoss-ts" and fallback_node.is_file():
         cmd_base = ["node", str(fallback_node)]
+    elif shutil.which(binary) is None and binary == "ggoss-py" and fallback_py.is_file():
+        cmd_base = [sys.executable, str(fallback_py)]
     elif shutil.which(binary) is None:
         raise FileNotFoundError(
             f"analyzer binary {binary!r} not on PATH "

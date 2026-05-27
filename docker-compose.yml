@@ -100,6 +100,16 @@ services:
     image: mnemos/ggoss-ts:latest
     entrypoint: ["true"]
 
+  # PR-115 — Python analyzer. Pure stdlib (ast module), zero
+  # third-party deps so the build is the fastest of the six.
+  analyzer-py:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-py
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-py:latest
+    entrypoint: ["true"]
+
   analyzer-sql-mssql:
     profiles: ["analyzers"]
     build:

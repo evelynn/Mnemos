@@ -9,7 +9,7 @@ Mnemos 는 **복합 언어 · 복합 DB 시스템을 지속적으로 분석 · �
 그 지식 자산으로 개발 · 질의응답 · 데이터 조회 요청을 상시 처리하는
 자체 호스팅 플랫폼**입니다.
 
-- 분석기 5종 (C#, TypeScript, MSSQL, Oracle, .NET 바이너리)
+- 분석기 6종 (C#, TypeScript, Python, MSSQL, Oracle, .NET 바이너리)
 - 결과는 bitemporal 지식 그래프 (Node/Edge/Contract/DataEntity)
 - Claude Code 같은 에이전트가 MCP 로 조회
 - 모든 운영 기능은 GUI 에서 가능 (CLI 는 부팅 자가진단 + 데모만)
@@ -134,19 +134,25 @@ Prometheus 카운터로 잡힘.
 `scripts/accuracy/measure.py` 가 분석기를 fixture 에 돌려 precision/recall/F1
 을 산출. 결과는 floor (precision ≥ 0.85, recall ≥ 0.80, f1 ≥ 0.82) 와 비교.
 
-**현재 실측 베이스라인** (`sample-ts-project`, ggoss-ts v1.0.0):
+**현재 실측 베이스라인** (회귀 가드: server/tests/test_pr11{4,5}_*.py):
 
-| 분석기 | Fixture | Symbols (P/R/F1) | Edges (P/R/F1) | 평가 |
-|--------|---------|------------------|-----------------|------|
-| ggoss-ts | sample-ts-project | **1.00 / 1.00 / 1.00** | **1.00 / 1.00 / 1.00** | ✅ 완벽 |
-| ggoss-csharp | (fixture 미작성) | — | — | 작성 필요 |
-| ggoss-sql-mssql | (fixture 미작성) | — | — | 작성 필요 |
-| ggoss-sql-oracle | (fixture 미작성) | — | — | 작성 필요 |
-| ggoss-binary-dotnet | (fixture 미작성) | — | — | 작성 필요 |
+| 분석기 | Fixture | Symbols (P/R/F1) | Edges (P/R/F1) | dogfood | 평가 |
+|--------|---------|------------------|-----------------|---------|------|
+| ggoss-ts v1.0.0 | sample-ts-project | **1.00 / 1.00 / 1.00** | **1.00 / 1.00 / 1.00** | ui.js 60 sym, 302 calls | ✅ floor pass |
+| ggoss-py v1.0.0 | sample-py-project | **1.00 / 1.00 / 1.00** | **1.00 / 1.00 / 1.00** | server/app 545 sym, 3810 calls | ✅ floor pass |
+| ggoss-csharp | (fixture 미작성) | — | — | — | 작성 필요 |
+| ggoss-sql-mssql | (fixture 미작성) | — | — | — | 작성 필요 |
+| ggoss-sql-oracle | (fixture 미작성) | — | — | — | 작성 필요 |
+| ggoss-binary-dotnet | (fixture 미작성) | — | — | — | 작성 필요 |
 
 ggoss-ts 는 PR-114 에서 발견된 arrow-function callee 누락 버그가 수정되어
-floor 통과. 다른 4개 분석기는 운영자가 해당 도메인 코드를 fixture 로 추가해야
-실측 가능합니다 (안 만들면 측정 자체 안 됨, false-confidence 방지).
+floor 통과. ggoss-py 는 PR-115 에서 신규 — receiver-prefix 해소 (예:
+`repo.add()` → `OrdersRepo.add`) 가 적용된 첫 버전. dogfood: Mnemos 가 자기
+자신 (`server/app/` 17K LOC) 을 분석하여 `_out`/`_edge`/`_node` 같은 실제
+seed-demo helper 핫스팟 식별 검증.
+
+다른 4개 분석기는 운영자가 해당 도메인 코드를 fixture 로 추가해야 실측
+가능합니다 (안 만들면 측정 자체 안 됨, false-confidence 방지).
 
 ```bash
 # 자체 측정

@@ -186,15 +186,20 @@ def test_harness_extern_filter_correct():
 
 def test_bare_symbol_name_normalisation():
     """The id-normalisation that makes hand-written fixtures
-    portable against analyzer-emitted ids. Tested directly so
-    a future analyzer that emits a different format doesn't
-    silently zero out the accuracy score."""
+    portable against analyzer-emitted ids. PR-115 widened this
+    to also strip a qualified-name prefix (``OrdersRepo.add``
+    → ``add``) so Python's class-qualified method symbols match
+    fixtures that use short names. The dotted-tail strip only
+    kicks in when the tail looks like a Python identifier — so
+    ``POST /orders`` (legitimate dot-free) is unchanged."""
     cases = [
-        ("ts:orders.ts:createOrder@34:1", "createOrder"),
-        ("ts:extern:this.rows.push",      "this.rows.push"),
-        ("contract:POST /orders",         "POST /orders"),
-        ("createOrder",                   "createOrder"),
-        ("",                              ""),
+        ("ts:orders.ts:createOrder@34:1",            "createOrder"),
+        ("ts:extern:this.rows.push",                 "push"),       # PR-115 change
+        ("py:/x/orders.py:OrdersRepo.add@21",        "add"),        # PR-115 — Python
+        ("py:/x/orders.py:OrdersRepo.get_by_id@26",  "get_by_id"),  # PR-115 — underscores
+        ("contract:POST /orders",                    "POST /orders"),
+        ("createOrder",                              "createOrder"),
+        ("",                                         ""),
     ]
     for raw, want in cases:
         got = harness._bare_symbol_name(raw)
