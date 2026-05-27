@@ -152,12 +152,40 @@ def _symbol_key(sym: dict) -> tuple[str, str, str]:
 
 def _edge_key(edge: dict) -> tuple[str, str, str]:
     """Identity tuple for an edge — kind + source-name + target-name.
-    See _symbol_key for why we don't rely on ids."""
+
+    Real analyzers (confirmed: ggoss-ts) emit fully-qualified ids like
+    ``ts:orders.ts:createOrder@34:1``. Fixtures are hand-written with
+    short names like ``createOrder`` for readability. Normalise both
+    sides to the bare symbol name so the fixture stays readable AND
+    the measurement is correct."""
+    raw_src = str(edge.get("source", edge.get("source_id", "")))
+    raw_tgt = str(edge.get("target", edge.get("target_id", "")))
     return (
         str(edge.get("kind", "")),
-        str(edge.get("source", edge.get("source_id", ""))),
-        str(edge.get("target", edge.get("target_id", ""))),
+        _bare_symbol_name(raw_src),
+        _bare_symbol_name(raw_tgt),
     )
+
+
+def _bare_symbol_name(s: str) -> str:
+    """Strip the analyzer's id wrapper to just the symbol name.
+
+    Inputs we've actually seen:
+      ts:orders.ts:createOrder@34:1   →  createOrder
+      ts:extern:this.rows.push        →  this.rows.push
+      contract:POST /orders           →  POST /orders
+      createOrder                     →  createOrder  (already bare)
+    """
+    if not s:
+        return ""
+    # Trim ``@line:col`` suffix that ggoss-ts attaches.
+    if "@" in s:
+        s = s.split("@", 1)[0]
+    # Take the last ``:``-separated segment, which is the symbol
+    # name proper. Falls through when the id has no prefix.
+    if ":" in s:
+        s = s.rsplit(":", 1)[-1]
+    return s
 
 
 def _parse_jsonl(blob: str) -> list[dict]:
@@ -191,21 +219,45 @@ def run_analyzer(
     fixture_dir: Path,
 ) -> list[dict]:
     """Invoke the analyzer binary on the fixture. Mirrors the
-    platform's invocation (analyzers/runner.py)."""
-    if shutil.which(binary) is None:
+    platform's invocation (analyzers/runner.py).
+
+    Real analyzers (ggoss-ts confirmed) take target as a positional
+    arg, not --target. We also have to invoke BOTH the symbols verb
+    AND the calls verb to get both sets — analyzers emit them
+    separately."""
+    # Allow direct script invocation when binary isn't on PATH
+    # (development environments where ``docker compose build``
+    # hasn't been run). We look for ``analyzers/<binary>/src/``.
+    fallback_node = _ROOT.parent.parent / "analyzers" / "ggoss-ts" / "src" / "index.mjs"
+    if shutil.which(binary) is None and binary == "ggoss-ts" and fallback_node.is_file():
+        cmd_base = ["node", str(fallback_node)]
+    elif shutil.which(binary) is None:
         raise FileNotFoundError(
             f"analyzer binary {binary!r} not on PATH "
             "(build it: `docker compose --profile analyzers build`)"
         )
-    cp = subprocess.run(
-        [binary, verb, "--target", str(fixture_dir)],
-        capture_output=True, text=True, timeout=120,
-    )
-    if cp.returncode != 0:
-        raise RuntimeError(
-            f"{binary} {verb} failed (rc={cp.returncode}): {cp.stderr[:500]}"
+    else:
+        cmd_base = [binary]
+
+    envelopes: list[dict] = []
+    verbs_to_run = [verb]
+    # For TS+CSharp accuracy, symbols + calls together is the
+    # right comparison surface — measuring only symbols would
+    # mark a fixture with zero edges as 100% accurate.
+    if verb == "symbols":
+        verbs_to_run = ["symbols", "calls"]
+
+    for v in verbs_to_run:
+        cp = subprocess.run(
+            cmd_base + [v, str(fixture_dir)],
+            capture_output=True, text=True, timeout=120,
         )
-    return [_unwrap_payload(env) for env in _parse_jsonl(cp.stdout)]
+        if cp.returncode != 0:
+            raise RuntimeError(
+                f"{binary} {v} failed (rc={cp.returncode}): {cp.stderr[:500]}"
+            )
+        envelopes.extend(_unwrap_payload(env) for env in _parse_jsonl(cp.stdout))
+    return envelopes
 
 
 def measure(
@@ -237,10 +289,20 @@ def measure(
         if e.get("kind") in _ANALYZERS[analyzer]["kinds"]
         and "name" in e
     ]
-    actual_edges = [
+    all_actual_edges = [
         e for e in actual_envelopes
         if e.get("kind") in {"CALLS", "EXPOSES", "READS", "WRITES"}
     ]
+    # Split edges into in-project vs extern (calls to builtins,
+    # stdlib, node_modules). Operators write expected.json by hand —
+    # they shouldn't have to enumerate every ``Array.push`` call.
+    # We score only in-project edges against the floor and report
+    # extern edges informationally.
+    actual_edges = [
+        e for e in all_actual_edges
+        if not _is_extern_edge(e)
+    ]
+    extern_count = len(all_actual_edges) - len(actual_edges)
 
     sym_metrics = _score_set(
         actual_symbols, expected.symbols, _symbol_key
@@ -254,8 +316,23 @@ def measure(
         "fixture": fixture_name,
         "symbols": sym_metrics.as_dict(),
         "edges": edge_metrics.as_dict(),
+        "extern_edges_emitted": extern_count,
         "floors": _FLOORS,
     }
+
+
+def _is_extern_edge(edge: dict) -> bool:
+    """True iff the edge points at something outside the project
+    (analyzer's ``extern:*`` namespace, or any callee that didn't
+    resolve to a project-local symbol). Excluded from the F1 score
+    because operators don't enumerate builtin calls in expected.json."""
+    tgt = str(edge.get("target", edge.get("target_id", "")))
+    if ":extern:" in tgt or tgt.startswith("extern:"):
+        return True
+    meta = edge.get("metadata", {}) or {}
+    if meta.get("callee_resolved") is False:
+        return True
+    return False
 
 
 def _score_set(actual: list[dict], expected: list[dict], key_fn) -> Metrics:

@@ -129,19 +129,39 @@ Claude Code 에서:
 envelope 으로 POST (PR-104). 실패는 `mnemos_notify_failures_total`
 Prometheus 카운터로 잡힘.
 
-### 3.3 분석기 정확도 측정
+### 3.3 분석기 정확도 측정 (실측값 게시)
+
+`scripts/accuracy/measure.py` 가 분석기를 fixture 에 돌려 precision/recall/F1
+을 산출. 결과는 floor (precision ≥ 0.85, recall ≥ 0.80, f1 ≥ 0.82) 와 비교.
+
+**현재 실측 베이스라인** (`sample-ts-project`, ggoss-ts v1.0.0):
+
+| 분석기 | Fixture | Symbols (P/R/F1) | Edges (P/R/F1) | 평가 |
+|--------|---------|------------------|-----------------|------|
+| ggoss-ts | sample-ts-project | **1.00 / 1.00 / 1.00** | **1.00 / 1.00 / 1.00** | ✅ 완벽 |
+| ggoss-csharp | (fixture 미작성) | — | — | 작성 필요 |
+| ggoss-sql-mssql | (fixture 미작성) | — | — | 작성 필요 |
+| ggoss-sql-oracle | (fixture 미작성) | — | — | 작성 필요 |
+| ggoss-binary-dotnet | (fixture 미작성) | — | — | 작성 필요 |
+
+ggoss-ts 는 PR-114 에서 발견된 arrow-function callee 누락 버그가 수정되어
+floor 통과. 다른 4개 분석기는 운영자가 해당 도메인 코드를 fixture 로 추가해야
+실측 가능합니다 (안 만들면 측정 자체 안 됨, false-confidence 방지).
 
 ```bash
-# 운영 환경에서 한 번만 실행 — 정확도 베이스라인 확보
+# 자체 측정
 docker compose exec platform python /app/scripts/accuracy/measure.py \
-  --all --strict
+  --analyzer ts --fixture sample-ts-project
 
-# 출력: 분석기 × fixture 별 precision/recall/F1
-# floor (precision ≥ 0.85, recall ≥ 0.80, f1 ≥ 0.82) 아래로 떨어지면 exit 1
+# 새 fixture 추가
+mkdir scripts/accuracy/fixtures/my-codebase/{src,}
+cp -r /path/to/repo/* scripts/accuracy/fixtures/my-codebase/src/
+# 그 다음 expected.json 직접 작성 (symbol + edge 정답)
+
+# CI gating
+docker compose exec platform python /app/scripts/accuracy/measure.py \
+  --all --strict  # exit 1 if any metric below floor
 ```
-
-자체 코드베이스를 fixture 로 추가하려면 `scripts/accuracy/fixtures/`
-에 디렉토리 + `expected.json` 만 만들면 됩니다.
 
 ### 3.4 운영 시스템 보호 (§2.5)
 

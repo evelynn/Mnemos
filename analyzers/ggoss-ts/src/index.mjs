@@ -334,8 +334,13 @@ function _resolveCalleeId(checker, callExpr) {
   }
 }
 
-function emitCallEdges(out, sf, caller, callSite, calleeId, calleeName) {
-  const callerId = symbolIdFor(sf, caller, caller.name?.text ?? "<anonymous>");
+function emitCallEdges(out, sf, caller, callSite, calleeId, calleeName, callerName) {
+  // ``callerName`` is the binding name for ArrowFunction /
+  // FunctionExpression where ``caller.name`` is undefined. Passed
+  // by cmdCalls; FunctionDeclaration / MethodDeclaration callers
+  // pass their own ``.name.text``.
+  const _name = callerName ?? caller.name?.text ?? "<anonymous>";
+  const callerId = symbolIdFor(sf, caller, _name);
   const start = sf.getLineAndCharacterOfPosition(callSite.getStart(sf));
   // Resolved callee → joinable symbol id, asserted certainty.
   // Unresolved → ``ts:extern:<name>`` so external/built-in calls are
@@ -362,22 +367,64 @@ function cmdCalls(target, outPath) {
 
   for (const sf of program.getSourceFiles()) {
     if (sf.isDeclarationFile || sf.fileName.includes("node_modules")) continue;
+    // Each entry: { node, nameForId } — name is what emitCallEdges
+    // uses to build the caller symbol id. For FunctionDeclaration /
+    // MethodDeclaration, ``node.name.text`` exists; for ArrowFunction
+    // / FunctionExpression assigned to a const, we look one parent
+    // up at the VariableDeclaration. Without this, modern JS code
+    // (``const f = () => g()``) silently dropped every callee — a
+    // regression PR-111's accuracy harness flagged at recall 0.667.
     const enclosingFn = [];
+    const _enclosingNameFor = (node) => {
+      if (node.kind === ts.SyntaxKind.FunctionDeclaration ||
+          node.kind === ts.SyntaxKind.MethodDeclaration) {
+        return node.name?.text ?? "<anonymous>";
+      }
+      // ArrowFunction / FunctionExpression: name is on the parent
+      // VariableDeclaration (``const X = (...) => ...``) or
+      // PropertyAssignment (``{ X: (...) => ... }``).
+      let p = node.parent;
+      while (p) {
+        if (p.kind === ts.SyntaxKind.VariableDeclaration && p.name?.text) {
+          return p.name.text;
+        }
+        if (p.kind === ts.SyntaxKind.PropertyAssignment && p.name?.text) {
+          return p.name.text;
+        }
+        // Stop walking at the next function — beyond that we're
+        // outside the binding scope.
+        if (p.kind === ts.SyntaxKind.FunctionDeclaration ||
+            p.kind === ts.SyntaxKind.MethodDeclaration ||
+            p.kind === ts.SyntaxKind.ArrowFunction ||
+            p.kind === ts.SyntaxKind.FunctionExpression) {
+          break;
+        }
+        p = p.parent;
+      }
+      return null;  // anonymous IIFE etc — we still track scope but emit nothing
+    };
     const visit = (node) => {
       const isFn =
         node.kind === ts.SyntaxKind.FunctionDeclaration ||
-        node.kind === ts.SyntaxKind.MethodDeclaration;
-      if (isFn) enclosingFn.push(node);
+        node.kind === ts.SyntaxKind.MethodDeclaration ||
+        node.kind === ts.SyntaxKind.ArrowFunction ||
+        node.kind === ts.SyntaxKind.FunctionExpression;
+      if (isFn) {
+        enclosingFn.push({ node, nameForId: _enclosingNameFor(node) });
+      }
       if (node.kind === ts.SyntaxKind.CallExpression) {
         const call = node;
         const caller = enclosingFn[enclosingFn.length - 1];
-        if (caller) {
+        if (caller && caller.nameForId) {
           const calleeName =
             call.expression.kind === ts.SyntaxKind.Identifier
               ? call.expression.text
               : call.expression.getText(sf);
           const calleeId = _resolveCalleeId(checker, call);
-          emitCallEdges(out, sf, caller, call, calleeId, calleeName);
+          emitCallEdges(
+            out, sf, caller.node, call, calleeId, calleeName,
+            caller.nameForId,
+          );
         }
       }
       ts.forEachChild(node, visit);
