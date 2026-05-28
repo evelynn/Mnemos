@@ -77,6 +77,35 @@ def install_polyglot() -> None:
     SQLiteTypeCompiler.visit_BIGINT = _visit_big_integer
     SQLiteTypeCompiler.visit_big_integer = _visit_big_integer
 
+    # ─── runtime function shims ───────────────────────────────────
+    #
+    # Mnemos's models use ``server_default=func.gen_random_uuid()``
+    # for several primary keys (Finding.id, Plan.id, etc). That's a
+    # PG-native function; SQLite has no equivalent. Register a
+    # Python callable on every SQLite connection so the same INSERT
+    # statement that runs in production also runs in tests.
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+
+    @event.listens_for(Engine, "connect")
+    def _install_sqlite_functions(dbapi_conn, _connection_record):
+        # event.listens_for catches ALL Engines including the prod
+        # Postgres one — guard by checking the connection module.
+        mod = type(dbapi_conn).__module__.lower()
+        if "sqlite" not in mod:
+            return
+        dbapi_conn.create_function(
+            "gen_random_uuid", 0, lambda: str(_uuid.uuid4()),
+        )
+        # ``now()`` exists in SQLite as CURRENT_TIMESTAMP but is
+        # NOT a callable function. SQLAlchemy emits ``now()`` for
+        # ``server_default=func.now()`` — register a function that
+        # returns the same ISO string Postgres would.
+        from datetime import datetime as _dt, timezone as _tz
+        dbapi_conn.create_function(
+            "now", 0, lambda: _dt.now(tz=_tz.utc).isoformat(),
+        )
+
     # ─── Bind / result processors — value coercion ────────────────
     #
     # ARRAY (list) <-> JSON text
