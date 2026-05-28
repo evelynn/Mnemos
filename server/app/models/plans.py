@@ -51,7 +51,11 @@ class DiffSubmission(Base):
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )
     plan_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("plans.id"), nullable=False
+        # PR-130 — CASCADE: a DiffSubmission has no meaning without
+        # its parent Plan, and the audit_log preserves the history.
+        UUID(as_uuid=True),
+        ForeignKey("plans.id", ondelete="CASCADE"),
+        nullable=False,
     )
     task_id: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending_approval")
@@ -93,7 +97,10 @@ class DiffBreakGlassGrant(Base):
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )
     submission_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("diff_submissions.id"), nullable=False
+        # PR-130 — CASCADE: grants only exist for an extant submission.
+        UUID(as_uuid=True),
+        ForeignKey("diff_submissions.id", ondelete="CASCADE"),
+        nullable=False,
     )
     token_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     issued_by: Mapped[str] = mapped_column(String, nullable=False)

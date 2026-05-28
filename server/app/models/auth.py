@@ -21,7 +21,11 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     role: Mapped[str] = mapped_column(String, nullable=False, default="admin")
     organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=True
+        # PR-130 — SET NULL: org deletion shouldn't cascade-delete users;
+        # they revert to org-less and an admin re-assigns.
+        UUID(as_uuid=True),
+        ForeignKey("organizations.id", ondelete="SET NULL"),
+        nullable=True,
     )
     # PR-38 — profile + lifecycle columns added when the platform
     # graduated from single-operator self-host to a team-operated
@@ -64,7 +68,12 @@ class ApiKey(Base):
         server_default=func.gen_random_uuid(),
     )
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+        # PR-130 — SET NULL: a deleted user's secrets become orphan
+        # (admin-owned), not auto-erased — better aligns with audit
+        # retention.
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     project_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), nullable=True

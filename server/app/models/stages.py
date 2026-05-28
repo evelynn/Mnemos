@@ -23,7 +23,10 @@ class AnalysisStage(Base):
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )
     run_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("analysis_runs.id"), nullable=False
+        # PR-130 — CASCADE: a stage row only exists for its run.
+        UUID(as_uuid=True),
+        ForeignKey("analysis_runs.id", ondelete="CASCADE"),
+        nullable=False,
     )
     project_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     name: Mapped[str] = mapped_column(String, nullable=False)
