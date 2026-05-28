@@ -123,7 +123,11 @@ async def _verify_id_token(
     try:
         unverified_header = jwt.get_unverified_header(id_token)
     except InvalidTokenError as exc:
-        raise HTTPException(status_code=401, detail=f"id_token_malformed: {exc}")
+        # PR-132 — generic detail to the caller, full exc in server log.
+        # Exposing the PyJWT message gives an attacker hints about
+        # which token format / claim parsing failed.
+        logger.warning("oidc id_token_malformed: %s", exc)
+        raise HTTPException(status_code=401, detail="id_token_malformed")
 
     kid = unverified_header.get("kid")
     matching = next(
@@ -143,11 +147,16 @@ async def _verify_id_token(
         elif kty == "EC":
             public_key = jwt.algorithms.ECAlgorithm.from_jwk(json.dumps(matching))
         else:
+            # PR-132 — kty is a fixed enum (RSA/EC/oct/OKP), leak risk
+            # nominal but generic detail follows the same pattern as
+            # the other id_token_* responses.
+            logger.warning("oidc id_token_unsupported_kty: %s", kty)
             raise HTTPException(
-                status_code=401, detail=f"id_token_unsupported_kty: {kty}"
+                status_code=401, detail="id_token_unsupported_kty"
             )
     except (ValueError, TypeError) as exc:
-        raise HTTPException(status_code=401, detail=f"id_token_jwk_invalid: {exc}")
+        logger.warning("oidc id_token_jwk_invalid: %s", exc)
+        raise HTTPException(status_code=401, detail="id_token_jwk_invalid")
 
     try:
         claims = jwt.decode(
@@ -159,7 +168,8 @@ async def _verify_id_token(
             leeway=30,
         )
     except InvalidTokenError as exc:
-        raise HTTPException(status_code=401, detail=f"id_token_invalid: {exc}")
+        logger.warning("oidc id_token_invalid: %s", exc)
+        raise HTTPException(status_code=401, detail="id_token_invalid")
     return claims
 
 
