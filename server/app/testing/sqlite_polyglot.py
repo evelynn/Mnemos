@@ -66,6 +66,17 @@ def install_polyglot() -> None:
     SQLiteTypeCompiler.visit_JSONB = _visit_jsonb
     SQLiteTypeCompiler.visit_UUID = _visit_uuid
 
+    # BIGINT PRIMARY KEY AUTOINCREMENT — SQLite only auto-increments
+    # on INTEGER PRIMARY KEY (which aliases ROWID). BigInteger
+    # PRIMARY KEY columns therefore fail with NOT NULL on insert.
+    # Override the bigint DDL to use plain INTEGER so AUTOINCREMENT
+    # works. This only affects schema generation against SQLite —
+    # Postgres still gets BIGINT.
+    def _visit_big_integer(self, type_, **kw):
+        return "INTEGER"
+    SQLiteTypeCompiler.visit_BIGINT = _visit_big_integer
+    SQLiteTypeCompiler.visit_big_integer = _visit_big_integer
+
     # ─── Bind / result processors — value coercion ────────────────
     #
     # ARRAY (list) <-> JSON text
