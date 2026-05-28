@@ -342,15 +342,15 @@ static async Task<int> DbProbeAsync(string[] args)
             + "WHERE rm.member_principal_id = DATABASE_PRINCIPAL_ID()", c) { CommandTimeout = 5 })
         await using (var rdr = await cmd.ExecuteReaderAsync())
         {
-            var roles = new List<string>();
+            var memberRoles = new List<string>();
             while (await rdr.ReadAsync())
-                roles.Add(rdr.GetString(0));
-            if (roles.Count > 0)
+                memberRoles.Add(rdr.GetString(0));
+            if (memberRoles.Count > 0)
             {
-                grants["__roles__"] = roles;
+                grants["__roles__"] = memberRoles;
                 facts.Add(new
                 {
-                    value = roles,
+                    value = memberRoles,
                     source = "sys.database_role_members",
                     confidence = "verified",
                 });

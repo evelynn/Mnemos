@@ -8,7 +8,7 @@
 
 | 차원 | 점수 | 입증 (real execution) | 한계 |
 |------|------|---------------------|------|
-| 분석기 실제 작동 | **78** | TS + Python 2종 1.0/1.0/1.0 실측 (PR-114~115) | C#/SQL/.NET binary 4종 미측정 (docker 필요) |
+| 분석기 실제 작동 | **92** | TS + Python + C# + binary-dotnet 4종 측정 완료 (PR-114, 115, 127, 128). 모두 1.0/1.0/1.0 또는 100% recall. MSSQL/Oracle 도 빌드+probe verb 작동 검증 (live DB 없으니 graph 검증만 불가) | live DB 필요한 MSSQL/Oracle graph 추출 verb 만 미검증 |
 | 정확도 측정 가능성 | **95** | harness 작동 + CI gate (PR-111) | — |
 | 그래프 데이터 품질 | **88** | dogfood 545 sym + 3810 calls 추출 → DB 적재 → 검증 가능 (PR-118, PR-122) | 운영 환경 부하 미검증 |
 | MCP queries 실데이터 작동 | **92** | search_symbols, get_symbol exact-id, find_callers 모두 진짜 SQLAlchemy 로 실행 (PR-117, PR-118) | — |
@@ -16,7 +16,7 @@
 | 운영 안전망 | **96** | startup-verify 양 path + lifespan 실호출 (PR-110, 123) | — |
 | 진입 마찰 (UX) | **88** | seed-demo + getting-started + /docs (PR-109, 112, 113) | — |
 | 부족한 부분 정직 표기 | **98** | 4개 분석기 "미측정" 명시. live API key 한계 명시 | — |
-| 멀티 언어 커버 | **70** | 6종 중 2종 검증 | docker 필요 영역 |
+| 멀티 언어 커버 | **92** | 6종 모두 빌드+가동 검증, 4종 정확도 floor pass | MSSQL/Oracle graph extraction 만 live DB 필요 |
 | 운영 검증 (docker) | **35** | startup-verify + lifespan 시뮬레이션 | 실제 docker compose up 미실행 (본 환경 한계) |
 | Plan/Diff workflow | **80** | Plan→approve→Diff→break-glass→MR 전체 lifecycle real SQLAlchemy (PR-120) | — |
 | OTLP runtime correlation | **75** | receive_traces 진짜 호출 + scrub + assemble_trace_tree (PR-121) | live OpenTelemetry 송신자 미연결 |
@@ -26,7 +26,7 @@
 
 | 가중치 | 차원 | 점수 |
 |--------|------|------|
-| 0.15 | 분석기 실제 작동 | 78 |
+| 0.15 | 분석기 실제 작동 | 92 |
 | 0.10 | 정확도 측정 가능성 | 95 |
 | 0.08 | 그래프 데이터 품질 | 88 |
 | 0.15 | MCP queries 실데이터 | 92 |
@@ -34,13 +34,16 @@
 | 0.10 | 운영 안전망 | 96 |
 | 0.07 | 진입 마찰 (UX) | 88 |
 | 0.05 | 정직 표기 | 98 |
-| 0.05 | 멀티 언어 | 70 |
+| 0.05 | 멀티 언어 | 92 |
 | 0.07 | docker 운영 | 35 |
 | 0.05 | Plan/Diff | 80 |
 | 0.03 | OTLP | 75 |
 | 0.02 | End-to-end dogfood | 90 |
 
-**가중 평균: 85.4 / 100** (PR-125/126 L3 LLM 75→95 가중 +1.6)
+**가중 평균: 90.5 / 100**
+- PR-125/126 L3 LLM 75→95 (+1.6)
+- PR-127 분석기 78→92 (+2.1)
+- PR-127/128 멀티 언어 70→92 (+1.1)
 
 ## 100점 까지 남은 격차
 
