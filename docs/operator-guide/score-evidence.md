@@ -13,7 +13,7 @@
 | 그래프 데이터 품질 | **88** | dogfood 545 sym + 3810 calls 추출 → DB 적재 → 검증 가능 (PR-118, PR-122) | 운영 환경 부하 미검증 |
 | MCP queries 실데이터 작동 | **92** | search_symbols, get_symbol exact-id, find_callers 모두 진짜 SQLAlchemy 로 실행 (PR-117, PR-118) | — |
 | L1~L3 LLM summary | **95** | stub + real anthropic + **real Claude via Agent SDK** 모두 검증 (PR-119, PR-125, PR-126). Mnemos 자체 함수 (search_symbols) 를 진짜 Claude 가 summarize 한 결과 DB 적재 + MCP get_module_summary 응답까지 end-to-end | live Anthropic-API-key 경로만 미실행 (필요 시 1회 호출로 입증) |
-| 운영 안전망 | **96** | startup-verify 양 path + lifespan 실호출 (PR-110, 123) | — |
+| 운영 안전망 | **98** | startup-verify 양 path + lifespan 실호출 (PR-110, 123) + 보안 헤더 6/6 + CSRF cookie secure + OIDC nonce (PR-130) | — |
 | 진입 마찰 (UX) | **88** | seed-demo + getting-started + /docs (PR-109, 112, 113) | — |
 | 부족한 부분 정직 표기 | **98** | 4개 분석기 "미측정" 명시. live API key 한계 명시 | — |
 | 멀티 언어 커버 | **92** | 6종 모두 빌드+가동 검증, 4종 정확도 floor pass | MSSQL/Oracle graph extraction 만 live DB 필요 |
@@ -31,7 +31,7 @@
 | 0.08 | 그래프 데이터 품질 | 88 |
 | 0.15 | MCP queries 실데이터 | 92 |
 | 0.08 | L1~L3 LLM summary | 95 |
-| 0.10 | 운영 안전망 | 96 |
+| 0.10 | 운영 안전망 | 98 |
 | 0.07 | 진입 마찰 (UX) | 88 |
 | 0.05 | 정직 표기 | 98 |
 | 0.05 | 멀티 언어 | 92 |
@@ -40,10 +40,29 @@
 | 0.03 | OTLP | 75 |
 | 0.02 | End-to-end dogfood | 90 |
 
-**가중 평균: 90.5 / 100**
+**가중 평균: 90.7 / 100**
 - PR-125/126 L3 LLM 75→95 (+1.6)
 - PR-127 분석기 78→92 (+2.1)
 - PR-127/128 멀티 언어 70→92 (+1.1)
+- PR-130 운영 안전망 96→98 (+0.2)
+
+## 자율 라운드 누적 — PR-118~130 (13 PR)
+
+| PR | 핵심 | 발견된 진짜 결함 |
+|----|------|-----------------|
+| 118 | aiosqlite polyglot | (infrastructure) |
+| 119 | LLM stub + mock path | — |
+| 120 | Plan/Diff lifecycle | — |
+| 121 | OTLP receiver | — |
+| 122 | Mnemos→Mnemos dogfood | — |
+| 123 | lifespan REAL invocation | — |
+| 124 | score-evidence 문서화 | — |
+| 125 | Claude Agent SDK 통합 | 핑계 1 (LLM 불가) 깸 |
+| 126 | LLM e2e full chain | — |
+| 127 | dotnet-sdk-8.0 + ggoss-csharp | ggoss-csharp 1.0/1.0/1.0 입증 |
+| 128 | binary-dotnet + mssql 빌드 | mssql CS0136 변수 충돌 fix |
+| 129 | UI/UX audit | docs/health blurb i18n + a11y 3건 |
+| 130 | 보안 deep audit | CSRF secure + OIDC nonce |
 
 ## 100점 까지 남은 격차
 

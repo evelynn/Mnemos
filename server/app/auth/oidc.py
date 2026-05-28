@@ -183,12 +183,18 @@ async def login_redirect(request: Request):
     discovery = await _discovery()
     auth_endpoint = discovery["authorization_endpoint"]
     state = _b64url(secrets.token_bytes(24))
+    # PR-130 — OIDC nonce. Defends against id_token replay: a
+    # captured token from a different login attempt won't match
+    # the nonce stashed for *this* state, so /callback rejects it.
+    # Standard recommends this even with state + PKCE for
+    # belt-and-braces.
+    nonce = _b64url(secrets.token_bytes(24))
     verifier, challenge = _pkce_pair()
 
     redis = await get_redis()
     await redis.set(
         f"{_STATE_KEY_PREFIX}{state}",
-        json.dumps({"verifier": verifier}),
+        json.dumps({"verifier": verifier, "nonce": nonce}),
         ex=_STATE_TTL_SEC,
     )
     params = {
@@ -197,6 +203,7 @@ async def login_redirect(request: Request):
         "redirect_uri": s.oidc_redirect_uri,
         "scope": s.oidc_scopes,
         "state": state,
+        "nonce": nonce,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     }
@@ -222,7 +229,13 @@ async def callback(
     if not stashed:
         raise HTTPException(status_code=400, detail="invalid_or_expired_state")
     await redis.delete(f"{_STATE_KEY_PREFIX}{state}")
-    verifier = json.loads(stashed)["verifier"]
+    stashed_data = json.loads(stashed)
+    verifier = stashed_data["verifier"]
+    # PR-130 — nonce echo must match what we stashed in /login.
+    # Older state entries (pre-PR-130) won't carry a nonce key;
+    # treat them as legitimate to avoid kicking valid in-flight
+    # logins during deploy.
+    expected_nonce = stashed_data.get("nonce")
 
     s = _settings()
     discovery = await _discovery()
@@ -253,6 +266,17 @@ async def callback(
         if not id_token:
             raise HTTPException(status_code=401, detail="no_id_token")
         claims = await _verify_id_token(client, discovery, id_token, s)
+
+        # PR-130 — nonce comparison. id_token MUST echo the nonce
+        # we sent at /login. Replay attacks fail here even when
+        # state somehow leaks. If we issued the state pre-nonce
+        # (deploy mid-flight), expected_nonce is None and we skip
+        # the check — the state TTL bounds the staleness anyway.
+        if expected_nonce is not None:
+            id_token_nonce = claims.get("nonce")
+            if id_token_nonce != expected_nonce:
+                logger.warning("oidc nonce mismatch")
+                raise HTTPException(status_code=401, detail="id_token_nonce_mismatch")
 
         # Optional userinfo enrichment — preferred for richer profile
         # data, but we trust id_token claims as the authoritative

@@ -38,6 +38,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from app.config import get_settings
+
 CSRF_COOKIE = "mnemos_csrf"
 CSRF_HEADER = "x-csrf-token"
 
@@ -100,10 +102,16 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             # pick the cookie up via document.cookie. ``HttpOnly=false``
             # is *intentional* — the cookie is the public half of the
             # double-submit pattern, not a credential.
+            #
+            # PR-130 — Secure flag follows session_cookie_secure so a
+            # production HTTPS deployment never leaks the token over
+            # plaintext. Local HTTP dev (where session_cookie_secure
+            # is False) sets Secure=False so the cookie still lands.
             response.set_cookie(
                 key=CSRF_COOKIE,
                 value=token,
                 httponly=False,
+                secure=get_settings().session_cookie_secure,
                 samesite="strict",
                 path="/",
                 max_age=60 * 60 * 24 * 7,  # 1 week
