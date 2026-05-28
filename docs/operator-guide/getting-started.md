@@ -134,25 +134,29 @@ Prometheus 카운터로 잡힘.
 `scripts/accuracy/measure.py` 가 분석기를 fixture 에 돌려 precision/recall/F1
 을 산출. 결과는 floor (precision ≥ 0.85, recall ≥ 0.80, f1 ≥ 0.82) 와 비교.
 
-**현재 실측 베이스라인** (회귀 가드: server/tests/test_pr11{4,5}_*.py):
+**현재 실측 베이스라인** (회귀 가드: `server/tests/test_pr11[4-7]*.py`,
+`test_pr122*.py`):
 
 | 분석기 | Fixture | Symbols (P/R/F1) | Edges (P/R/F1) | dogfood | 평가 |
 |--------|---------|------------------|-----------------|---------|------|
 | ggoss-ts v1.0.0 | sample-ts-project | **1.00 / 1.00 / 1.00** | **1.00 / 1.00 / 1.00** | ui.js 60 sym, 302 calls | ✅ floor pass |
 | ggoss-py v1.0.0 | sample-py-project | **1.00 / 1.00 / 1.00** | **1.00 / 1.00 / 1.00** | server/app 545 sym, 3810 calls | ✅ floor pass |
-| ggoss-csharp | (fixture 미작성) | — | — | — | 작성 필요 |
-| ggoss-sql-mssql | (fixture 미작성) | — | — | — | 작성 필요 |
-| ggoss-sql-oracle | (fixture 미작성) | — | — | — | 작성 필요 |
-| ggoss-binary-dotnet | (fixture 미작성) | — | — | — | 작성 필요 |
+| ggoss-csharp | (fixture 미작성) | — | — | — | 작성 + .NET 빌드 필요 |
+| ggoss-sql-mssql | (fixture 미작성) | — | — | — | 작성 + .NET 빌드 필요 |
+| ggoss-sql-oracle | (fixture 미작성) | — | — | — | 작성 + oracledb 필요 |
+| ggoss-binary-dotnet | (fixture 미작성) | — | — | — | 작성 + .NET 빌드 필요 |
 
-ggoss-ts 는 PR-114 에서 발견된 arrow-function callee 누락 버그가 수정되어
-floor 통과. ggoss-py 는 PR-115 에서 신규 — receiver-prefix 해소 (예:
-`repo.add()` → `OrdersRepo.add`) 가 적용된 첫 버전. dogfood: Mnemos 가 자기
-자신 (`server/app/` 17K LOC) 을 분석하여 `_out`/`_edge`/`_node` 같은 실제
-seed-demo helper 핫스팟 식별 검증.
+PR-114~117 의 자율 라운드에서:
+- ggoss-ts: arrow-function callee 누락 버그 발견+수정 (recall 0.667 → 1.0)
+- ggoss-py: 신규. receiver-prefix 해소 (`repo.add()` → `OrdersRepo.add`)
+- **Dogfood end-to-end**: Mnemos 자체가 server/app/ (17K LOC) 분석 →
+  in-memory SQLite (PR-118 polyglot) 에 적재 → `merge.findings.run_all`
+  6 detector 모두 실행 → 실제 Finding row 생성. 운영자가 진짜로
+  "Mnemos 가 작동한다" 를 코드 실행으로 입증 가능.
 
-다른 4개 분석기는 운영자가 해당 도메인 코드를 fixture 로 추가해야 실측
-가능합니다 (안 만들면 측정 자체 안 됨, false-confidence 방지).
+다른 4개 분석기는 docker compose --profile analyzers build + 해당 도메인
+fixture 작성 후 측정 가능합니다 (안 만들면 측정 자체 안 됨, false-confidence
+방지).
 
 ```bash
 # 자체 측정
