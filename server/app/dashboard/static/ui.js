@@ -1268,6 +1268,13 @@
     "Pick a document on the left.": "왼쪽에서 문서를 선택하세요.",
     "Document not found.": "문서를 찾을 수 없습니다.",
     "Failed to load document.": "문서 불러오기 실패.",
+    "docs-blurb":
+      "플랫폼 자체 파일시스템에서 가져온 문서. 운영자 가이드부터 시작하고, 설계 문서로 내부 동작을 이해하세요.",
+    "health-blurb":
+      "/api/v1/health/ready 가 실행하는 5개의 readiness 체크 실시간 표시. DB / Redis / worker 실패는 전체 상태를 degraded (503) 로 전환; analyzer binary 누락은 advisory — 플랫폼은 동작하지만 해당 언어는 분석 안 됨.",
+    // PR-129 — heading hierarchy (screen-reader-only h2 wrappers).
+    "Findings health panel": "발견 항목 건강 패널",
+    "Graph statistics": "그래프 통계",
     // Empty / status text
     "No analysis runs yet. Start one from the Analysis tab.":
       "아직 분석 실행이 없습니다. Analysis 탭에서 시작하세요.",

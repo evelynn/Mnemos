@@ -19,7 +19,8 @@
 <!-- PR-51 — system-health panel (audit C). The risk index + the
      P1-open count + the 7-day deltas turn the findings list into
      a business dashboard an operator can report up from. -->
-<section id="health-panel" class="health-panel" hidden>
+<section id="health-panel" class="health-panel" hidden aria-labelledby="health-panel-title">
+  <h2 id="health-panel-title" class="sr-only" data-i18n="Findings health panel">Findings health panel</h2>
   <div class="health-card health-index">
     <h3 data-i18n="Risk index">Risk index</h3>
     <div class="big" id="h-risk-index">—</div>
