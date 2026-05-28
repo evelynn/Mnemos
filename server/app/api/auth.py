@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth import brute_force
-from app.auth.deps import CurrentUser
 from app.auth.passwords import verify_password
 from app.auth.sessions import create_session, delete_session, read_session
 from app.config import get_settings
@@ -23,7 +22,13 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class UserOut(BaseModel):
+class LoginResponse(BaseModel):
+    """PR-132 — distinct schema from users.UserOut to avoid an
+    OpenAPI components/schemas name collision (which forced the
+    ugly ``app__api__auth__UserOut`` qualifier). Login only needs
+    the three fields the GUI uses to render the sidebar avatar
+    immediately; the full profile is one ``/api/v1/auth/me`` call
+    away."""
     id: str
     username: str
     role: str
@@ -34,7 +39,7 @@ async def login(
     body: LoginRequest,
     response: Response,
     db: AsyncSession = Depends(get_session),
-) -> UserOut:
+) -> LoginResponse:
     # PR-39 — brute-force lockout. The username field is checked
     # *before* any password verify so a locked-out attacker can't
     # use the timing-side-channel of valid-vs-invalid password
@@ -101,7 +106,7 @@ async def login(
         secure=_settings.session_cookie_secure,
         path="/",
     )
-    return UserOut(id=str(user.id), username=user.username, role=user.role)
+    return LoginResponse(id=str(user.id), username=user.username, role=user.role)
 
 
 @router.post("/logout")
@@ -120,6 +125,7 @@ async def logout(
     return {"status": "logged_out"}
 
 
-@router.get("/me")
-async def me(user: CurrentUser) -> UserOut:
-    return UserOut(id=str(user.id), username=user.username, role=user.role)
+# PR-132 — ``GET /api/v1/auth/me`` lives in api/users.py.
+# It returns the full profile (_out helper, PR-38 lifecycle fields).
+# The shorter duplicate here was confusing the OpenAPI generator
+# (same operation_id → SDK clients couldn't disambiguate).
