@@ -60,6 +60,10 @@ class BreakGlassRequest(BaseModel):
     rationale: str = Field(
         ...,
         min_length=RATIONALE_MIN_CHARS,
+        # PR-133 — upper bound. The rationale lives in plain text on
+        # the grant row; 10 KB is plenty for the longest justification
+        # an operator can write while bounding payload size.
+        max_length=10_000,
         description=(
             f"Free-form justification ({RATIONALE_MIN_CHARS}+ chars). Stored "
             "in plain text alongside the rerun review payload for audit."

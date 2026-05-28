@@ -37,13 +37,16 @@ class PlanTask(BaseModel):
 
 class PlanSubmit(BaseModel):
     spec: PlanSpec
-    tasks: list[PlanTask]
-    target_component_id: str
-    requester: str
+    # PR-133 — DoS bound. A plan with 100+ tasks is almost certainly
+    # generated noise; large submissions multiply through every
+    # downstream stage (worktree creation, MR description, etc).
+    tasks: list[PlanTask] = Field(..., max_length=100)
+    target_component_id: str = Field(..., max_length=300)
+    requester: str = Field(..., max_length=128)
     # Optional reproducibility pin. None → worktree is created at the
     # mirror's current HEAD; the resolved SHA is recorded in
     # worktree_meta either way so re-runs can reference it.
-    base_sha: str | None = None
+    base_sha: str | None = Field(default=None, max_length=64)
 
 
 class PlanOut(BaseModel):

@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,8 +18,13 @@ _settings = get_settings()
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    # PR-133 — strict bounds. Pre-PR: unbounded str → 10 MB password
+    # would force bcrypt through its full work-factor on every byte
+    # before truncating, burning CPU per request. bcrypt itself
+    # truncates at 72 bytes, so capping the input early matches the
+    # algorithm's reality.
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=512)
 
 
 class LoginResponse(BaseModel):
