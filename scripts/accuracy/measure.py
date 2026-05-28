@@ -176,23 +176,28 @@ def _bare_symbol_name(s: str) -> str:
     """Strip the analyzer's id wrapper to just the symbol name.
 
     Inputs we've actually seen:
-      ts:orders.ts:createOrder@34:1     →  createOrder
-      ts:extern:this.rows.push          →  push   (last dotted segment)
-      py:.../orders.py:OrdersRepo.add@21 → add   (qual_name's tail)
-      contract:POST /orders             →  POST /orders
-      createOrder                       →  createOrder
+      ts:orders.ts:createOrder@34:1                          → createOrder
+      ts:extern:this.rows.push                               → push
+      py:.../orders.py:OrdersRepo.add@21                     → add
+      csharp:M:SampleProject.OrdersRepo.Add(SampleProject.Order) → Add
+      csharp:T:SampleProject.OrdersRepo                      → OrdersRepo
+      contract:POST /orders                                  → POST /orders
+      createOrder                                            → createOrder
 
-    Two-stage strip:
-      1. drop the ``@line[:col]`` suffix some analyzers attach
-      2. take everything after the last ``:`` (id prefix removal)
-      3. take everything after the last ``.`` (qualified-name tail) —
-         this matches how operators write fixture edges:
-         ``OrdersRepo.add`` → ``add``.
+    Strip stages:
+      1. drop the ``@line[:col]`` suffix (TS/Py)
+      2. drop the parameter list ``(...)`` (C#)
+      3. take everything after the last ``:`` (id prefix removal)
+      4. take everything after the last ``.`` (qualified-name tail)
+         iff the tail is identifier-shaped
     """
     if not s:
         return ""
     if "@" in s:
         s = s.split("@", 1)[0]
+    # Strip C#-style parameter lists ``Foo(arg, arg)`` → ``Foo``.
+    if "(" in s:
+        s = s.split("(", 1)[0]
     if ":" in s:
         s = s.rsplit(":", 1)[-1]
     # Only strip the dotted prefix when the result is a valid
@@ -247,10 +252,16 @@ def run_analyzer(
     # hasn't been run). We look for ``analyzers/<binary>/src/``.
     fallback_node = _ROOT.parent.parent / "analyzers" / "ggoss-ts" / "src" / "index.mjs"
     fallback_py = _ROOT.parent.parent / "analyzers" / "ggoss-py" / "src" / "ggoss_py.py"
+    # PR-127 — ggoss-csharp publish output (operator builds once with
+    # `dotnet publish` to /tmp/ggoss-csharp-out). The Dockerfile does
+    # the same; this lets fixture measurement skip the docker layer.
+    fallback_cs_dll = Path("/tmp/ggoss-csharp-out/ggoss-csharp.dll")
     if shutil.which(binary) is None and binary == "ggoss-ts" and fallback_node.is_file():
         cmd_base = ["node", str(fallback_node)]
     elif shutil.which(binary) is None and binary == "ggoss-py" and fallback_py.is_file():
         cmd_base = [sys.executable, str(fallback_py)]
+    elif shutil.which(binary) is None and binary == "ggoss-csharp" and fallback_cs_dll.is_file():
+        cmd_base = ["dotnet", str(fallback_cs_dll)]
     elif shutil.which(binary) is None:
         raise FileNotFoundError(
             f"analyzer binary {binary!r} not on PATH "
@@ -343,14 +354,30 @@ def measure(
 
 def _is_extern_edge(edge: dict) -> bool:
     """True iff the edge points at something outside the project
-    (analyzer's ``extern:*`` namespace, or any callee that didn't
-    resolve to a project-local symbol). Excluded from the F1 score
-    because operators don't enumerate builtin calls in expected.json."""
+    (stdlib, BCL, builtin). Excluded from the F1 score because
+    operators don't enumerate builtin calls in expected.json.
+
+    Detection rules (in order):
+    1. analyzer-tagged extern namespace (``ts:extern:*``, ``py:extern:*``)
+    2. metadata.callee_resolved == False (ggoss-py emits this)
+    3. target id contains a well-known framework namespace
+       (System.*, Microsoft.*, Newtonsoft.* for C#) — ggoss-csharp
+       doesn't tag extern explicitly, the heuristic catches it
+    """
     tgt = str(edge.get("target", edge.get("target_id", "")))
     if ":extern:" in tgt or tgt.startswith("extern:"):
         return True
     meta = edge.get("metadata", {}) or {}
     if meta.get("callee_resolved") is False:
+        return True
+    # C# framework prefixes — ggoss-csharp emits the resolved full
+    # symbol id, so we can detect BCL/library calls from the prefix.
+    _CS_FRAMEWORK_PREFIXES = (
+        "csharp:M:System.", "csharp:T:System.",
+        "csharp:M:Microsoft.", "csharp:T:Microsoft.",
+        "csharp:M:Newtonsoft.", "csharp:M:Serilog.",
+    )
+    if any(tgt.startswith(p) for p in _CS_FRAMEWORK_PREFIXES):
         return True
     return False
 

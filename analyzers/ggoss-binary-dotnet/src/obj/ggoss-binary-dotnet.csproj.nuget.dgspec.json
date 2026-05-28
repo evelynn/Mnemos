@@ -1,0 +1,71 @@
+{
+  "format": 1,
+  "restore": {
+    "/home/user/Mnemos/analyzers/ggoss-binary-dotnet/src/ggoss-binary-dotnet.csproj": {}
+  },
+  "projects": {
+    "/home/user/Mnemos/analyzers/ggoss-binary-dotnet/src/ggoss-binary-dotnet.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "/home/user/Mnemos/analyzers/ggoss-binary-dotnet/src/ggoss-binary-dotnet.csproj",
+        "projectName": "ggoss-binary-dotnet",
+        "projectPath": "/home/user/Mnemos/analyzers/ggoss-binary-dotnet/src/ggoss-binary-dotnet.csproj",
+        "packagesPath": "/root/.nuget/packages/",
+        "outputPath": "/home/user/Mnemos/analyzers/ggoss-binary-dotnet/src/obj/",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "/root/.nuget/NuGet/NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0": {
+            "targetAlias": "net8.0",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        }
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "dependencies": {
+            "Mono.Cecil": {
+              "target": "Package",
+              "version": "[0.11.5, )"
+            },
+            "System.Text.Json": {
+              "target": "Package",
+              "version": "[8.0.5, )"
+            }
+          },
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "/usr/lib/dotnet/sdk/8.0.127/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}

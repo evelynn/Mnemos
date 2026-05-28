@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "fwFdRShDtKWrOM1NJU57PKxkZpwc+Y3rKW15dB7/5olCENW8s8hFEbGZJaCXY/4HzIiMLizQHwsShMe1WvKPAA==",
+  "success": true,
+  "projectFilePath": "/home/user/Mnemos/analyzers/ggoss-binary-dotnet/src/ggoss-binary-dotnet.csproj",
+  "expectedPackageFiles": [
+    "/root/.nuget/packages/mono.cecil/0.11.5/mono.cecil.0.11.5.nupkg.sha512",
+    "/root/.nuget/packages/system.text.json/8.0.5/system.text.json.8.0.5.nupkg.sha512"
+  ],
+  "logs": []
+}
