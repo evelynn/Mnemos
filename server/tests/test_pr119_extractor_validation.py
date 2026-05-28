@@ -37,11 +37,14 @@ from app.extractor.agent import Extractor, ExtractorResult
 
 
 @pytest.mark.asyncio
-async def test_stub_summary_well_formed_with_no_evidence():
-    """The cheapest case: no evidence, no key. Must still return
-    a valid ExtractorResult — never raise."""
+async def test_stub_summary_well_formed_with_no_evidence(monkeypatch):
+    """The cheapest case: no evidence, no key, no agent SDK. Must
+    still return a valid ExtractorResult — never raise. PR-125 —
+    disable the agent_sdk fallback to isolate the stub path
+    (otherwise a working Claude Code env would do a real call)."""
+    monkeypatch.setenv("MNEMOS_DISABLE_AGENT_SDK", "1")
     ext = Extractor()
-    ext._api_key = None  # force stub path even if env has key
+    ext._api_key = None  # force stub path
     out = await ext.summarize(level=1, target_id="sym:foo", evidence=[])
     assert isinstance(out, ExtractorResult)
     assert out.model_used == "stub"
@@ -55,10 +58,11 @@ async def test_stub_summary_well_formed_with_no_evidence():
 
 
 @pytest.mark.asyncio
-async def test_stub_summary_reflects_evidence_count_and_target():
+async def test_stub_summary_reflects_evidence_count_and_target(monkeypatch):
     """The stub must surface the count of evidence rows AND the
     target id. Downstream the dashboard renders this — placeholder
     blank text would look like "the LLM produced nothing"."""
+    monkeypatch.setenv("MNEMOS_DISABLE_AGENT_SDK", "1")
     ext = Extractor()
     ext._api_key = None
     evidence = [
@@ -75,9 +79,10 @@ async def test_stub_summary_reflects_evidence_count_and_target():
 
 
 @pytest.mark.asyncio
-async def test_stub_works_at_every_summary_level():
+async def test_stub_works_at_every_summary_level(monkeypatch):
     """L1/L2/L3 must all run through the stub without error.
     Spec §10.3 — hierarchical summaries at 3 depths."""
+    monkeypatch.setenv("MNEMOS_DISABLE_AGENT_SDK", "1")
     ext = Extractor()
     ext._api_key = None
     for level in (1, 2, 3):
@@ -138,10 +143,15 @@ async def test_real_path_triggered_when_api_key_set():
 
 
 @pytest.mark.asyncio
-async def test_real_path_falls_back_on_invalid_json():
+async def test_real_path_falls_back_on_invalid_json(monkeypatch):
     """If the model returns non-JSON (Claude sometimes leaks
-    markdown), summarize() must NOT crash — it falls back to
-    the stub so the pipeline keeps producing rows."""
+    markdown), summarize() must NOT crash. PR-125 widened the
+    fallback chain: anthropic-invalid-JSON → try agent_sdk → stub.
+    With agent_sdk disabled, the chain ends at stub."""
+    # PR-125 — disable the agent_sdk fallback so this test isolates
+    # the anthropic→stub edge (otherwise a working Claude Code env
+    # would produce a real summary instead).
+    monkeypatch.setenv("MNEMOS_DISABLE_AGENT_SDK", "1")
 
     class FakeContent:
         def __init__(self, text):
@@ -162,16 +172,18 @@ async def test_real_path_falls_back_on_invalid_json():
     ext._api_key = "sk-ant-fake"
     with patch.dict("sys.modules", {"anthropic": MagicMock(AsyncAnthropic=FakeClient)}):
         out = await ext.summarize(level=1, target_id="sym:x", evidence=[])
-    # Fell back to stub.
+    # Fell back to stub (agent_sdk disabled via env).
     assert out.model_used == "stub"
     assert "sym:x" in out.summary
 
 
 @pytest.mark.asyncio
-async def test_real_path_falls_back_on_missing_sdk():
+async def test_real_path_falls_back_on_missing_sdk(monkeypatch):
     """When ANTHROPIC_API_KEY is set but anthropic isn't installed
-    (slim deployment), the extractor must not crash on import —
-    quiet fallback to stub."""
+    (slim deployment), the extractor must not crash on import.
+    PR-125 — with agent_sdk also disabled, the chain ends at stub."""
+    # PR-125 — isolate the anthropic-missing edge from agent_sdk.
+    monkeypatch.setenv("MNEMOS_DISABLE_AGENT_SDK", "1")
     ext = Extractor()
     ext._api_key = "sk-ant-fake"
     # Simulate ImportError: rebind builtins.__import__ to fail

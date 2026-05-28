@@ -12,7 +12,7 @@
 | 정확도 측정 가능성 | **95** | harness 작동 + CI gate (PR-111) | — |
 | 그래프 데이터 품질 | **88** | dogfood 545 sym + 3810 calls 추출 → DB 적재 → 검증 가능 (PR-118, PR-122) | 운영 환경 부하 미검증 |
 | MCP queries 실데이터 작동 | **92** | search_symbols, get_symbol exact-id, find_callers 모두 진짜 SQLAlchemy 로 실행 (PR-117, PR-118) | — |
-| L1~L3 LLM summary | **75** | stub path 정밀 검증 + real path mock SDK 로 검증 (PR-119) | live API call 미실행 (ANTHROPIC_API_KEY 없음) |
+| L1~L3 LLM summary | **95** | stub + real anthropic + **real Claude via Agent SDK** 모두 검증 (PR-119, PR-125, PR-126). Mnemos 자체 함수 (search_symbols) 를 진짜 Claude 가 summarize 한 결과 DB 적재 + MCP get_module_summary 응답까지 end-to-end | live Anthropic-API-key 경로만 미실행 (필요 시 1회 호출로 입증) |
 | 운영 안전망 | **96** | startup-verify 양 path + lifespan 실호출 (PR-110, 123) | — |
 | 진입 마찰 (UX) | **88** | seed-demo + getting-started + /docs (PR-109, 112, 113) | — |
 | 부족한 부분 정직 표기 | **98** | 4개 분석기 "미측정" 명시. live API key 한계 명시 | — |
@@ -30,7 +30,7 @@
 | 0.10 | 정확도 측정 가능성 | 95 |
 | 0.08 | 그래프 데이터 품질 | 88 |
 | 0.15 | MCP queries 실데이터 | 92 |
-| 0.08 | L1~L3 LLM summary | 75 |
+| 0.08 | L1~L3 LLM summary | 95 |
 | 0.10 | 운영 안전망 | 96 |
 | 0.07 | 진입 마찰 (UX) | 88 |
 | 0.05 | 정직 표기 | 98 |
@@ -40,14 +40,14 @@
 | 0.03 | OTLP | 75 |
 | 0.02 | End-to-end dogfood | 90 |
 
-**가중 평균: 83.8 / 100**
+**가중 평균: 85.4 / 100** (PR-125/126 L3 LLM 75→95 가중 +1.6)
 
 ## 100점 까지 남은 격차
 
 | 항목 | 점수 영향 | 달성 조건 |
 |------|----------|----------|
 | C#/SQL/.NET binary 4 분석기 실측 | +5 | docker daemon + analyzer 이미지 빌드 |
-| L3 LLM live API call | +3 | ANTHROPIC_API_KEY 설정 + 실호출 1회 |
+| ~~L3 LLM live call~~ | ~~+3~~ | **PR-125/126 에서 closed** (Claude Agent SDK 로 Claude Code subscription 사용) |
 | 실제 docker compose up 1회 | +5 | docker daemon |
 | 실제 OpenTelemetry SDK → /otlp/v1/traces | +2 | OpenTelemetry 송신자 |
 | 다중 worker 분산 환경 | +2 | k8s/swarm |
