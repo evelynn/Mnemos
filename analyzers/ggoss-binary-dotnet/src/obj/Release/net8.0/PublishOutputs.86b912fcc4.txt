@@ -1,9 +1,0 @@
-/tmp/ggoss-bin-out/ggoss-binary-dotnet
-/tmp/ggoss-bin-out/ggoss-binary-dotnet.dll
-/tmp/ggoss-bin-out/ggoss-binary-dotnet.deps.json
-/tmp/ggoss-bin-out/ggoss-binary-dotnet.runtimeconfig.json
-/tmp/ggoss-bin-out/ggoss-binary-dotnet.pdb
-/tmp/ggoss-bin-out/Mono.Cecil.Mdb.dll
-/tmp/ggoss-bin-out/Mono.Cecil.Pdb.dll
-/tmp/ggoss-bin-out/Mono.Cecil.Rocks.dll
-/tmp/ggoss-bin-out/Mono.Cecil.dll
