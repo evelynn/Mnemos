@@ -30,6 +30,10 @@ dependencies = [
     "prometheus-client>=0.20",
     "pyjwt[crypto]>=2.9",
     "sqlglot>=25",
+    # PR-125 — Claude Agent SDK lets the L1~L3 extractor use the
+    # operator's Claude Code subscription when ANTHROPIC_API_KEY isn't
+    # configured. Falls back to stub when neither is present.
+    "claude-agent-sdk>=0.2",
 ]
 
 [project.optional-dependencies]
@@ -39,6 +43,20 @@ dev = [
     "ruff>=0.5",
     "mypy>=1.10",
     "httpx>=0.27",
+    # PR-118 in-memory SQLite for the polyglot-typed test session.
+    "aiosqlite>=0.20",
+    # PR-135 docker-free local mode + tests stub Redis in-process.
+    "fakeredis>=2.20",
+    # PR-129 UI/UX audit parses rendered templates as DOM.
+    "beautifulsoup4>=4.12",
+]
+# PR-135 — Docker-free local mode. Single-process install for
+# laptops / air-gapped trials:
+#   pip install 'mnemos-platform[local]'
+#   python -m app.serve_local --seed-demo
+local = [
+    "aiosqlite>=0.20",
+    "fakeredis>=2.20",
 ]
 # Vector / semantic search — spec §11.3 "벡터 + BM25 앙상블 (RRF)".
 # Optional so a base install stays slim. Activate with
