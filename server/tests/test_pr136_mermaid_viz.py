@@ -131,11 +131,48 @@ def test_report_html_lifecycle_states_match_finding_model():
 def test_no_cdn_references_for_mermaid():
     """``script-src 'self'`` CSP 위반 방지. 외부 CDN URL 발견 시
     air-gapped 배포가 깨지므로 즉시 실패."""
-    for f in (_UIJS, _TEMPLATES / "report.html"):
+    for f in (_UIJS, _TEMPLATES / "report.html",
+              _TEMPLATES / "plans.html", _TEMPLATES / "diffs.html"):
         src = f.read_text(encoding="utf-8")
         for bad in ("cdn.jsdelivr.net/npm/mermaid", "unpkg.com/mermaid",
                     "cdnjs.cloudflare.com/ajax/libs/mermaid"):
             assert bad not in src, f"{f.name} references CDN: {bad}"
+
+
+# ─── 6. plans.html + diffs.html — 추가 사용처 (PR-136c) ─────────
+
+
+def test_plans_html_has_lifecycle_diagram():
+    src = (_TEMPLATES / "plans.html").read_text(encoding="utf-8")
+    assert 'id="plan-lifecycle"' in src
+    # Plan 의 실제 status: pending_approval → approved/rejected, regenerate loop.
+    for state in ("pending_approval", "approved", "rejected"):
+        assert state in src
+    assert "MnemosUI.renderMermaid" in src
+    # Lazy render — details toggle 에 바인딩.
+    assert "toggle" in src and "renderPlanLifecycle" in src
+
+
+def test_diffs_html_has_lifecycle_diagram_with_break_glass():
+    src = (_TEMPLATES / "diffs.html").read_text(encoding="utf-8")
+    assert 'id="diff-lifecycle"' in src
+    # blocked → break-glass → approved 두-눈 흐름 표현.
+    for state in ("submitted", "pending_approval", "blocked",
+                  "grant_issued", "approved", "approved_no_mr",
+                  "rejected"):
+        assert state in src, f"diff lifecycle missing state: {state}"
+    assert "different operator consumes token" in src
+    assert "MnemosUI.renderMermaid" in src
+
+
+def test_plans_diffs_templates_render():
+    from jinja2 import Environment, FileSystemLoader
+    env = Environment(loader=FileSystemLoader(str(_TEMPLATES)), autoescape=True)
+    class _U: role = "operator"
+    for name in ("plans.html", "diffs.html"):
+        out = env.get_template(name).render(user=_U(), request=None,
+                                            csrf_token="t")
+        assert "lifecycle-diagram" in out, f"{name} missing lifecycle div"
 
 
 # ─── 5. 템플릿 렌더 ─────────────────────────────────────────────

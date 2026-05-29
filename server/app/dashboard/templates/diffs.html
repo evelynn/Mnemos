@@ -16,11 +16,69 @@
   </p>
 </section>
 
+<section class="lifecycle-section">
+  <details>
+    <summary data-i18n="Gate B lifecycle">Gate B lifecycle</summary>
+    <p class="muted" data-i18n="Every diff submission moves through this state machine. A blocked verdict can only be cleared by a break-glass grant consumed by a different operator (two-eyes).">
+      Every diff submission moves through this state machine. A
+      blocked verdict can only be cleared by a break-glass grant
+      consumed by a different operator (two-eyes).
+    </p>
+    <div id="diff-lifecycle" class="lifecycle-diagram"
+         aria-label="diff submission state machine"></div>
+  </details>
+</section>
+
 <form onsubmit="return load(event)">
   <label><span data-i18n="Plan ID">Plan ID</span><input type="text" id="pid" required placeholder="uuid" /></label>
   <button class="primary" type="submit" data-i18n="Load submissions">Load submissions</button>
 </form>
 <div id="out"></div>
+
+<style>
+.lifecycle-section { margin: var(--sp-2) 0 var(--sp-3); }
+.lifecycle-section summary { cursor: pointer; font-weight: 600; }
+.lifecycle-diagram {
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3);
+  margin-top: var(--sp-2);
+  overflow-x: auto;
+}
+.lifecycle-diagram svg { max-width: 100%; height: auto; }
+</style>
+
+<script>
+// PR-136c — Gate B + break-glass lifecycle as a Mermaid state
+// diagram. Renders lazily on first ``details`` open.
+function renderDiffLifecycle() {
+  const host = document.getElementById("diff-lifecycle");
+  if (!host || host.dataset.rendered) return;
+  host.dataset.rendered = "1";
+  const code = [
+    "stateDiagram-v2",
+    "  [*] --> submitted",
+    "  submitted --> pending_approval: ultrareview pass",
+    "  submitted --> blocked: ultrareview critical",
+    "  pending_approval --> approved: operator approve",
+    "  pending_approval --> rejected: operator reject",
+    "  blocked --> grant_issued: admin re-runs review",
+    "  blocked --> rejected: give up",
+    "  grant_issued --> approved: different operator consumes token",
+    "  grant_issued --> blocked: token expires (15m)",
+    "  approved --> approved_no_mr: MR creation failed",
+    "  approved --> [*]: GitLab MR opened",
+    "  approved_no_mr --> [*]",
+    "  rejected --> [*]",
+  ].join("\n");
+  MnemosUI.renderMermaid(host, code).catch(() => {});
+}
+document.querySelector(".lifecycle-section details")
+  .addEventListener("toggle", function (ev) {
+    if (ev.target.open) renderDiffLifecycle();
+  });
+</script>
 
 <dialog id="grant-dialog" class="modal" aria-labelledby="grant-title">
   <header><h2 id="grant-title">Issue break-glass grant</h2></header>
