@@ -22,7 +22,9 @@ async def test_readiness_returns_structured_checks(http_client):
     # response body shape must be stable so LBs can parse it.
     assert r.status_code in (200, 503)
     body = r.json()
-    assert set(body["checks"].keys()) == {"database", "redis", "worker"}
+    # PR-99 added "crypto" and "analyzers"; the LB contract guarantees
+    # the original three keys remain present, not that the set is closed.
+    assert {"database", "redis", "worker"} <= set(body["checks"].keys())
     for part in body["checks"].values():
         assert {"ok", "message"} <= part.keys()
 

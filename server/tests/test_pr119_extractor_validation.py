@@ -254,9 +254,11 @@ def test_no_api_key_no_sdk_attempt():
 
     import asyncio
     with patch.object(builtins, "__import__", tracking_import):
-        asyncio.get_event_loop().run_until_complete(
-            ext.summarize(level=1, target_id="t", evidence=[])
-        )
+        # ``asyncio.run`` rather than ``get_event_loop().run_until_complete``:
+        # pytest-asyncio closes the per-test loop on teardown so the second
+        # form raises ``no current event loop`` when this sync test runs
+        # after any async test in the same module.
+        asyncio.run(ext.summarize(level=1, target_id="t", evidence=[]))
     assert "anthropic" not in import_attempts, (
         "stub mode tried to import anthropic — wastes startup"
     )
