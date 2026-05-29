@@ -9,6 +9,7 @@
   <label><span data-i18n="Limit">Limit</span><input type="number" id="limit" value="200" min="1" max="1000" /></label>
   <button class="primary" type="submit" data-i18n="Search">Search</button>
   <button type="button" onclick="exportAudit()" data-i18n="Export CSV">Export CSV</button>
+  <button type="button" onclick="exportAuditXlsx()" data-i18n="Export Excel">Export Excel</button>
 </form>
 <div id="out"></div>
 
@@ -67,6 +68,48 @@ async function exportAudit() {
   MnemosUI.exportCsv(flat,
     ["occurred_at", "actor", "action", "target", "details_json"],
     `audit-${Date.now()}.csv`);
+  MnemosUI.showToast(MnemosUI.t("Exported."), "success");
+}
+
+// PR-134 — audit log Excel export (ExcelJS). Same rows as CSV with a
+// styled, autofiltered sheet so a compliance reviewer can slice the
+// trail by actor/action without re-importing.
+async function exportAuditXlsx() {
+  const qs = new URLSearchParams();
+  const actor = document.getElementById("actor").value.trim();
+  const action = document.getElementById("action").value.trim();
+  const limit = document.getElementById("limit").value || "200";
+  if (actor) qs.set("actor", actor);
+  if (action) qs.set("action", action);
+  qs.set("limit", limit);
+  const r = await fetch(`/api/v1/audit?${qs}`);
+  if (!r.ok) { await MnemosUI.showError("Export failed", r); return; }
+  const rows = await r.json();
+  if (!rows.length) {
+    MnemosUI.showToast(MnemosUI.t("Nothing to export."), "warn");
+    return;
+  }
+  const flat = rows.map((e) => ({
+    occurred_at: e.occurred_at,
+    actor: e.actor,
+    action: e.action,
+    target: e.target || "",
+    details_json: JSON.stringify(e.details || {}),
+  }));
+  await MnemosUI.exportXlsx(
+    [{
+      name: "Audit Log",
+      rows: flat,
+      columns: [
+        { key: "occurred_at", header: "Timestamp", width: 26 },
+        { key: "actor", header: "Actor", width: 24 },
+        { key: "action", header: "Action", width: 28 },
+        { key: "target", header: "Target", width: 40 },
+        { key: "details_json", header: "Details (JSON)", width: 60 },
+      ],
+    }],
+    `audit-${Date.now()}.xlsx`,
+  );
   MnemosUI.showToast(MnemosUI.t("Exported."), "success");
 }
 

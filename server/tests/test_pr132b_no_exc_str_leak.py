@@ -22,7 +22,7 @@ def test_oidc_does_not_leak_exception_str_in_detail():
     # detail=f"...{exc}" 또는 detail=f"...{exc.X}" 패턴 검출.
     bad = re.findall(r'detail\s*=\s*f["\'][^"\']*\{exc(?:\.\w+)?\}', src)
     assert not bad, (
-        f"OIDC detail leaks exception text — generic identifier 사용 필요:\n"
+        "OIDC detail leaks exception text — generic identifier 사용 필요:\n"
         + "\n".join(f"  - {b}" for b in bad)
     )
 

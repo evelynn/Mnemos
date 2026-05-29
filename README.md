@@ -464,3 +464,11 @@ vulnerability scan + CycloneDX SBOM upload.
 ## License
 
 See [`LICENSE`](LICENSE).
+
+### Third-party (bundled)
+
+- **[ExcelJS](https://github.com/exceljs/exceljs)** (MIT) — self-hosted
+  at `server/app/dashboard/static/exceljs.min.js`, lazy-loaded on first
+  use to back the dashboard's **Export Excel** buttons (findings + audit
+  tabs). Bundled rather than CDN-loaded so the platform works air-gapped
+  and stays within its `script-src 'self'` CSP. See PR-134.

@@ -475,14 +475,140 @@
     }).join("\n");
     var csv = header + "\n" + body;
     var blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    _downloadBlob(blob, filename || ("mnemos-export-" + Date.now() + ".csv"));
+  }
+
+  // Shared blob → download helper (used by both CSV and XLSX paths).
+  function _downloadBlob(blob, filename) {
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
     a.href = url;
-    a.download = filename || ("mnemos-export-" + Date.now() + ".csv");
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+  }
+
+  // ─── XLSX export (ExcelJS — PR-134) ──────────────────────────────
+  //
+  // exceljs.github.io / github.com/exceljs/exceljs (MIT). The library
+  // is ~950 KB minified, so it is **lazy-loaded** on first export
+  // rather than shipped on every page — a dashboard tab that never
+  // exports Excel pays zero bytes for it. The script is served from
+  // ``/static/exceljs.min.js`` so CSP ``script-src 'self'`` covers it
+  // (no CDN, works air-gapped).
+  //
+  // ``MnemosUI.exportXlsx(spec, filename)`` accepts either shape:
+  //   1. an array of plain records  → a single "Sheet1"
+  //   2. an array of {name, rows, columns?} → one worksheet each
+  // Styled header (bold + fill), frozen header row, autofilter, and
+  // the same CSV-injection guard ExcelJS needs for ``= + - @`` cells.
+
+  var _exceljsPromise = null;
+
+  function _loadExcelJS() {
+    if (window.ExcelJS) return Promise.resolve(window.ExcelJS);
+    if (_exceljsPromise) return _exceljsPromise;
+    _exceljsPromise = new Promise(function (resolve, reject) {
+      var s = document.createElement("script");
+      s.src = "/static/exceljs.min.js";
+      s.async = true;
+      s.onload = function () {
+        if (window.ExcelJS) resolve(window.ExcelJS);
+        else reject(new Error("ExcelJS loaded but window.ExcelJS missing"));
+      };
+      s.onerror = function () {
+        _exceljsPromise = null;  // allow a retry on next click
+        reject(new Error("failed to load /static/exceljs.min.js"));
+      };
+      document.head.appendChild(s);
+    });
+    return _exceljsPromise;
+  }
+
+  // Same formula-injection defence as _csvCell — Excel/Sheets execute
+  // a cell whose text begins with = + - @. We prefix a single quote so
+  // the value renders literally instead of evaluating.
+  function _xlsxSafe(value) {
+    if (value === null || value === undefined) return "";
+    var s = typeof value === "object" ? JSON.stringify(value) : value;
+    if (typeof s === "string" && s.length && "=+-@".indexOf(s.charAt(0)) !== -1) {
+      return "'" + s;
+    }
+    return s;
+  }
+
+  function _normaliseSheets(spec) {
+    // Array of plain records → single sheet. Array of sheet specs →
+    // as-is. A sheet spec is {name, rows, columns?}.
+    if (!Array.isArray(spec)) return [];
+    var looksLikeSheetSpecs = spec.length > 0 &&
+      spec[0] && typeof spec[0] === "object" &&
+      Array.isArray(spec[0].rows);
+    if (looksLikeSheetSpecs) return spec;
+    return [{ name: "Sheet1", rows: spec }];
+  }
+
+  function exportXlsx(spec, filename, opts) {
+    opts = opts || {};
+    var sheets = _normaliseSheets(spec);
+    return _loadExcelJS().then(function (ExcelJS) {
+      var wb = new ExcelJS.Workbook();
+      wb.creator = "Mnemos";
+      wb.created = new Date();
+      sheets.forEach(function (sheet, idx) {
+        var rows = sheet.rows || [];
+        var columns = sheet.columns ||
+          (rows.length ? Object.keys(rows[0]) : []);
+        var ws = wb.addWorksheet(sheet.name || ("Sheet" + (idx + 1)));
+        // Column definitions drive header text + a reasonable width.
+        ws.columns = columns.map(function (c) {
+          var header = typeof c === "object" ? (c.header || c.key) : c;
+          var key = typeof c === "object" ? c.key : c;
+          var width = typeof c === "object" && c.width ? c.width
+            : Math.min(60, Math.max(12, String(header).length + 4));
+          return { header: String(header), key: String(key), width: width };
+        });
+        var keys = ws.columns.map(function (col) { return col.key; });
+        rows.forEach(function (r) {
+          var rowObj = {};
+          keys.forEach(function (k) { rowObj[k] = _xlsxSafe(r[k]); });
+          ws.addRow(rowObj);
+        });
+        // Header styling — bold white on slate, frozen, autofiltered.
+        var headerRow = ws.getRow(1);
+        headerRow.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        headerRow.fill = {
+          type: "pattern", pattern: "solid",
+          fgColor: { argb: "FF1F2933" },
+        };
+        headerRow.alignment = { vertical: "middle" };
+        ws.views = [{ state: "frozen", ySplit: 1 }];
+        if (keys.length) {
+          ws.autoFilter = {
+            from: { row: 1, column: 1 },
+            to: { row: 1, column: keys.length },
+          };
+        }
+      });
+      return wb.xlsx.writeBuffer();
+    }).then(function (buffer) {
+      var blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      _downloadBlob(blob, filename || ("mnemos-export-" + Date.now() + ".xlsx"));
+    }).catch(function (err) {
+      // Surface a toast rather than a silent failure — the operator
+      // clicked a button and deserves to know it didn't work.
+      if (typeof showToast === "function") {
+        showToast(
+          t("Excel export failed — falling back to CSV is available."),
+          "error"
+        );
+      }
+      throw err;
+    });
   }
 
   // ─── Command palette (PR-42, audit C2 + D3) ──────────────────────
@@ -1376,8 +1502,11 @@
     // PR-47 — Phase 4 polish.
     "Session expired. Redirecting to sign in…": "세션이 만료되었습니다. 로그인 페이지로 이동합니다…",
     "Export CSV": "CSV 내보내기",
+    "Export Excel": "Excel 내보내기",
     "Exported.": "내보냈습니다.",
     "Nothing to export.": "내보낼 항목이 없습니다.",
+    "Excel export failed — falling back to CSV is available.":
+      "Excel 내보내기 실패 — CSV 내보내기를 대신 사용할 수 있습니다.",
     "Enter a project ID first.": "프로젝트 ID 를 먼저 입력하세요.",
     // PR-49 — knowledge graph visualisation.
     "Graph": "그래프",
@@ -1868,6 +1997,7 @@
     gateByRole: gateByRole,
     icon: icon,
     exportCsv: exportCsv,
+    exportXlsx: exportXlsx,
     notify: notify,
     readNotifications: readNotifications,
     clearNotifications: clearNotifications,
