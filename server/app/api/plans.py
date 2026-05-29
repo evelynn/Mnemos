@@ -9,9 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
-from app.auth.org_scope import require_project_org
+from app.auth.org_scope import require_project_org, resolve_project_org, same_org
+from app.auth.rbac import require_operator
 from app.db import get_session
 from app.mcp.queries import impact_analysis
+from app.models.findings import Finding
 from app.models.plans import Plan
 from app.sandbox.worktree import create_worktree
 
@@ -35,9 +37,16 @@ class PlanTask(BaseModel):
 
 class PlanSubmit(BaseModel):
     spec: PlanSpec
-    tasks: list[PlanTask]
-    target_component_id: str
-    requester: str
+    # PR-133 — DoS bound. A plan with 100+ tasks is almost certainly
+    # generated noise; large submissions multiply through every
+    # downstream stage (worktree creation, MR description, etc).
+    tasks: list[PlanTask] = Field(..., max_length=100)
+    target_component_id: str = Field(..., max_length=300)
+    requester: str = Field(..., max_length=128)
+    # Optional reproducibility pin. None → worktree is created at the
+    # mirror's current HEAD; the resolved SHA is recorded in
+    # worktree_meta either way so re-runs can reference it.
+    base_sha: str | None = Field(default=None, max_length=64)
 
 
 class PlanOut(BaseModel):
@@ -98,8 +107,12 @@ async def submit_plan(
     await db.commit()
     await db.refresh(plan)
 
-    worktree = await create_worktree(plan.id, project_id)
+    worktree = await create_worktree(plan.id, project_id, base_sha=body.base_sha)
     plan.worktree_path = str(worktree)
+    plan.worktree_meta = {
+        "base_sha": body.base_sha,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
     await db.commit()
     await db.refresh(plan)
 
@@ -111,6 +124,160 @@ async def submit_plan(
         details={"title": body.spec.title, "tasks": len(body.tasks)},
     )
     return _out(plan)
+
+
+@router.post(
+    "/api/v1/findings/{finding_id}/plan",
+    dependencies=[Depends(require_operator)],
+)
+async def plan_from_finding(
+    finding_id: uuid.UUID,
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+) -> PlanOut:
+    """One-click: turn a finding into a draft Plan (PR-52, audit B4).
+
+    The value audit's B-area gap was that the operator had to
+    *manually* re-type a Plan spec from a finding — there was no
+    automated path from "here's a problem" to "here's a task to
+    fix it". This endpoint pre-fills a Plan from the finding's
+    kind, subject, severity, risk score, and the deterministic
+    remediation hint PR-50 already attached.
+
+    The Plan lands in ``status="pending_approval"`` exactly like a
+    hand-written one — the operator still reviews + approves, and
+    the ultrareview pipeline still gates the eventual diff. This
+    just removes the transcription step.
+    """
+    finding = (
+        await db.execute(select(Finding).where(Finding.id == finding_id))
+    ).scalar_one_or_none()
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding_not_found")
+    # Org isolation — the finding's project must be in the caller's org.
+    from app.models.projects import Project
+
+    project = (
+        await db.execute(
+            select(Project).where(Project.id == finding.project_id)
+        )
+    ).scalar_one_or_none()
+    if project is None or project.organization_id != user.organization_id:
+        raise HTTPException(status_code=404, detail="finding_not_found")
+
+    subject = finding.subject_node_id or (
+        str(finding.subject_edge_id) if finding.subject_edge_id else ""
+    )
+    remediation = finding.remediation or (
+        "Review the finding detail and decide on a fix."
+    )
+    spec = {
+        "title": f"Fix: {finding.kind} on {subject or '(unscoped)'}",
+        "motivation": (
+            f"Finding {finding.kind} (severity {finding.severity}, "
+            f"risk {finding.risk_score}/100) flagged "
+            f"{subject or 'the project'}. {remediation}"
+        ),
+        "non_goals": [],
+        "success_criteria": [
+            f"The {finding.kind} finding on {subject or 'the subject'} "
+            "no longer reproduces after re-analysis.",
+        ],
+    }
+    tasks = [
+        {
+            "id": "task-1",
+            "title": f"Address {finding.kind}",
+            "description": remediation,
+            "affects": [subject] if subject else [],
+            "depends_on": [],
+        }
+    ]
+    impacts = await impact_analysis(
+        db,
+        project_id=finding.project_id,
+        symbol_id=subject or "",
+        max_depth=3,
+    )
+    plan = Plan(
+        project_id=finding.project_id,
+        spec=spec,
+        tasks=tasks,
+        impact_report={
+            "directly_affected": impacts["directly_affected"],
+            "transitively_affected": impacts["transitively_affected"],
+            "opaque_components_touched": impacts["opaque_components_touched"],
+            "source_finding_id": str(finding.id),
+        },
+        requester=f"user:{user.id}",
+    )
+    db.add(plan)
+    await db.commit()
+    await db.refresh(plan)
+
+    worktree = await create_worktree(plan.id, finding.project_id, base_sha=None)
+    plan.worktree_path = str(worktree)
+    plan.worktree_meta = {
+        "base_sha": None,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "from_finding": str(finding.id),
+    }
+    await db.commit()
+    await db.refresh(plan)
+
+    await audit_record(
+        actor=f"user:{user.id}",
+        action="plan.from_finding",
+        target=str(plan.id),
+        project_id=finding.project_id,
+        details={"finding_id": str(finding.id), "kind": finding.kind},
+    )
+    return _out(plan)
+
+
+@router.get("/api/v1/findings/{finding_id}/plans")
+async def plans_for_finding(
+    finding_id: uuid.UUID,
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+) -> list[PlanOut]:
+    """Plans spawned from a finding (PR-56 — Finding↔Plan linkage).
+
+    PR-52 recorded ``impact_report.source_finding_id`` when a Plan
+    was created from a finding, but the link was write-only — the
+    findings table couldn't show "you already opened a Plan for
+    this". This endpoint closes the loop: given a finding, return
+    every Plan whose impact_report names it.
+
+    Org-isolated via the finding's project.
+    """
+    finding = (
+        await db.execute(select(Finding).where(Finding.id == finding_id))
+    ).scalar_one_or_none()
+    if finding is None:
+        raise HTTPException(status_code=404, detail="finding_not_found")
+    from app.models.projects import Project
+
+    project = (
+        await db.execute(
+            select(Project).where(Project.id == finding.project_id)
+        )
+    ).scalar_one_or_none()
+    if project is None or project.organization_id != user.organization_id:
+        raise HTTPException(status_code=404, detail="finding_not_found")
+
+    rows = (
+        await db.execute(
+            select(Plan).where(Plan.project_id == finding.project_id)
+        )
+    ).scalars().all()
+    target = str(finding_id)
+    matched = [
+        p
+        for p in rows
+        if (p.impact_report or {}).get("source_finding_id") == target
+    ]
+    return [_out(p) for p in matched]
 
 
 @router.get(
@@ -133,15 +300,29 @@ async def list_plans(
     return [_out(r) for r in rows]
 
 
+async def _plan_in_user_org(db, user, plan_id):
+    """Load a plan iff it belongs to the caller's org; 404 otherwise.
+    Returns the Plan. Mirrors the pattern PR-60 used for findings —
+    /plans routes key off plan_id, so require_project_org (which needs
+    a project_id path param) can't gate them; the org check is inline."""
+    plan = (
+        await db.execute(select(Plan).where(Plan.id == plan_id))
+    ).scalar_one_or_none()
+    if plan is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    org_id = await resolve_project_org(db, plan.project_id)
+    if not same_org(user, org_id):
+        raise HTTPException(status_code=404, detail="not_found")
+    return plan
+
+
 @router.get("/api/v1/plans/{plan_id}")
 async def get_plan(
     plan_id: uuid.UUID,
-    _: CurrentUser,
+    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> PlanOut:
-    plan = (await db.execute(select(Plan).where(Plan.id == plan_id))).scalar_one_or_none()
-    if plan is None:
-        raise HTTPException(status_code=404, detail="not_found")
+    plan = await _plan_in_user_org(db, user, plan_id)
     return _out(plan)
 
 
@@ -150,16 +331,17 @@ class PlanDecision(BaseModel):
     feedback: str | None = None
 
 
-@router.post("/api/v1/plans/{plan_id}/decide")
+@router.post(
+    "/api/v1/plans/{plan_id}/decide",
+    dependencies=[Depends(require_operator)],
+)
 async def decide_plan(
     plan_id: uuid.UUID,
     body: PlanDecision,
     user: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> PlanOut:
-    plan = (await db.execute(select(Plan).where(Plan.id == plan_id))).scalar_one_or_none()
-    if plan is None:
-        raise HTTPException(status_code=404, detail="not_found")
+    plan = await _plan_in_user_org(db, user, plan_id)
     status_map = {"approve": "approved", "reject": "rejected", "regenerate": "pending_approval"}
     plan.status = status_map[body.status]
     if body.status == "approve":

@@ -1,10 +1,10 @@
 {% extends "_layout.html" %}
 {% block title %}Data — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>Data entities</h1></header>
+<header class="page-head"><h1 data-i18n="Data entities">Data entities</h1></header>
 
 <form onsubmit="return loadEntities(event)">
-  <label>Project ID<input type="text" id="pid" required placeholder="uuid" /></label>
+  <label><span data-i18n="Project ID">Project ID</span><input type="text" id="pid" required placeholder="uuid" /></label>
   <button class="primary" type="submit">Load entities</button>
 </form>
 <div id="entities"></div>
@@ -16,6 +16,32 @@
   <div id="sample"></div>
 </section>
 
+<section id="query-runner">
+  <h2>SQL query (read-only)</h2>
+  <p class="muted">
+    The analyzer runs the SELECT against the production DB and returns
+    masked rows. SQLGlot blocks anything that mutates state (spec §2.8);
+    a missing or oversized <code>LIMIT</code> is clamped — a
+    <code>Warning</code> header tells you what we trimmed.
+  </p>
+  <form onsubmit="return runQuery(event)">
+    <label>DB component ID
+      <input id="q-component" type="text" required placeholder="db.mssql.OrderDb" />
+    </label>
+    <label>Purpose <span class="muted">(audit log requires ≥ 3 chars; ≥ 10 strongly recommended)</span>
+      <input id="q-purpose" type="text" minlength="3" required />
+    </label>
+    <label>SQL
+      <textarea id="q-sql" rows="6" required placeholder="SELECT * FROM Orders WHERE ..."></textarea>
+    </label>
+    <label>Max rows <span class="muted">(blank = platform default 10 000)</span>
+      <input id="q-max-rows" type="number" min="1" />
+    </label>
+    <button type="submit" class="primary">Run query</button>
+  </form>
+  <div id="query-result"></div>
+</section>
+
 <script>
 async function loadEntities(ev) {
   ev.preventDefault();
@@ -25,16 +51,39 @@ async function loadEntities(ev) {
   const rows = await r.json();
   const out = document.getElementById("entities");
   if (!Array.isArray(rows) || rows.length === 0) {
-    out.innerHTML = '<p class="muted">No data entities yet.</p>';
+    out.innerHTML = '<p class="muted" data-i18n="No data entities yet.">No data entities yet.</p>';
+    MnemosUI.applyI18n(out);
     return false;
   }
-  let html = '<table class="data"><thead><tr><th>ID</th><th>Kind</th><th>Sensitive</th><th>Certainty</th></tr></thead><tbody>';
+  let html = '<table class="data"><thead><tr><th>ID</th><th>Component</th><th>Kind</th><th>Sensitive</th><th>Certainty</th><th></th></tr></thead><tbody>';
   for (const r of rows) {
-    html += `<tr><td><code>${r.id}</code></td><td>${r.kind ?? ""}</td><td>${r.is_sensitive ? "yes" : "no"}</td><td>${r.certainty}</td></tr>`;
+    // Surface component_id — the value the query runner needs.
+    // Without this column the operator had no way to find it in the UI
+    // (4th-round audit, scenario 2 Critical).
+    const cid = r.component_id ?? "";
+    const useBtn = cid
+      ? `<button type="button" onclick="useComponent('${escapeHtml(cid)}')">Use in query →</button>`
+      : "";
+    html += `<tr>
+      <td><code>${escapeHtml(r.id)}</code></td>
+      <td><code>${escapeHtml(cid)}</code></td>
+      <td>${escapeHtml(r.kind ?? "")}</td>
+      <td>${r.is_sensitive ? "yes" : "no"}</td>
+      <td>${escapeHtml(r.certainty ?? "")}</td>
+      <td>${useBtn}</td>
+    </tr>`;
   }
   html += "</tbody></table>";
   out.innerHTML = html;
   return false;
+}
+
+function useComponent(cid) {
+  // One-click handoff from entities → query runner.
+  document.getElementById("q-component").value = cid;
+  document.getElementById("q-sql").focus();
+  MnemosUI.showToast("Component id copied into the SQL form below.", "success");
+  document.getElementById("query-runner").scrollIntoView({behavior: "smooth"});
 }
 
 async function loadSample() {
@@ -61,6 +110,129 @@ async function loadSample() {
   html += "</tbody></table>";
   if (payload.masking_applied) html += '<p class="muted">masking applied</p>';
   out.innerHTML = html;
+}
+
+async function runQuery(ev) {
+  ev.preventDefault();
+  const pid = document.getElementById("pid").value.trim();
+  if (!pid) { MnemosUI.showToast("Load entities first to set the project id.", "warn"); return false; }
+  const body = {
+    db_component_id: document.getElementById("q-component").value.trim(),
+    purpose: document.getElementById("q-purpose").value.trim(),
+    sql: document.getElementById("q-sql").value,
+    // Server side pre-executes; this client doesn't actually run SQL.
+    // We send empty columns/rows so the platform can mask whatever
+    // the analyzer subprocess returns.
+    columns: [],
+    rows: [],
+  };
+  const maxRows = parseInt(document.getElementById("q-max-rows").value, 10);
+  if (Number.isFinite(maxRows) && maxRows > 0) body.max_rows = maxRows;
+
+  const r = await fetch(`/api/v1/projects/${pid}/data/query`, {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  // Surface the RFC 7234 Warning header (PR-8 clamp behaviour) so the
+  // operator sees the clamp happened — body field exists too, this
+  // catches the case where a proxy stripped the body.
+  const warning = r.headers.get("Warning");
+  if (warning) MnemosUI.showToast(warning, "warn");
+
+  if (!r.ok) {
+    // The server now returns structured detail for sql_parse_failed
+    // (PR-15) — extract the friendly ``message`` and append the raw
+    // parser error in a second line for advanced users.
+    try {
+      const payload = await r.clone().json();
+      const detail = payload && payload.detail;
+      if (detail && typeof detail === "object" && detail.code === "sql_parse_failed") {
+        const head = "SQL parse failed — " + detail.message;
+        MnemosUI.showToast(head, "error");
+        // Show the raw parser error in the result area too, so the
+        // operator can copy it for a bug report.
+        document.getElementById("query-result").innerHTML =
+          '<p class="toast error" role="alert">'
+          + escapeHtml(head)
+          + '<br><small><code>' + escapeHtml(detail.parser_error || "") + '</code></small>'
+          + '</p>';
+        return false;
+      }
+    } catch (_) { /* fall through to generic */ }
+    await MnemosUI.showError("Query refused", r);
+    return false;
+  }
+  const payload = await r.json();
+  const out = document.getElementById("query-result");
+  let banner = "";
+  if (payload.limit_clamp === "clamped") {
+    banner = `<p class="toast warn" role="status">Results capped at ${payload.effective_limit} rows (you asked for ${payload.original_limit}).</p>`;
+  }
+  const rows = payload.rows || [];
+  const cols = payload.columns || [];
+  if (!rows.length) {
+    out.innerHTML = banner + '<p class="muted">No rows returned.</p>';
+    return false;
+  }
+  // P2-6 — pagination for large result sets. Rendering 10 000 <tr>
+  // elements in one innerHTML write is enough to freeze a Chrome
+  // worker for several seconds. The new pattern keeps the first
+  // ``_DATA_PAGE_SIZE`` rows in the DOM and reveals more on demand.
+  _renderRowsPaginated(out, banner, cols, rows, payload);
+  return false;
+}
+
+const _DATA_PAGE_SIZE = 100;
+
+function _renderRowsPaginated(out, banner, cols, rows, payload) {
+  const total = rows.length;
+  // First batch ships server-rendered HTML; subsequent batches are
+  // injected by ``_showNextDataPage`` so the operator only pays the
+  // render cost they actually scroll into view.
+  const head = '<table class="data"><thead><tr>'
+    + cols.map(c => `<th>${escapeHtml(c)}</th>`).join("")
+    + '</tr></thead><tbody id="data-tbody"></tbody></table>';
+  const status = `<p class="muted" id="data-page-status"></p>`;
+  const more = `<button type="button" class="primary" id="data-page-more" hidden>Show next ${_DATA_PAGE_SIZE} rows</button>`;
+  const tail = payload.masking_applied
+    ? '<p class="muted">masking applied — PII tokens visible in raw SQL response only</p>'
+    : "";
+  out.innerHTML = banner + head + status + " " + more + tail;
+  // Stash the dataset on the dom node so the "Show next" handler
+  // doesn't need a closure that survives subsequent renders.
+  const tbody = document.getElementById("data-tbody");
+  tbody.dataset.offset = "0";
+  tbody.dataset.total = String(total);
+  tbody._rows = rows;
+  _showNextDataPage();
+}
+
+function _showNextDataPage() {
+  const tbody = document.getElementById("data-tbody");
+  if (!tbody) return;
+  const rows = tbody._rows || [];
+  let offset = parseInt(tbody.dataset.offset || "0", 10);
+  const total = rows.length;
+  const next = Math.min(offset + _DATA_PAGE_SIZE, total);
+  // Build the next slice as a DocumentFragment so we make one DOM
+  // write, not one per row.
+  const tpl = document.createElement("template");
+  let html = "";
+  for (let i = offset; i < next; i++) {
+    const r = rows[i] || [];
+    html += '<tr>' + r.map(v => `<td>${escapeHtml(v == null ? "" : v)}</td>`).join("") + '</tr>';
+  }
+  tpl.innerHTML = html;
+  tbody.appendChild(tpl.content);
+  tbody.dataset.offset = String(next);
+  const status = document.getElementById("data-page-status");
+  if (status) status.textContent = `Showing ${next} of ${total} rows.`;
+  const more = document.getElementById("data-page-more");
+  if (more) {
+    more.hidden = next >= total;
+    more.onclick = _showNextDataPage;
+  }
 }
 </script>
 {% endblock %}

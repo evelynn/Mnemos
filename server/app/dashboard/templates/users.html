@@ -1,0 +1,234 @@
+{% extends "_layout.html" %}
+{% block title %}Users — Mnemos{% endblock %}
+{% block content %}
+<header class="page-head"><h1 data-i18n="Users">Users</h1></header>
+
+{% if user.role != 'admin' %}
+<p class="muted"><em data-i18n="User management is admin-only.">User management is admin-only.</em></p>
+{% else %}
+<section>
+  <h2 data-i18n="Add user">Add user</h2>
+  <p class="muted" data-i18n="The new account joins your organisation with the chosen role. Send the temporary password through a secure side-channel; the user can change it from their profile page after first login.">
+    The new account joins your organisation with the chosen role. Send the temporary password through a secure side-channel; the user can change it from their profile page after first login.
+  </p>
+  <form onsubmit="return createUser(event)">
+    <label><span data-i18n="Username">Username</span>
+      <input id="nu-username" type="text" required pattern="[a-zA-Z0-9_.\-]{2,64}" placeholder="alice" />
+    </label>
+    <label><span data-i18n="Display name">Display name</span>
+      <input id="nu-display" type="text" maxlength="200" placeholder="Alice Kim" />
+    </label>
+    <label><span data-i18n="Email">Email</span>
+      <input id="nu-email" type="email" maxlength="200" placeholder="alice@example.com" />
+    </label>
+    <label><span data-i18n="Temporary password">Temporary password</span>
+      <input id="nu-password" type="password" required minlength="12" autocomplete="new-password" />
+    </label>
+    <label><span data-i18n="Role">Role</span>
+      <select id="nu-role" required>
+        <option value="viewer">viewer</option>
+        <option value="operator" selected>operator</option>
+        <option value="admin">admin</option>
+      </select>
+    </label>
+    <button type="submit" class="primary" data-i18n="Create user">Create user</button>
+  </form>
+</section>
+
+<section>
+  <h2 data-i18n="Or invite by token">Or invite by token</h2>
+  <p class="muted" data-i18n="Generate an invite token the recipient pastes into the /invite page. They pick their own username and password. The token expires in 7 days and can be used once.">
+    Generate an invite token the recipient pastes into the
+    /invite page. They pick their own username and password.
+    The token expires in 7 days and can be used once.
+  </p>
+  <form onsubmit="return createInvite(event)">
+    <label><span data-i18n="Email">Email</span>
+      <input id="inv-email" type="email" required maxlength="200" placeholder="newuser@example.com" />
+    </label>
+    <label><span data-i18n="Role">Role</span>
+      <select id="inv-role">
+        <option value="viewer">viewer</option>
+        <option value="operator" selected>operator</option>
+        <option value="admin">admin</option>
+      </select>
+    </label>
+    <button type="submit" class="primary" data-i18n="Generate invite link">Generate invite link</button>
+  </form>
+  <div id="invite-result" class="onboarding-step-cta" hidden></div>
+</section>
+
+<section>
+  <h2 data-i18n="Members">Members</h2>
+  <div class="user-controls">
+    <label class="muted">
+      <input type="checkbox" id="show-disabled" onchange="loadUsers()" />
+      <span data-i18n="Include disabled">Include disabled</span>
+    </label>
+    <button onclick="loadUsers()" data-i18n="Refresh">Refresh</button>
+  </div>
+  <div id="users-list"><p class="muted" data-i18n="Loading…">Loading…</p></div>
+</section>
+{% endif %}
+
+<style>
+.user-controls { display: flex; gap: 1rem; align-items: center; margin-bottom: 0.6rem; }
+.user-row { display: flex; gap: 0.6rem; align-items: center; }
+.user-row .role-select { min-width: 110px; }
+.user-row.disabled { opacity: 0.55; }
+.user-avatar {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: #eef0f3; display: inline-flex;
+  align-items: center; justify-content: center;
+  font-weight: 600; font-size: 0.8rem; color: #57606a;
+  overflow: hidden;
+}
+.user-avatar img { width: 100%; height: 100%; object-fit: cover; }
+</style>
+
+<script>
+function initials(u) {
+  const name = u.display_name || u.username || "?";
+  return name.trim().split(/\s+/).map(w => w[0]).slice(0, 2).join("").toUpperCase();
+}
+
+async function loadUsers() {
+  const includeDisabled = document.getElementById("show-disabled")?.checked;
+  const qs = includeDisabled ? "?include_disabled=true" : "";
+  const r = await fetch("/api/v1/users" + qs);
+  const out = document.getElementById("users-list");
+  if (!r.ok) {
+    out.innerHTML = `<p class="error">HTTP ${r.status}</p>`;
+    return;
+  }
+  const rows = await r.json();
+  if (!rows.length) {
+    out.innerHTML = '<p class="muted" data-i18n="No users yet.">No users yet.</p>';
+    MnemosUI.applyI18n(out);
+    return;
+  }
+  let html = '<table class="data"><thead><tr>'
+    + '<th></th>'
+    + '<th data-i18n="Username">Username</th>'
+    + '<th data-i18n="Display name">Display name</th>'
+    + '<th data-i18n="Email">Email</th>'
+    + '<th data-i18n="Role">Role</th>'
+    + '<th data-i18n="Last login">Last login</th>'
+    + '<th data-i18n="Status">Status</th>'
+    + '<th></th>'
+    + '</tr></thead><tbody>';
+  for (const u of rows) {
+    const disabled = u.disabled_at !== null;
+    const avatar = u.avatar_url
+      ? `<img src="${escapeHtml(u.avatar_url)}" alt="">`
+      : escapeHtml(initials(u));
+    const last = u.last_login_at
+      ? `<time data-ts="${u.last_login_at}">${u.last_login_at}</time>`
+      : '<span class="muted">—</span>';
+    const status = disabled
+      ? `<span class="badge disabled" data-i18n="Disabled">Disabled</span>`
+      : `<span class="badge ok" data-i18n="Active">Active</span>`;
+    const action = disabled
+      ? `<button onclick="enableUser('${u.id}', '${escapeHtml(u.username)}')" data-i18n="Re-enable">Re-enable</button>`
+      : `<button class="danger" onclick="disableUser('${u.id}', '${escapeHtml(u.username)}')" data-i18n="Disable">Disable</button>`;
+    html += `<tr class="user-row ${disabled ? 'disabled' : ''}">
+      <td><span class="user-avatar">${avatar}</span></td>
+      <td><strong>${escapeHtml(u.username)}</strong></td>
+      <td>${escapeHtml(u.display_name || "")}</td>
+      <td>${escapeHtml(u.email || "")}</td>
+      <td>
+        <select class="role-select" onchange="changeRole('${u.id}', this.value, '${escapeHtml(u.username)}')" ${disabled ? "disabled" : ""}>
+          <option value="viewer"${u.role === "viewer" ? " selected" : ""}>viewer</option>
+          <option value="operator"${u.role === "operator" ? " selected" : ""}>operator</option>
+          <option value="admin"${u.role === "admin" ? " selected" : ""}>admin</option>
+        </select>
+      </td>
+      <td>${last}</td>
+      <td>${status}</td>
+      <td>${action}</td>
+    </tr>`;
+  }
+  html += "</tbody></table>";
+  out.innerHTML = html;
+  MnemosUI.applyI18n(out);
+  MnemosUI.hydrateRelativeTimes(out);
+}
+
+async function createUser(ev) {
+  ev.preventDefault();
+  const body = {
+    username: document.getElementById("nu-username").value.trim(),
+    display_name: document.getElementById("nu-display").value.trim() || null,
+    email: document.getElementById("nu-email").value.trim() || null,
+    password: document.getElementById("nu-password").value,
+    role: document.getElementById("nu-role").value,
+  };
+  const r = await fetch("/api/v1/users", {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) { await MnemosUI.showError("Create failed", r); return false; }
+  MnemosUI.showToast(MnemosUI.t('User "$1" created.', {name: body.username}), "success");
+  ev.target.reset();
+  loadUsers();
+  return false;
+}
+
+async function changeRole(userId, role, username) {
+  if (!confirm(`Set role of "${username}" to ${role}?`)) {
+    loadUsers();
+    return;
+  }
+  const r = await fetch(`/api/v1/users/${userId}/role`, {
+    method: "PATCH",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({role: role}),
+  });
+  if (!r.ok) { await MnemosUI.showError("Role change failed", r); loadUsers(); return; }
+  MnemosUI.showToast(MnemosUI.t("Role updated."), "success");
+}
+
+async function disableUser(userId, username) {
+  if (!confirm(`Disable "${username}"? Their sessions stay valid until expiry; future logins are refused.`)) return;
+  const r = await fetch(`/api/v1/users/${userId}`, {method: "DELETE"});
+  if (!r.ok && r.status !== 204) { await MnemosUI.showError("Disable failed", r); return; }
+  MnemosUI.showToast(MnemosUI.t("User disabled."), "success");
+  loadUsers();
+}
+
+async function enableUser(userId, username) {
+  const r = await fetch(`/api/v1/users/${userId}/enable`, {method: "POST"});
+  if (!r.ok) { await MnemosUI.showError("Re-enable failed", r); return; }
+  MnemosUI.showToast(MnemosUI.t("User re-enabled."), "success");
+  loadUsers();
+}
+
+async function createInvite(ev) {
+  ev.preventDefault();
+  const body = {
+    email: document.getElementById("inv-email").value.trim(),
+    role: document.getElementById("inv-role").value,
+  };
+  const r = await fetch("/api/v1/invites", {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  const out = document.getElementById("invite-result");
+  if (!r.ok) { await MnemosUI.showError("Invite failed", r); return false; }
+  const payload = await r.json();
+  const link = `${window.location.origin}/invite#token=${encodeURIComponent(payload.token)}`;
+  out.hidden = false;
+  out.innerHTML = `<strong>${escapeHtml(payload.email)}</strong> · role <code>${escapeHtml(payload.role)}</code><br>
+    <span class="muted" data-i18n="Share this link out-of-band. It expires in 7 days.">Share this link out-of-band. It expires in 7 days.</span><br>
+    <code>${escapeHtml(link)}</code>
+    <button onclick="navigator.clipboard.writeText('${link}').then(() => MnemosUI.showToast(MnemosUI.t('Link copied.'), 'success'))" data-i18n="Copy link">Copy link</button>`;
+  MnemosUI.applyI18n(out);
+  ev.target.reset();
+  return false;
+}
+
+if (document.getElementById("users-list")) loadUsers();
+</script>
+{% endblock %}

@@ -1,13 +1,15 @@
 {% extends "_layout.html" %}
 {% block title %}Audit — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>Audit log</h1></header>
+<header class="page-head"><h1 data-i18n="Audit log">Audit log</h1></header>
 
 <form onsubmit="return load(event)">
-  <label>Actor filter<input type="text" id="actor" placeholder="user:<uuid> or system" /></label>
-  <label>Action filter<input type="text" id="action" placeholder="plan.submit" /></label>
-  <label>Limit<input type="number" id="limit" value="200" min="1" max="1000" /></label>
-  <button class="primary" type="submit">Search</button>
+  <label><span data-i18n="Actor filter">Actor filter</span><input type="text" id="actor" placeholder="user:<uuid> or system" /></label>
+  <label><span data-i18n="Action filter">Action filter</span><input type="text" id="action" placeholder="plan.submit" /></label>
+  <label><span data-i18n="Limit">Limit</span><input type="number" id="limit" value="200" min="1" max="1000" /></label>
+  <button class="primary" type="submit" data-i18n="Search">Search</button>
+  <button type="button" onclick="exportAudit()" data-i18n="Export CSV">Export CSV</button>
+  <button type="button" onclick="exportAuditXlsx()" data-i18n="Export Excel">Export Excel</button>
 </form>
 <div id="out"></div>
 
@@ -30,11 +32,101 @@ async function load(ev) {
   }
   let html = '<table class="data"><thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th></tr></thead><tbody>';
   for (const e of rows) {
-    html += `<tr><td>${e.occurred_at}</td><td>${e.actor}</td><td>${e.action}</td><td><code>${e.target ?? ""}</code></td><td><pre>${JSON.stringify(e.details)}</pre></td></tr>`;
+    const ts = e.occurred_at
+      ? `<time data-ts="${e.occurred_at}">${e.occurred_at}</time>`
+      : "";
+    html += `<tr><td>${ts}</td><td>${e.actor}</td><td>${e.action}</td><td><code>${e.target ?? ""}</code></td><td><pre>${escapeHtml(JSON.stringify(e.details))}</pre></td></tr>`;
   }
   html += "</tbody></table>";
   out.innerHTML = html;
+  MnemosUI.hydrateRelativeTimes(out);
   return false;
 }
+
+async function exportAudit() {
+  const qs = new URLSearchParams();
+  const actor = document.getElementById("actor").value.trim();
+  const action = document.getElementById("action").value.trim();
+  const limit = document.getElementById("limit").value || "200";
+  if (actor) qs.set("actor", actor);
+  if (action) qs.set("action", action);
+  qs.set("limit", limit);
+  const r = await fetch(`/api/v1/audit?${qs}`);
+  if (!r.ok) { await MnemosUI.showError("Export failed", r); return; }
+  const rows = await r.json();
+  if (!rows.length) {
+    MnemosUI.showToast(MnemosUI.t("Nothing to export."), "warn");
+    return;
+  }
+  const flat = rows.map((e) => ({
+    occurred_at: e.occurred_at,
+    actor: e.actor,
+    action: e.action,
+    target: e.target || "",
+    details_json: JSON.stringify(e.details || {}),
+  }));
+  MnemosUI.exportCsv(flat,
+    ["occurred_at", "actor", "action", "target", "details_json"],
+    `audit-${Date.now()}.csv`);
+  MnemosUI.showToast(MnemosUI.t("Exported."), "success");
+}
+
+// PR-134 — audit log Excel export (ExcelJS). Same rows as CSV with a
+// styled, autofiltered sheet so a compliance reviewer can slice the
+// trail by actor/action without re-importing.
+async function exportAuditXlsx() {
+  const qs = new URLSearchParams();
+  const actor = document.getElementById("actor").value.trim();
+  const action = document.getElementById("action").value.trim();
+  const limit = document.getElementById("limit").value || "200";
+  if (actor) qs.set("actor", actor);
+  if (action) qs.set("action", action);
+  qs.set("limit", limit);
+  const r = await fetch(`/api/v1/audit?${qs}`);
+  if (!r.ok) { await MnemosUI.showError("Export failed", r); return; }
+  const rows = await r.json();
+  if (!rows.length) {
+    MnemosUI.showToast(MnemosUI.t("Nothing to export."), "warn");
+    return;
+  }
+  const flat = rows.map((e) => ({
+    occurred_at: e.occurred_at,
+    actor: e.actor,
+    action: e.action,
+    target: e.target || "",
+    details_json: JSON.stringify(e.details || {}),
+  }));
+  await MnemosUI.exportXlsx(
+    [{
+      name: "Audit Log",
+      rows: flat,
+      columns: [
+        { key: "occurred_at", header: "Timestamp", width: 26 },
+        { key: "actor", header: "Actor", width: 24 },
+        { key: "action", header: "Action", width: 28 },
+        { key: "target", header: "Target", width: 40 },
+        { key: "details_json", header: "Details (JSON)", width: 60 },
+      ],
+    }],
+    `audit-${Date.now()}.xlsx`,
+  );
+  MnemosUI.showToast(MnemosUI.t("Exported."), "success");
+}
+
+// P2-7 drill-down — pre-fill filters from the dashboard's
+// "Webhook events" stat-card link (``?action=webhook.received``) and
+// kick off the search automatically so the operator sees results
+// immediately.
+(function fromQuery() {
+  const params = new URLSearchParams(window.location.search);
+  const action = params.get("action");
+  const actor = params.get("actor");
+  if (action) document.getElementById("action").value = action;
+  if (actor) document.getElementById("actor").value = actor;
+  if (action || actor) {
+    const form = document.querySelector('form[onsubmit*="load"]');
+    if (form) form.dispatchEvent(new Event("submit"));
+  }
+})();
 </script>
 {% endblock %}

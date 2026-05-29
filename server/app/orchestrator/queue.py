@@ -17,6 +17,16 @@ def _redis_settings() -> RedisSettings:
 
 async def get_queue() -> ArqRedis:
     global _pool
+    # PR-135 — docker-free local mode runs jobs inline (asyncio
+    # background task on the API loop) instead of via a Redis-backed
+    # ARQ worker. The shim is ``enqueue_job``-compatible so callers
+    # don't branch.
+    from app.local_mode import is_local_mode
+
+    if is_local_mode():
+        from app.local_mode import get_inline_queue
+
+        return get_inline_queue()  # type: ignore[return-value]
     if _pool is None:
         _pool = await create_pool(_redis_settings())
     return _pool

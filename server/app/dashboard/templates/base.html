@@ -4,8 +4,51 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{% block title %}Mnemos{% endblock %}</title>
+    <script>
+      // PR-40 — apply the operator's saved theme synchronously so
+      // the first paint is in the right colour scheme (no FOUC).
+      // Runs BEFORE the stylesheet loads so the CSS variable
+      // override is in place when the cascade applies.
+      (function () {
+        try {
+          var pref = localStorage.getItem("mnemos_theme");
+          if (pref === "dark" || pref === "light") {
+            document.documentElement.setAttribute("data-theme", pref);
+          }
+        } catch (_) {}
+      })();
+    </script>
     <link rel="stylesheet" href="/static/app.css" />
     <script src="https://unpkg.com/htmx.org@2.0.2"></script>
+    <script src="/static/ui.js" defer></script>
+    <script>
+      // Restore a fragment that a guest operator stashed before the
+      // login redirect, and (6th-round audit S4) route the operator
+      // to /diffs when the fragment carries an approval context — the
+      // share URL lands on the platform root after login, not /diffs
+      // directly, so a bare hash restore would leave the operator on
+      // the dashboard wondering where the approve dialog went.
+      (function () {
+        try {
+          var stashed = sessionStorage.getItem("mnemos_post_login_hash");
+          if (stashed) {
+            sessionStorage.removeItem("mnemos_post_login_hash");
+            var hash = stashed.replace(/^#/, "");
+            var onDiffs = window.location.pathname === "/diffs";
+            if (!onDiffs && hash.indexOf("approve=") === 0) {
+              // Send the operator straight to the diffs tab; the
+              // ``maybeAutoLoadFromHash`` handler there reads the
+              // submission/plan ids out of the fragment.
+              window.location.replace("/diffs#" + hash);
+              return;
+            }
+            if (!window.location.hash) {
+              window.location.hash = hash;
+            }
+          }
+        } catch (_) {}
+      })();
+    </script>
   </head>
   <body class="app">
     {% block body %}{% endblock %}

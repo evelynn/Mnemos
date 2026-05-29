@@ -7,6 +7,7 @@ from app.analyzers.runner import AnalyzerRunner
 _BINARIES = {
     "csharp": "ggoss-csharp",
     "typescript": "ggoss-ts",
+    "python": "ggoss-py",
     "mssql": "ggoss-sql-mssql",
     "oracle": "ggoss-sql-oracle",
     "dotnet_binary": "ggoss-binary-dotnet",

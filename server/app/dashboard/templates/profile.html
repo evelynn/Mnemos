@@ -1,0 +1,130 @@
+{% extends "_layout.html" %}
+{% block title %}Profile — Mnemos{% endblock %}
+{% block content %}
+<header class="page-head"><h1 data-i18n="Profile">Profile</h1></header>
+
+<section>
+  <h2 data-i18n="Account">Account</h2>
+  <p class="muted" data-i18n="Update your display name, contact email, and avatar. Username and role are managed by an administrator.">
+    Update your display name, contact email, and avatar. Username and role are managed by an administrator.
+  </p>
+  <form id="profile-form" onsubmit="return saveProfile(event)">
+    <label><span data-i18n="Username">Username</span>
+      <input id="pf-username" type="text" disabled />
+    </label>
+    <label><span data-i18n="Role">Role</span>
+      <input id="pf-role" type="text" disabled />
+    </label>
+    <label><span data-i18n="Display name">Display name</span>
+      <input id="pf-display" type="text" maxlength="200" />
+    </label>
+    <label><span data-i18n="Email">Email</span>
+      <input id="pf-email" type="email" maxlength="200" />
+    </label>
+    <label><span data-i18n="Avatar URL">Avatar URL</span>
+      <input id="pf-avatar" type="url" maxlength="500" placeholder="https://…" />
+    </label>
+    <label><span data-i18n="Timezone">Timezone</span>
+      <input id="pf-tz" type="text" maxlength="64" placeholder="Asia/Seoul, UTC, …" list="tz-list" />
+      <datalist id="tz-list">
+        <option value="UTC"></option>
+        <option value="Asia/Seoul"></option>
+        <option value="Asia/Tokyo"></option>
+        <option value="Europe/London"></option>
+        <option value="Europe/Berlin"></option>
+        <option value="America/New_York"></option>
+        <option value="America/Los_Angeles"></option>
+      </datalist>
+    </label>
+    <button type="submit" class="primary" data-i18n="Save profile">Save profile</button>
+  </form>
+</section>
+
+<section>
+  <h2 data-i18n="Change password">Change password</h2>
+  <p class="muted" data-i18n="Minimum 12 characters. Sign-in sessions stay valid; only future logins use the new password.">
+    Minimum 12 characters. Sign-in sessions stay valid; only future logins use the new password.
+  </p>
+  <form id="pw-form" onsubmit="return changePassword(event)">
+    <label><span data-i18n="Current password">Current password</span>
+      <input id="pw-current" type="password" autocomplete="current-password" required />
+    </label>
+    <label><span data-i18n="New password">New password</span>
+      <input id="pw-new" type="password" autocomplete="new-password" required minlength="12" />
+    </label>
+    <label><span data-i18n="Confirm new password">Confirm new password</span>
+      <input id="pw-confirm" type="password" autocomplete="new-password" required />
+    </label>
+    <button type="submit" class="primary" data-i18n="Change password">Change password</button>
+  </form>
+</section>
+
+<section>
+  <h2 data-i18n="Help">Help</h2>
+  <p class="muted" data-i18n="Replay the guided tour of the main dashboard surfaces.">
+    Replay the guided tour of the main dashboard surfaces.
+  </p>
+  <button type="button" id="replay-tour" data-i18n="Replay welcome tour">Replay welcome tour</button>
+</section>
+
+<script>
+async function loadProfile() {
+  const r = await fetch("/api/v1/auth/me");
+  if (!r.ok) { await MnemosUI.showError("Profile load failed", r); return; }
+  const u = await r.json();
+  document.getElementById("pf-username").value = u.username || "";
+  document.getElementById("pf-role").value = u.role || "";
+  document.getElementById("pf-display").value = u.display_name || "";
+  document.getElementById("pf-email").value = u.email || "";
+  document.getElementById("pf-avatar").value = u.avatar_url || "";
+  document.getElementById("pf-tz").value = u.timezone || "";
+}
+
+async function saveProfile(ev) {
+  ev.preventDefault();
+  const body = {
+    display_name: document.getElementById("pf-display").value || null,
+    email: document.getElementById("pf-email").value || null,
+    avatar_url: document.getElementById("pf-avatar").value || null,
+    timezone: document.getElementById("pf-tz").value || null,
+  };
+  const r = await fetch("/api/v1/auth/me", {
+    method: "PATCH",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) { await MnemosUI.showError("Save failed", r); return false; }
+  MnemosUI.showToast(MnemosUI.t("Profile saved."), "success");
+  loadProfile();
+  return false;
+}
+
+async function changePassword(ev) {
+  ev.preventDefault();
+  const cur = document.getElementById("pw-current").value;
+  const next = document.getElementById("pw-new").value;
+  const conf = document.getElementById("pw-confirm").value;
+  if (next !== conf) {
+    MnemosUI.showToast(MnemosUI.t("New password and confirmation do not match."), "error");
+    return false;
+  }
+  const r = await fetch("/api/v1/auth/me/password", {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({current_password: cur, new_password: next}),
+  });
+  if (!r.ok) { await MnemosUI.showError("Password change failed", r); return false; }
+  MnemosUI.showToast(MnemosUI.t("Password changed."), "success");
+  ev.target.reset();
+  return false;
+}
+
+loadProfile();
+
+// PR-57 — let an operator replay the welcome tour.
+document.getElementById("replay-tour")?.addEventListener("click", function () {
+  try { localStorage.removeItem("mnemos_tour_done"); } catch (_) {}
+  window.location.href = "/";
+});
+</script>
+{% endblock %}

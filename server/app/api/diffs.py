@@ -1,10 +1,11 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,7 +18,9 @@ from app.gitlab_client.mr import create_mr_from_worktree
 from app.models.auth import User
 from app.models.plans import DiffSubmission, Plan
 from app.models.projects import Project
+from app.obs.metrics import break_glass_grants_total
 from app.safety.review import run_pipeline
+from app.safety.tokens import hash_token as _hash_token
 
 
 async def _resolve_plan_in_user_org(
@@ -101,9 +104,15 @@ def _out(d: DiffSubmission) -> DiffOut:
 @router.post("/api/v1/diff_submissions")
 async def submit_diff(
     body: DiffSubmit,
-    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
+    user: User = Depends(require_operator),
 ) -> DiffOut:
+    # 6th-round audit C4: previously this endpoint accepted any
+    # authenticated user (`CurrentUser`), which let a viewer post
+    # arbitrary diffs and burn ultrareview cycles. Diff submission is
+    # part of the development workflow (§2.4 — delegated to Claude
+    # Code on behalf of an operator), so operator role is the right
+    # minimum.
     plan = await _resolve_plan_in_user_org(db, body.plan_id, user)
 
     report = await run_pipeline(
@@ -150,8 +159,12 @@ async def get_submission(
 
 
 class ApproveBody(BaseModel):
-    override: bool = False
-    rationale: str | None = None
+    # Spec §2.5: there is no `override=true` switch any more. To approve a
+    # diff whose ultrareview verdict is `blocked`, an admin must first
+    # POST `/diff_submissions/{id}/break_glass_grant` (which re-runs the
+    # pipeline and refuses to issue a grant while the verdict is still
+    # blocked), then a *different* user submits the returned token here.
+    break_glass_token: str | None = None
 
 
 @router.post("/api/v1/diff_submissions/{submission_id}/approve")
@@ -170,22 +183,65 @@ async def approve_submission(
     findings = submission.auto_review_findings or {}
     verdict = findings.get("verdict") if isinstance(findings, dict) else None
     if verdict == "blocked":
-        if not body or not body.override:
+        token = body.break_glass_token if body else None
+        if not token:
             raise HTTPException(
                 status_code=409,
-                detail="blocked_by_review: pass override=true with rationale to force-approve",
+                detail=(
+                    "blocked_by_review: an admin must issue a break-glass "
+                    "grant via /diff_submissions/{id}/break_glass_grant first"
+                ),
             )
-        if not body.rationale or len(body.rationale) < 20:
+        approver_actor = f"user:{user.id}"
+        # Single SQL statement enforces:
+        #   - matching token (sha256 hash)
+        #   - belongs to *this* submission (prevents grant reuse across
+        #     submissions in the same org)
+        #   - not yet consumed
+        #   - not expired
+        #   - issued by someone other than the approver (2-eyes)
+        # If any condition fails, RETURNING yields no row and we surface
+        # a 409 without leaking which condition failed.
+        consume = await db.execute(
+            text(
+                """
+                UPDATE diff_break_glass_grants
+                   SET consumed_at = now(), consumed_by = :approver
+                 WHERE token_hash = :token_hash
+                   AND submission_id = :submission_id
+                   AND consumed_at IS NULL
+                   AND expires_at > now()
+                   AND issued_by <> :approver
+                 RETURNING id, issued_by
+                """
+            ),
+            {
+                "token_hash": _hash_token(token),
+                "submission_id": submission.id,
+                "approver": approver_actor,
+            },
+        )
+        row = consume.first()
+        if row is None:
             raise HTTPException(
-                status_code=400,
-                detail="override_requires_rationale (>=20 chars)",
+                status_code=409,
+                detail="break_glass_invalid_or_self_issued_or_expired",
             )
+        # Only increment after the UPDATE confirmed a real consumption
+        # — if the row was None (expired / self-issued / wrong token) we
+        # never reach this line, so the counter cannot be juked by
+        # invalid attempts.
+        break_glass_grants_total.labels(action="consumed").inc()
         await audit_record(
-            actor=f"user:{user.id}",
-            action="diff.override",
+            actor=approver_actor,
+            action="diff.break_glass.consume",
             target=str(submission.id),
             project_id=plan.project_id,
-            details={"rationale": body.rationale},
+            details={
+                "grant_id": str(row[0]),
+                "issued_by": row[1],
+                "consumed_at": datetime.now(tz=timezone.utc).isoformat(),
+            },
         )
 
     mr = await create_mr_from_worktree(
@@ -233,6 +289,34 @@ async def reject_submission(
         target=str(submission.id),
     )
     return _out(submission)
+
+
+@router.get("/api/v1/diff_submissions")
+async def list_submissions_filtered(
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+    verdict: str | None = None,
+    limit: int = 100,
+) -> list[DiffOut]:
+    """Org-scoped diff-submission feed for the dashboard drill-downs (P2-7).
+
+    The 7-round audit's stat-card UX needed an org-wide list (the
+    operator clicks "Break-glass active: 5" without knowing which
+    plan that 5 belongs to). Filters are intentionally narrow — just
+    verdict + a cap — to keep the index path predictable.
+    """
+    stmt = (
+        select(DiffSubmission)
+        .join(Plan, Plan.id == DiffSubmission.plan_id)
+        .join(Project, Project.id == Plan.project_id)
+        .where(Project.organization_id == user.organization_id)
+        .order_by(DiffSubmission.submitted_at.desc())
+        .limit(max(1, min(limit, 500)))
+    )
+    if verdict in {"clean", "warn", "blocked"}:
+        stmt = stmt.where(DiffSubmission.verdict == verdict)
+    rows = (await db.execute(stmt)).scalars().all()
+    return [_out(r) for r in rows]
 
 
 @router.get("/api/v1/plans/{plan_id}/submissions")

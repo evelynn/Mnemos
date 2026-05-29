@@ -22,6 +22,16 @@ from collections.abc import AsyncIterator
 import pytest
 import pytest_asyncio
 
+# PR-97 — the test suite isn't production. config.get_settings refuses
+# to boot when SECRET_KEY is a placeholder AND MNEMOS_ENV=production.
+# Mark the test env explicitly before any app module imports.
+os.environ.setdefault("MNEMOS_ENV", "test")
+# PR-110 — startup verify mirrors the CLI ``verify`` at boot.
+# Tests that import ``app.main`` shouldn't drag the lifespan
+# checks in (they fail without a live DB/Redis); the live tests
+# in test_pr110_startup_verify.py exercise it directly.
+os.environ.setdefault("MNEMOS_SKIP_STARTUP_VERIFY", "1")
+
 
 def pytest_collection_modifyitems(config, items):
     """Skip ``integration`` tests when DATABASE_URL isn't reachable.

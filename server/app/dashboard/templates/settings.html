@@ -1,7 +1,7 @@
 {% extends "_layout.html" %}
 {% block title %}Settings — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>Settings</h1></header>
+<header class="page-head"><h1 data-i18n="Settings">Settings</h1></header>
 
 <section>
   <h2>Connections (Secrets)</h2>
@@ -13,8 +13,8 @@
 
   {% if user.role == 'admin' %}
   <form onsubmit="return createSecret(event)">
-    <label>Label<input type="text" name="label" required placeholder="mssql-prod-orderdb" /></label>
-    <label>Kind
+    <label><span data-i18n="Label">Label</span><input type="text" name="label" required placeholder="mssql-prod-orderdb" /></label>
+    <label><span data-i18n="Kind">Kind</span>
       <select name="kind" required>
         <option value="db_connection">db_connection</option>
         <option value="gitlab_token">gitlab_token</option>
@@ -22,7 +22,7 @@
         <option value="other">other</option>
       </select>
     </label>
-    <label>Value<input type="password" name="value" required autocomplete="new-password" /></label>
+    <label><span data-i18n="Value">Value</span><input type="password" name="value" required autocomplete="new-password" /></label>
     <button type="submit" class="primary">Create secret</button>
   </form>
   <pre id="secret-create-result" class="muted"></pre>
@@ -34,18 +34,81 @@
   <div id="secrets-list"><p class="muted">Click refresh.</p></div>
 </section>
 
-<section>
+<section id="project-dbs">
   <h2>Project databases</h2>
   <p class="muted">
     Per-project DB bindings carry <code>sensitive_tables</code>,
     <code>masking_rules</code>, <code>allow_awr</code>, and
-    <code>maintenance_windows</code> (spec §12.2). Listed below per
-    project in your organisation — use the API to create and update
-    (<code>POST /api/v1/projects/{project_id}/dbs</code>).
+    <code>maintenance_windows</code> (spec §12.2). The platform refuses
+    to bind a credential that the analyzer's <code>db_probe</code> verb
+    cannot prove is read-only.
   </p>
-  <button class="primary" onclick="loadProjectDbs()">Load</button>
+  <button class="primary" onclick="loadProjectDbs()">Load existing bindings</button>
   <div id="project-dbs-box"><p class="muted">Click load.</p></div>
+
+  {% if user.role == 'admin' %}
+  <details style="margin-top:1rem;">
+    <summary><strong>Add a new binding</strong></summary>
+    <form id="pdb-create" onsubmit="return submitProjectDb(event)">
+      <label>Project
+        <select name="project_id" id="pdb-project" required></select>
+      </label>
+      <label>Kind
+        <select name="kind" id="pdb-kind" required onchange="updateKindHint()">
+          <option value="">— select —</option>
+          <option value="oracle">Oracle</option>
+          <option value="mssql">MSSQL</option>
+        </select>
+      </label>
+      <p id="pdb-kind-hint" class="muted" style="margin:0.25rem 0 0.5rem;">
+        Select a kind to see the expected connection string format.
+      </p>
+      <label>Display name
+        <input name="display_name" id="pdb-display" maxlength="200" required />
+      </label>
+      <label>Component ID <span class="muted">(GitLab path or service-registry id)</span>
+        <input name="component_id" id="pdb-component" maxlength="300" required />
+      </label>
+      <label>Secret <span class="muted">(decrypted connection string source)</span>
+        <select name="secret_id" id="pdb-secret">
+          <option value="">— none (probe will fail) —</option>
+        </select>
+      </label>
+      <p id="pdb-secret-hint" class="muted" style="margin:0.25rem 0 0.5rem;"></p>
+      <label><input type="checkbox" id="pdb-awr" /> Allow Oracle AWR queries</label>
+      <label>Sensitive tables <span class="muted">(one per line)</span>
+        <textarea id="pdb-sensitive" rows="3"></textarea>
+      </label>
+      <label>Masking rules — full <span class="muted">(regex per line, redact entire column)</span>
+        <textarea id="pdb-mask-full" rows="2"></textarea>
+      </label>
+      <label>Masking rules — partial <span class="muted">(regex per line, redact most chars)</span>
+        <textarea id="pdb-mask-partial" rows="2"></textarea>
+      </label>
+      <label>Maintenance windows <span class="muted">(cron expression per line)</span>
+        <textarea id="pdb-windows" rows="2" placeholder="0 2 * * *"></textarea>
+      </label>
+      <button type="submit" class="primary">Register (with probe)</button>
+    </form>
+  </details>
+  {% endif %}
 </section>
+
+<dialog id="probe-fail-dialog" class="modal" aria-labelledby="probe-fail-title">
+  <header><h2 id="probe-fail-title">Probe failed — registration refused</h2></header>
+  <div class="body">
+    <p class="muted">
+      Spec §2.5 — the analyzer's <code>db_probe</code> verb did not
+      confirm read-only access for this credential. Details below come
+      straight from the analyzer; the binding has <em>not</em> been
+      persisted.
+    </p>
+    <div id="probe-fail-detail"></div>
+  </div>
+  <menu>
+    <button type="button" onclick="MnemosUI.closeDialog('probe-fail-dialog')">Close</button>
+  </menu>
+</dialog>
 
 <script>
 async function createSecret(ev) {
@@ -100,7 +163,11 @@ async function loadSecrets() {
 
 async function testSecret(id) {
   const r = await fetch(`/api/v1/secrets/${id}/test`, {method: "POST"});
-  alert(`HTTP ${r.status}\n${await r.text()}`);
+  if (r.ok) {
+    MnemosUI.showToast("Secret test passed.", "success");
+  } else {
+    await MnemosUI.showError("Secret test failed", r);
+  }
   loadSecrets();
 }
 
@@ -108,8 +175,160 @@ async function deleteSecret(id, label) {
   if (!confirm(`Delete secret "${label}"?`)) return;
   const r = await fetch(`/api/v1/secrets/${id}`, {method: "DELETE"});
   if (r.ok || r.status === 204) loadSecrets();
-  else alert(`HTTP ${r.status}: ${await r.text()}`);
+  else await MnemosUI.showError("Delete failed", r);
 }
+
+// ----------------------------------------------------------------------
+// ProjectDB registration form (admin-only)
+// ----------------------------------------------------------------------
+
+const _PDB_HINTS = {
+  oracle: "Connection string format: <code>user/pwd@host:1521/service</code> (oracledb thin mode)",
+  mssql: "Connection string format: <code>Server=host;Database=...;User Id=...;Password=...;Encrypt=true</code>",
+};
+
+function updateKindHint() {
+  const kind = document.getElementById("pdb-kind").value;
+  const el = document.getElementById("pdb-kind-hint");
+  el.innerHTML = _PDB_HINTS[kind] || "Select a kind to see the expected connection string format.";
+}
+
+async function _populateProjectDbForm() {
+  // Project select — every project the operator can read.
+  const pr = await fetch("/api/v1/projects");
+  if (pr.ok) {
+    const projects = await pr.json();
+    const sel = document.getElementById("pdb-project");
+    if (sel) {
+      sel.innerHTML = '<option value="">— select —</option>' + projects.map(
+        p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`
+      ).join("");
+    }
+  }
+  // Secret select — only db_connection kind. If the operator has not
+  // created one yet, surface a hint inline rather than silently leaving
+  // a single "(none)" option — the probe will refuse to bind without
+  // a secret, so the user needs to know what to do next.
+  const sr = await fetch("/api/v1/secrets");
+  if (sr.ok) {
+    const secrets = (await sr.json()).filter(s => s.kind === "db_connection");
+    const sel = document.getElementById("pdb-secret");
+    if (sel) {
+      if (secrets.length === 0) {
+        sel.innerHTML = '<option value="">— no db_connection secrets exist —</option>';
+        const hint = document.getElementById("pdb-secret-hint");
+        if (hint) {
+          hint.innerHTML = '<strong>No db_connection secret yet.</strong> '
+            + 'Create one in the <em>Secrets</em> section above first '
+            + '(kind = <code>db_connection</code>) — registration will be refused '
+            + 'until a secret is wired up.';
+          hint.classList.add("toast", "warn");
+        }
+      } else {
+        sel.innerHTML = '<option value="">— none —</option>' + secrets.map(
+          s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.label)}</option>`
+        ).join("");
+      }
+    }
+  }
+}
+
+function _checkRegexLines(textareaId) {
+  // Client-side compile check so the operator notices a bad regex
+  // *before* the server silently drops it (4th-round audit C2).
+  // We do not block submit on JS/Python syntax differences — server
+  // remains authoritative — but a warning prevents the silent-drop
+  // failure mode Team B flagged.
+  const ta = document.getElementById(textareaId);
+  if (!ta) return [];
+  const bad = [];
+  ta.value.split("\n").forEach((line, idx) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    try { new RegExp(trimmed); } catch (e) {
+      bad.push({line: idx + 1, raw: trimmed, error: e.message});
+    }
+  });
+  return bad;
+}
+
+function _linesToList(textareaId) {
+  return document.getElementById(textareaId).value
+    .split("\n")
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+async function submitProjectDb(ev) {
+  ev.preventDefault();
+  const projectId = document.getElementById("pdb-project").value;
+  if (!projectId) {
+    MnemosUI.showToast("Pick a project.", "warn");
+    return false;
+  }
+  // Pre-validate regex lines so the operator doesn't get silent drops.
+  const badFull = _checkRegexLines("pdb-mask-full");
+  const badPart = _checkRegexLines("pdb-mask-partial");
+  if (badFull.length || badPart.length) {
+    const all = [...badFull.map(b => "[full] " + b.raw + " — " + b.error),
+                 ...badPart.map(b => "[partial] " + b.raw + " — " + b.error)];
+    MnemosUI.showToast(
+      "Invalid masking regex (server would silently skip these): "
+      + all.slice(0, 2).join("; "),
+      "warn",
+    );
+    // Continue anyway — server is authoritative, but the toast keeps
+    // the operator informed (Team B critique #9: warning-only, not
+    // a block).
+  }
+  const body = {
+    kind: document.getElementById("pdb-kind").value,
+    display_name: document.getElementById("pdb-display").value,
+    component_id: document.getElementById("pdb-component").value,
+    secret_id: document.getElementById("pdb-secret").value || null,
+    allow_awr: document.getElementById("pdb-awr").checked,
+    sensitive_tables: _linesToList("pdb-sensitive"),
+    masking_rules: {
+      full: _linesToList("pdb-mask-full"),
+      partial: _linesToList("pdb-mask-partial"),
+    },
+    maintenance_windows: _linesToList("pdb-windows"),
+  };
+  const r = await fetch(`/api/v1/projects/${projectId}/dbs`, {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  if (r.status === 412) {
+    // Surface the analyzer's grants_summary + observations in a
+    // dialog so the operator can see *why* the credential was
+    // rejected. PR-2 already includes the full ProbeResult in detail.result.
+    const payload = await r.json().catch(() => ({}));
+    const detail = (payload && payload.detail) || {};
+    const result = (typeof detail === "object" && detail.result) || detail;
+    const host = document.getElementById("probe-fail-detail");
+    host.innerHTML = '<script type="application/json" id="probe-fail-json"></scr' + 'ipt>'
+      + '<div id="probe-fail-render"></div>';
+    document.getElementById("probe-fail-json").textContent = JSON.stringify(result);
+    MnemosUI.renderJsonFromScript("probe-fail-json", "probe-fail-render", {maxDepth: 6});
+    MnemosUI.showDialog("probe-fail-dialog");
+    return false;
+  }
+  if (!r.ok) {
+    await MnemosUI.showError("Registration failed", r);
+    return false;
+  }
+  document.getElementById("pdb-create").reset();
+  MnemosUI.showToast("Project DB bound successfully.", "success");
+  loadProjectDbs();
+  return false;
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  if (document.getElementById("pdb-create")) {
+    _populateProjectDbForm();
+  }
+});
 
 async function loadProjectDbs() {
   const r = await fetch("/api/v1/projects");
@@ -126,8 +345,27 @@ async function loadProjectDbs() {
   const chunks = [];
   for (const p of projects) {
     const dr = await fetch(`/api/v1/projects/${p.id}/dbs`);
-    const dbs = dr.ok ? await dr.json() : [];
     let inner;
+    if (!dr.ok) {
+      // Silent fallback to "[]" used to hide probe_failed / unauthorised
+      // responses, so an operator who just registered an RW credential
+      // saw an empty list and wondered why. Surface the status text.
+      let detail = "";
+      try {
+        const body = await dr.json();
+        detail = body && body.detail ? (typeof body.detail === "string"
+          ? body.detail
+          : JSON.stringify(body.detail)) : "";
+      } catch (_) {
+        try { detail = await dr.text(); } catch (_) { detail = ""; }
+      }
+      inner = '<p class="toast error" role="alert">Failed to load DB bindings: HTTP '
+        + dr.status + (detail ? ' — ' + escapeHtml(detail.slice(0, 200)) : '')
+        + '</p>';
+      chunks.push(`<section><h2>${escapeHtml(p.name)}</h2>${inner}</section>`);
+      continue;
+    }
+    const dbs = await dr.json();
     if (!dbs.length) {
       inner = '<p class="muted">no DBs bound</p>';
     } else {

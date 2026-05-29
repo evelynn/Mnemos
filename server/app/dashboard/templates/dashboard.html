@@ -1,24 +1,53 @@
 {% extends "_layout.html" %}
 {% block title %}Dashboard — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>Dashboard</h1></header>
+<header class="page-head"><h1 data-i18n="Dashboard">Dashboard</h1></header>
+
+<section id="onboarding-card" class="onboarding" hidden>
+  <h2 data-i18n="Welcome to Mnemos">Welcome to Mnemos</h2>
+  <p class="muted" id="onb-summary">
+    Three steps to get to your first finding:
+  </p>
+  <ol>
+    <li id="onb-step-1"><strong data-i18n="Register a GitLab project">Register a GitLab project</strong> — <a class="primary" href="/projects">Open Projects tab →</a></li>
+    <li id="onb-step-2"><strong data-i18n="Run the first analysis">Run the first analysis</strong> (L0 extraction ≈ 5 min per 10K files)</li>
+    <li id="onb-step-3"><strong data-i18n="Review the results">Review the results</strong> in the Findings tab</li>
+  </ol>
+  <p class="muted">
+    Stuck? See <code>docs/operator-guide/deployment.md</code> for the
+    end-to-end walk-through.
+  </p>
+</section>
+
+<!-- PR-103 — "Triage now" landing card. The dashboard's first-screen
+     answer to the operator's real question: *what do I fix first?*
+     Aggregates the top three P1 findings across every project in the
+     org and renders them with one-click drill-down. Hidden when none
+     are open so a calm system looks calm. -->
+<section id="triage-card" class="triage" hidden>
+  <h2 data-i18n="Triage now">Triage now</h2>
+  <p class="muted" data-i18n="Top open P1 findings — fix these first.">
+    Top open P1 findings — fix these first.
+  </p>
+  <ol id="triage-list" class="triage-list"></ol>
+</section>
 
 <section class="summary-grid">
-  <div class="stat-card">
+  <a class="stat-card stat-link" href="/projects" aria-label="Manage projects">
     <h3>Projects</h3>
     <div class="big" id="stat-projects">…</div>
-    <a href="/projects" class="muted">Manage →</a>
-  </div>
-  <div class="stat-card">
+    <span class="muted">Manage →</span>
+  </a>
+  <a class="stat-card stat-link" href="/analysis" aria-label="Open analysis runs">
     <h3>Recent runs (7d)</h3>
     <div class="big" id="stat-runs">…</div>
-    <a href="/analysis" class="muted">Open Analysis →</a>
-  </div>
-  <div class="stat-card">
+    <span class="muted">Open Analysis →</span>
+  </a>
+  <a class="stat-card stat-link" href="/findings?status=open" aria-label="Open findings list">
     <h3>Open findings</h3>
     <div class="big" id="stat-findings">…</div>
-    <a href="/findings" class="muted">Open Findings →</a>
-  </div>
+    <span class="muted">Open Findings →</span>
+  </a>
   <div class="stat-card">
     <h3>Readiness</h3>
     <div class="big" id="stat-ready">…</div>
@@ -26,9 +55,44 @@
   </div>
 </section>
 
+<section class="summary-grid">
+  <a class="stat-card stat-link" href="/diffs?filter=blocked" aria-label="Diff submissions awaiting break-glass approval">
+    <h3>Break-glass active</h3>
+    <div class="big" id="stat-bg-active">…</div>
+    <span class="muted">unconsumed grants (15-min TTL) →</span>
+  </a>
+  <a class="stat-card stat-link" href="/analysis?status=failed&since=24h" aria-label="Recent failed analysis runs">
+    <h3>Failed runs (24h)</h3>
+    <div class="big" id="stat-runs-failed">…</div>
+    <span class="muted">Investigate →</span>
+  </a>
+  <a class="stat-card stat-link" href="/settings#project-dbs" aria-label="Project DB bindings">
+    <h3>Disabled DBs</h3>
+    <div class="big" id="stat-dbs-disabled">…</div>
+    <span class="muted">probe sweep verdict →</span>
+  </a>
+  <a class="stat-card stat-link" href="/audit?action=webhook.received" aria-label="Webhook ingest audit log">
+    <h3>Webhook events (24h)</h3>
+    <div class="big" id="stat-webhooks">…</div>
+    <span class="muted">GitLab pushes ingested →</span>
+  </a>
+</section>
+
 <section>
-  <h2>Latest analysis runs</h2>
-  <div id="runs-box"><p class="muted">Loading…</p></div>
+  <h2 data-i18n="Latest analysis runs">Latest analysis runs</h2>
+  <div id="runs-box"><p class="muted" data-i18n="Loading…">Loading…</p></div>
+</section>
+
+<!-- PR-44 — Activity feed (audit C3). Rolls up the most recent
+     team actions so an operator opening the dashboard can see what
+     teammates have been doing without trawling the audit log. -->
+<section>
+  <h2 data-i18n="Recent activity">Recent activity</h2>
+  <div id="activity-box">
+    <div class="skeleton skeleton-card"></div>
+    <div class="skeleton skeleton-card"></div>
+    <div class="skeleton skeleton-card"></div>
+  </div>
 </section>
 
 <style>
@@ -39,9 +103,82 @@
 .stat-card .big.ok { color: #145a1f; }
 .stat-card .big.warn { color: #6a4b00; }
 .stat-card .big.fail { color: #7a1818; }
+/* P2-7 drill-down — entire card is the affordance, so make it look
+   clickable when the card is wrapped in an <a>. */
+a.stat-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.05s;
+}
+a.stat-link:hover {
+  border-color: #1f6feb;
+  box-shadow: 0 1px 4px rgba(31, 111, 235, 0.18);
+}
+a.stat-link:active { transform: translateY(1px); }
+a.stat-link:focus-visible {
+  outline: 2px solid #1f6feb;
+  outline-offset: 2px;
+}
+/* PR-103 — triage card. Red-tinted to read as "act now" without
+   being alarming when empty (the whole card hides in that case). */
+.triage {
+  border: 1px solid #f1c0c0;
+  background: #fff7f7;
+  border-radius: 6px;
+  padding: 0.9rem 1rem;
+  margin: 0 0 1rem;
+}
+.triage h2 { margin: 0 0 0.3rem; font-size: 1.1rem; color: #7a1818; }
+.triage .triage-list { margin: 0.5rem 0 0; padding-left: 1.2rem; }
+.triage .triage-item { margin: 0.35rem 0; }
+.triage .triage-priority {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  background: #7a1818;
+  color: #fff;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+.triage .triage-item a { color: #1f3a5f; text-decoration: none; }
+.triage .triage-item a:hover { text-decoration: underline; }
+.triage .triage-where { color: #57606a; font-size: 0.85rem; }
 </style>
 
 <script>
+function updateOnboarding(projectCount, observed) {
+  const onb = document.getElementById("onboarding-card");
+  if (!onb) return;
+  // PR-108 — the source of truth is the platform, not localStorage.
+  // Pre-PR ``step2Done`` was set by a click handler in
+  // analysis.html / findings.html → localStorage; a user who
+  // completed those steps on Firefox saw the card forever on Chrome.
+  // Now we derive from the same API counts the stat cards use:
+  //   step 1: at least one project exists
+  //   step 2: at least one completed analysis run exists
+  //   step 3: at least one finding exists
+  // ``observed`` is passed by loadSummary which already iterates
+  // the project list — no extra fetches.
+  const step1Done = projectCount > 0;
+  const step2Done = !!(observed && observed.hasCompletedRun);
+  const step3Done = !!(observed && observed.hasFinding);
+  const apply = (id, done, current) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle("done", done);
+    el.classList.toggle("current", current);
+  };
+  apply("onb-step-1", step1Done, !step1Done);
+  apply("onb-step-2", step2Done, step1Done && !step2Done);
+  apply("onb-step-3", step3Done, step2Done && !step3Done);
+  // Hide the banner once every step is done — operators who finish
+  // onboarding shouldn't have to look at a tutorial forever.
+  onb.hidden = step1Done && step2Done && step3Done;
+}
+
 async function loadSummary() {
   // Projects count (scoped to caller's org).
   try {
@@ -51,6 +188,11 @@ async function loadSummary() {
 
     // Walk projects to aggregate recent runs + open findings.
     let runs = 0, findings = 0;
+    // PR-108 — track onboarding-step completion from observed
+    // platform state (not localStorage), so a fresh browser sees
+    // the right step lit up immediately.
+    let hasCompletedRun = false;
+    let hasFinding = false;
     const since = Date.now() - 7 * 24 * 3600 * 1000;
     for (const p of rows) {
       try {
@@ -58,13 +200,30 @@ async function loadSummary() {
         if (rr.ok) {
           const runRows = await rr.json();
           runs += runRows.filter(r => new Date(r.created_at || r.started_at || 0).getTime() > since).length;
+          if (!hasCompletedRun) {
+            // A "completed" run is anything that finished its
+            // pipeline — failed runs still count for onboarding
+            // purposes because the operator DID get analysis to
+            // try running. Only the perpetually-running ones
+            // don't help.
+            hasCompletedRun = runRows.some(r => (
+              r.status === "completed" || r.status === "failed"
+            ));
+          }
         }
       } catch {}
       try {
         const fr = await fetch(`/api/v1/projects/${p.id}/findings?status=open`);
-        if (fr.ok) findings += (await fr.json()).length;
+        if (fr.ok) {
+          const frows = await fr.json();
+          findings += frows.length;
+          if (!hasFinding && frows.length > 0) hasFinding = true;
+        }
       } catch {}
     }
+    // Reveal/refresh the onboarding card now we have the real
+    // counts. The card collapses itself when all 3 steps are done.
+    updateOnboarding(rows.length, { hasCompletedRun, hasFinding });
     document.getElementById("stat-runs").textContent = runs;
     document.getElementById("stat-findings").textContent = findings;
     const fEl = document.getElementById("stat-findings");
@@ -92,12 +251,14 @@ async function loadSummary() {
           <td>${r._project}</td>
           <td><span class="badge ${r.status}">${r.status}</span></td>
           <td><code>${(r.git_sha || "").slice(0, 10)}</code></td>
-          <td>${r.started_at || r.created_at || ""}</td>
+          <td>${r.started_at || r.created_at ? `<time data-ts="${r.started_at || r.created_at}">${r.started_at || r.created_at}</time>` : ""}</td>
           <td><a href="/analysis">Monitor</a></td>
         </tr>`;
       }
       html += "</tbody></table>";
       box.innerHTML = html;
+      MnemosUI.hydrateRelativeTimes(box);
+      MnemosUI.applyI18n(box);
     }
   } catch (e) {
     document.getElementById("stat-projects").textContent = "?";
@@ -125,7 +286,158 @@ async function loadReady() {
   }
 }
 
+async function loadMetricsSummary() {
+  try {
+    const r = await fetch("/api/v1/health/metrics_summary");
+    if (!r.ok) return;
+    const data = await r.json();
+    const set = (id, value, warnAbove = 0, failAbove = null) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = value;
+      el.className = "big " + (
+        failAbove !== null && value > failAbove ? "fail"
+        : value > warnAbove ? "warn"
+        : "ok"
+      );
+    };
+    set("stat-bg-active", data.break_glass_active ?? 0, 0, 5);
+    set("stat-runs-failed", data.runs_last_24h_failed ?? 0, 0, 3);
+    set("stat-dbs-disabled", data.project_dbs_disabled ?? 0, 0, 1);
+    set("stat-webhooks", data.webhook_events_24h ?? 0);
+  } catch (_) {
+    // Non-fatal — the four cards just stay at "…".
+  }
+}
+
+// PR-103 — render top open P1 findings on the dashboard's first
+// screen. Pure presentation; exported on `window.MnemosTriage` so
+// the test can drive it with a hand-built payload without spinning
+// up the network.
+function renderTriage(findings) {
+  const card = document.getElementById("triage-card");
+  const list = document.getElementById("triage-list");
+  if (!card || !list) return;
+  const top = (findings || [])
+    .filter(f => f && f.priority === "P1" && f.status === "open")
+    .slice(0, 3);
+  if (top.length === 0) {
+    card.hidden = true;
+    list.innerHTML = "";
+    return;
+  }
+  card.hidden = false;
+  list.innerHTML = top.map(f => {
+    const where = f.subject_node_id || f.subject_edge_id || "";
+    const url = "/findings?project=" + encodeURIComponent(f.project_id)
+      + "&focus=" + encodeURIComponent(f.id);
+    return `<li class="triage-item">
+      <span class="triage-priority">P1</span>
+      <a href="${url}">${escapeHtml(f.kind || "finding")}</a>
+      ${where ? `<span class="triage-where"> — ${escapeHtml(String(where))}</span>` : ""}
+    </li>`;
+  }).join("");
+}
+
+async function loadTriage() {
+  try {
+    const r = await fetch("/api/v1/projects");
+    if (!r.ok) return;
+    const projects = await r.json();
+    const all = [];
+    // Cap the fan-out to avoid N+1 storms on huge orgs — 20 projects
+    // × top-5 findings each is plenty to find the org-wide top 3.
+    for (const p of projects.slice(0, 20)) {
+      try {
+        const fr = await fetch(
+          `/api/v1/projects/${p.id}/findings?status=open&sort=risk&limit=5`
+        );
+        if (fr.ok) {
+          const rows = await fr.json();
+          for (const f of rows) all.push(f);
+        }
+      } catch (_) {}
+    }
+    all.sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0));
+    renderTriage(all);
+  } catch (_) {
+    // Non-fatal — card stays hidden.
+  }
+}
+
+// Expose for tests that simulate empty / error / populated payloads
+// without standing up the API.
+window.MnemosTriage = { renderTriage: renderTriage };
+
+async function loadActivity() {
+  try {
+    const r = await fetch("/api/v1/audit?limit=15");
+    if (!r.ok) return;
+    const rows = await r.json();
+    const box = document.getElementById("activity-box");
+    if (!box) return;
+    if (!rows.length) {
+      box.innerHTML = '<p class="muted" data-i18n="No team activity yet.">No team activity yet.</p>';
+      MnemosUI.applyI18n(box);
+      return;
+    }
+    box.innerHTML = '<ul class="activity-feed">' + rows.slice(0, 10).map((e) => {
+      const when = e.occurred_at
+        ? `<time data-ts="${e.occurred_at}">${e.occurred_at}</time>`
+        : "";
+      const actor = e.actor || "system";
+      return `<li class="activity-item">
+        <span class="activity-actor">${escapeHtml(actor)}</span>
+        <span class="activity-action"><code>${escapeHtml(e.action)}</code></span>
+        ${e.target ? `<span class="activity-target muted">→ ${escapeHtml(String(e.target))}</span>` : ""}
+        <span class="activity-when muted">${when}</span>
+      </li>`;
+    }).join("") + "</ul>";
+    MnemosUI.hydrateRelativeTimes(box);
+  } catch (_) {}
+}
+
 loadReady();
 loadSummary();
+loadMetricsSummary();
+loadActivity();
+loadTriage();
+
+// PR-57 — first-run guided tour. Fires once per browser; the
+// operator can re-trigger it from the Profile page.
+function runWelcomeTour() {
+  MnemosUI.startTour([
+    {
+      selector: null,
+      title: MnemosUI.t("Welcome to Mnemos"),
+      body: MnemosUI.t("Mnemos turns a large multi-language codebase into a queryable knowledge graph, then flags risks as prioritised findings. This 4-step tour shows the main surfaces."),
+    },
+    {
+      selector: '.sidebar nav a[href="/projects"]',
+      title: MnemosUI.t("1. Register a project"),
+      body: MnemosUI.t("Start here — add a GitLab project. Mnemos clones it, runs the analyzers, and builds the graph."),
+    },
+    {
+      selector: '.sidebar nav a[href="/findings"]',
+      title: MnemosUI.t("2. Review findings"),
+      body: MnemosUI.t("Findings are risks the analysis surfaced — sorted by a 0-100 risk score. Each one carries a suggested fix and a one-click 'Create plan' button."),
+    },
+    {
+      selector: '.sidebar nav a[href="/graph"]',
+      title: MnemosUI.t("3. Explore the graph"),
+      body: MnemosUI.t("The Graph tab visualises components and their CALLS / EXPOSES relationships. Solid edges are confirmed by runtime traces."),
+    },
+    {
+      selector: '.sidebar nav a[href="/report"]',
+      title: MnemosUI.t("4. Share the report"),
+      body: MnemosUI.t("The Report tab generates a printable one-pager — health, trend, and the system-level narrative — for a PM or lead."),
+    },
+  ]);
+}
+
+if (!MnemosUI.tourDone()) {
+  // Small delay so the dashboard has painted first.
+  setTimeout(runWelcomeTour, 700);
+}
 </script>
 {% endblock %}

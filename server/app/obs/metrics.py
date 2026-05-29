@@ -13,12 +13,14 @@ the feature code, not this module.
 
 from __future__ import annotations
 
+import hmac
 import time
 
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
     multiprocess,
@@ -50,6 +52,63 @@ rate_limited_total = Counter(
     "mnemos_rate_limited_total",
     "Requests rejected by the rate limiter by scope",
     labelnames=("scope",),
+)
+
+# Webhook -> worker pickup lag. Backs the Grafana panel added in PR-10.
+# The histogram buckets are sized for the 0-10 minute window where the
+# operator-visible "is my push being analysed?" question lives.
+ingest_lag_seconds = Histogram(
+    "mnemos_ingest_lag_seconds",
+    "Seconds between an ingest AnalysisRun being queued and the worker "
+    "picking it up",
+    labelnames=("source",),
+    buckets=(0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600),
+)
+
+# How many ProjectDB bindings the daily probe sweep has currently flagged
+# as RW (and therefore unsafe). Gauge rather than Counter so the panel
+# tracks the *current* fleet size, not cumulative disable events.
+project_db_disabled = Gauge(
+    "mnemos_project_db_disabled_total",
+    "Current count of project_db rows with disabled_at set",
+)
+
+# Tracks contention on the per-cron advisory lock. A non-zero rate is
+# expected and *desired* under a multi-worker deployment — it means the
+# leader-election story is keeping doubles out.
+cron_lock_lost_total = Counter(
+    "mnemos_cron_lock_lost_total",
+    "Cron iterations that failed to acquire the advisory lock",
+    labelnames=("job",),
+)
+
+# Break-glass workflow visibility. Three labelled actions:
+#   - "issued"   on POST /break_glass_grant success
+#   - "consumed" when the approve endpoint's atomic UPDATE returns a row
+#   - "expired"  when the cron sweep marks an unused grant as consumed
+break_glass_grants_total = Counter(
+    "mnemos_break_glass_grants_total",
+    "Break-glass grants by action (issued/consumed/expired)",
+    labelnames=("action",),
+)
+
+# PR-94 — append-only audit (§14.4) failures. The previous logger
+# swallowed write errors silently; this counter + the structured log
+# entry give an operator a visible "audit went dark" signal.
+audit_write_failures_total = Counter(
+    "mnemos_audit_write_failures_total",
+    "Audit-log inserts that failed (and were rolled back) per action.",
+    labelnames=("action",),
+)
+
+# PR-104 — outbound notifier delivery failures. The webhook is
+# best-effort by design (a flaky receiver must not block the
+# merge stage's commit), but operators still want to see when it
+# silently stops working.
+notify_failures_total = Counter(
+    "mnemos_notify_failures_total",
+    "Outbound notifier POSTs that failed or returned non-2xx, per finding kind.",
+    labelnames=("kind",),
 )
 
 
@@ -92,10 +151,12 @@ def _route_template(request: Request) -> str:
 async def metrics_endpoint(request: "Request") -> Response:
     """Serve the Prometheus scrape endpoint.
 
-    Authentication: when ``METRICS_BEARER_TOKEN`` is set, requests must
-    present ``Authorization: Bearer <token>``. Empty (default) leaves
-    the endpoint open — only safe when /metrics is locked down at the
-    reverse proxy or only reachable from the monitoring network.
+    Authentication is fail-closed: ``METRICS_BEARER_TOKEN`` MUST be set
+    and the request must present ``Authorization: Bearer <token>``.
+    Metrics labels carry project ids and actor handles — leaving the
+    scrape open by default lets anyone with reachability directory-list
+    every tenant (§14.3). A localhost-only loopback exception keeps
+    same-host monitoring sidecars working without a token.
 
     Supports multiprocess (uvicorn --workers N) when the
     ``PROMETHEUS_MULTIPROC_DIR`` env var is set — otherwise falls back
@@ -106,9 +167,13 @@ async def metrics_endpoint(request: "Request") -> Response:
     from app.config import get_settings
 
     expected = get_settings().metrics_bearer_token
+    client = request.client
+    is_loopback = bool(client) and client.host in ("127.0.0.1", "::1", "localhost")
+    if not expected and not is_loopback:
+        return Response(status_code=503, content=b"metrics_token_not_configured")
     if expected:
         provided = request.headers.get("authorization", "")
-        if provided != f"Bearer {expected}":
+        if not hmac.compare_digest(provided, f"Bearer {expected}"):
             return Response(status_code=401, content=b"unauthorized")
 
     if os.getenv("PROMETHEUS_MULTIPROC_DIR"):

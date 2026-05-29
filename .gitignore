@@ -35,3 +35,10 @@ node_modules/
 /data/
 *.sqlite
 *.db
+
+# .NET build artifacts (PR-127 — local dotnet publish)
+analyzers/*/src/bin/
+analyzers/*/src/obj/
+scripts/accuracy/fixtures/*/bin/
+scripts/accuracy/fixtures/*/obj/
+/tmp/ggoss-*-out/

@@ -1,52 +1,352 @@
 {% extends "_layout.html" %}
 {% block title %}Findings — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>Findings</h1></header>
+<header class="page-head"><h1 data-i18n="Findings">Findings</h1></header>
 
 <form onsubmit="return loadFindings(event)">
-  <label>Project ID<input type="text" id="pid" required placeholder="uuid" /></label>
-  <label>Severity
+  <label><span data-i18n="Project ID">Project ID</span><input type="text" id="pid" required placeholder="uuid" /></label>
+  <label><span data-i18n="Severity">Severity</span>
     <select id="sev"><option value="">(all)</option><option>info</option><option>warning</option><option>error</option></select>
   </label>
-  <label>Status
+  <label><span data-i18n="Status">Status</span>
     <select id="st"><option value="">(all)</option><option>open</option><option>acknowledged</option><option>resolved</option><option>false_positive</option></select>
   </label>
-  <button class="primary" type="submit">Load</button>
-  <button type="button" onclick="rebuild()">Rebuild</button>
+  <button class="primary" type="submit" data-i18n="Load">Load</button>
+  <button type="button" onclick="rebuild()" data-required-role="operator" data-i18n="Rebuild">Rebuild</button>
+  <button type="button" onclick="exportFindings()" data-i18n="Export CSV">Export CSV</button>
+  <button type="button" onclick="exportFindingsXlsx()" data-i18n="Export Excel">Export Excel</button>
 </form>
+
+<!-- PR-51 — system-health panel (audit C). The risk index + the
+     P1-open count + the 7-day deltas turn the findings list into
+     a business dashboard an operator can report up from. -->
+<section id="health-panel" class="health-panel" hidden aria-labelledby="health-panel-title">
+  <h2 id="health-panel-title" class="sr-only" data-i18n="Findings health panel">Findings health panel</h2>
+  <div class="health-card health-index">
+    <h3 data-i18n="Risk index">Risk index</h3>
+    <div class="big" id="h-risk-index">—</div>
+    <span class="muted" data-i18n="mean risk of open findings">mean risk of open findings</span>
+  </div>
+  <div class="health-card">
+    <h3 data-i18n="P1 open">P1 open</h3>
+    <div class="big" id="h-p1">—</div>
+    <span class="muted" data-i18n="fix these first">fix these first</span>
+  </div>
+  <div class="health-card">
+    <h3 data-i18n="Open / total">Open / total</h3>
+    <div class="big" id="h-open">—</div>
+  </div>
+  <div class="health-card">
+    <h3 data-i18n="Mean time to resolve">Mean time to resolve</h3>
+    <div class="big" id="h-mttr">—</div>
+  </div>
+  <div class="health-card">
+    <h3 data-i18n="Last 7 days">Last 7 days</h3>
+    <div class="big" id="h-delta">—</div>
+    <span class="muted" data-i18n="resolved − new">resolved − new</span>
+  </div>
+</section>
+
 <div id="out"></div>
 
 <script>
+async function createPlanFromFinding(findingId) {
+  if (!confirm(MnemosUI.t("Create a draft plan from this finding? You can review and edit it on the Plans tab."))) {
+    return;
+  }
+  const r = await fetch(`/api/v1/findings/${findingId}/plan`, { method: "POST" });
+  if (!r.ok) { await MnemosUI.showError("Plan creation failed", r); return; }
+  const plan = await r.json();
+  MnemosUI.notify(
+    MnemosUI.t("Draft plan created from finding."),
+    { body: plan.spec && plan.spec.title, level: "success" },
+  );
+  // Offer a jump to the Plans tab pre-filled with this project.
+  setTimeout(() => {
+    if (confirm(MnemosUI.t("Open the Plans tab to review the new draft?"))) {
+      window.location.href = "/plans?project=" + encodeURIComponent(plan.project_id);
+    }
+  }, 300);
+}
+
+async function loadHealthPanel(pid) {
+  try {
+    const r = await fetch(`/api/v1/projects/${pid}/findings/summary`);
+    if (!r.ok) return;
+    const s = await r.json();
+    const panel = document.getElementById("health-panel");
+    panel.hidden = false;
+    // Risk index — colour-coded, low is good.
+    const idxEl = document.getElementById("h-risk-index");
+    idxEl.textContent = s.risk_index;
+    idxEl.className = "big " + (
+      s.risk_index >= 60 ? "fail" : s.risk_index >= 35 ? "warn" : "ok"
+    );
+    const p1El = document.getElementById("h-p1");
+    p1El.textContent = s.open_p1;
+    p1El.className = "big " + (s.open_p1 > 0 ? "fail" : "ok");
+    document.getElementById("h-open").textContent = `${s.open} / ${s.total}`;
+    document.getElementById("h-mttr").textContent =
+      s.mean_time_to_resolve_h != null
+        ? `${s.mean_time_to_resolve_h} h`
+        : "—";
+    // 7-day delta: resolved minus new. Positive = shrinking backlog.
+    const delta = (s.resolved_last_7d || 0) - (s.new_last_7d || 0);
+    const deltaEl = document.getElementById("h-delta");
+    deltaEl.textContent = (delta >= 0 ? "+" : "") + delta;
+    deltaEl.className = "big " + (delta >= 0 ? "ok" : "warn");
+    deltaEl.title = `${s.resolved_last_7d} resolved, ${s.new_last_7d} new`;
+  } catch (_) {}
+}
+
 async function loadFindings(ev) {
   ev.preventDefault();
   const pid = document.getElementById("pid").value.trim();
   const sev = document.getElementById("sev").value;
   const st = document.getElementById("st").value;
   if (!pid) return false;
+  MnemosUI.rememberProject(pid);
   const qs = new URLSearchParams();
   if (sev) qs.set("severity", sev);
   if (st) qs.set("status", st);
   const r = await fetch(`/api/v1/projects/${pid}/findings?${qs}`);
   const rows = await r.json();
+  // P2-9 onboarding step 3 — 8th-round audit B3: reaching the
+  // findings view *at all* (with the form filled out) counts as
+  // "reviewed". The prior ``rows.length > 0`` gate left the operator
+  // stuck on step 3 forever when an analysis genuinely produced zero
+  // findings — UX expectation said "I clicked Review, so I'm done",
+  // platform said "nothing rendered, so you aren't".
+  try {
+    localStorage.setItem("mnemos_onboarding_step3_done", "1");
+  } catch (_) {}
+  // PR-51 — load the system-health rollup alongside the list.
+  loadHealthPanel(pid);
   const out = document.getElementById("out");
   if (!Array.isArray(rows) || rows.length === 0) {
-    out.innerHTML = '<p class="muted">No findings.</p>';
+    out.innerHTML = '<p class="muted" data-i18n="No findings.">No findings.</p>';
+    MnemosUI.applyI18n(out);
     return false;
   }
-  let html = '<table class="data"><thead><tr><th>Kind</th><th>Severity</th><th>Status</th><th>Subject</th><th>Detail</th></tr></thead><tbody>';
-  for (const f of rows) {
-    html += `<tr><td>${f.kind}</td><td>${f.severity}</td><td>${f.status}</td><td><code>${f.subject_node_id ?? f.subject_edge_id ?? ""}</code></td><td><pre>${JSON.stringify(f.detail)}</pre></td></tr>`;
-  }
-  html += "</tbody></table>";
-  out.innerHTML = html;
+  // P2-6 — chunked rendering so a project with thousands of open
+  // findings doesn't freeze the browser on the first innerHTML write.
+  _renderFindingsPaginated(out, rows);
   return false;
+}
+
+const _FINDINGS_PAGE_SIZE = 100;
+
+function _renderFindingsPaginated(out, rows) {
+  const total = rows.length;
+  out.innerHTML = '<table class="data"><thead><tr>'
+    + '<th data-i18n="Priority">Priority</th>'
+    + '<th data-i18n="Risk">Risk</th>'
+    + '<th data-i18n="Kind">Kind</th>'
+    + '<th data-i18n="Severity">Severity</th>'
+    + '<th data-i18n="Status">Status</th>'
+    + '<th data-i18n="Subject">Subject</th>'
+    + '<th data-i18n="Suggested fix">Suggested fix</th>'
+    + '</tr></thead>'
+    + '<tbody id="findings-tbody"></tbody></table>'
+    + '<p class="muted" id="findings-status"></p> '
+    + `<button type="button" class="primary" id="findings-more" hidden>`
+    + `${MnemosUI.t("Show next $1", { 1: _FINDINGS_PAGE_SIZE })}</button>`;
+  const tbody = document.getElementById("findings-tbody");
+  tbody.dataset.offset = "0";
+  tbody._rows = rows;
+  _showNextFindingsPage();
+}
+
+function _showNextFindingsPage() {
+  const tbody = document.getElementById("findings-tbody");
+  if (!tbody) return;
+  const rows = tbody._rows || [];
+  let offset = parseInt(tbody.dataset.offset || "0", 10);
+  const total = rows.length;
+  const next = Math.min(offset + _FINDINGS_PAGE_SIZE, total);
+  const tpl = document.createElement("template");
+  let html = "";
+  for (let i = offset; i < next; i++) {
+    const f = rows[i];
+    const sev = escapeHtml(f.severity || "info");
+    const status = escapeHtml(f.status || "open");
+    const priority = escapeHtml(f.priority || "P4");
+    const risk = Number.isFinite(f.risk_score) ? f.risk_score : 0;
+    const cwe = f.cwe_id
+      ? ` <a class="cwe-link" href="https://cwe.mitre.org/data/definitions/${escapeHtml(String(f.cwe_id).replace(/[^0-9]/g, ""))}.html" target="_blank" rel="noopener">${escapeHtml(f.cwe_id)}</a>`
+      : "";
+    const planBtn = (f.status === "open" || f.status === "acknowledged")
+      ? `<button class="mini-btn" onclick="createPlanFromFinding('${escapeHtml(f.id)}')" data-i18n="Create plan">Create plan</button>`
+      : "";
+    const compliance = (f.compliance_tags && f.compliance_tags.length)
+      ? `<div class="compliance-tags">`
+        + f.compliance_tags.map(t => `<span class="compliance-pill">${escapeHtml(t)}</span>`).join("")
+        + `</div>`
+      : "";
+    const remediation = f.remediation
+      ? `<details class="fix-detail"><summary>${escapeHtml(f.priority || "")} fix</summary>`
+        + `<p>${escapeHtml(f.remediation)}</p>${cwe}`
+        + compliance
+        + `<div class="fix-actions">${planBtn}`
+        + `<span class="related-plans" data-finding="${escapeHtml(f.id)}"></span></div>`
+        + `<details class="raw-detail"><summary>raw</summary><pre>${escapeHtml(JSON.stringify(f.detail))}</pre></details>`
+        + `</details>`
+      : `<pre>${escapeHtml(JSON.stringify(f.detail))}</pre>${planBtn}`;
+    html += `<tr>`
+      + `<td><span class="priority-pill ${priority}">${priority}</span></td>`
+      + `<td><span class="risk-bar" style="--risk:${risk}">${risk}</span></td>`
+      + `<td>${escapeHtml(f.kind || "")}</td>`
+      + `<td><span class="badge ${sev}">${sev}</span></td>`
+      + `<td><span class="badge ${status}">${status}</span></td>`
+      + `<td><code>${escapeHtml(f.subject_node_id ?? f.subject_edge_id ?? "")}</code></td>`
+      + `<td>${remediation}</td>`
+      + `</tr>`;
+  }
+  tpl.innerHTML = html;
+  tbody.appendChild(tpl.content);
+  MnemosUI.applyI18n(tbody);
+  // PR-56 — lazily fill the "related plans" badge when its
+  // <details> is first opened, so we don't fire N fetches up front.
+  tbody.querySelectorAll(".fix-detail").forEach((det) => {
+    det.addEventListener("toggle", function onToggle() {
+      if (!det.open) return;
+      det.removeEventListener("toggle", onToggle);
+      const span = det.querySelector(".related-plans");
+      if (!span) return;
+      const fid = span.getAttribute("data-finding");
+      fetch(`/api/v1/findings/${fid}/plans`)
+        .then((r) => (r.ok ? r.json() : []))
+        .then((plans) => {
+          if (plans.length) {
+            span.innerHTML = `<span class="plan-badge">${plans.length} `
+              + MnemosUI.t(plans.length === 1 ? "linked plan" : "linked plans")
+              + `</span>`;
+          }
+        })
+        .catch(() => {});
+    });
+  });
+  tbody.dataset.offset = String(next);
+  const status = document.getElementById("findings-status");
+  if (status) {
+    status.textContent = MnemosUI.t(
+      "Showing $1 of $2 findings.", { 1: next, 2: total });
+  }
+  const more = document.getElementById("findings-more");
+  if (more) {
+    more.hidden = next >= total;
+    more.onclick = _showNextFindingsPage;
+  }
+}
+
+async function exportFindings() {
+  const pid = document.getElementById("pid").value.trim();
+  if (!pid) {
+    MnemosUI.showToast(MnemosUI.t("Enter a project ID first."), "warn");
+    return;
+  }
+  const sev = document.getElementById("sev").value;
+  const st = document.getElementById("st").value;
+  const qs = new URLSearchParams();
+  if (sev) qs.set("severity", sev);
+  if (st) qs.set("status", st);
+  const r = await fetch(`/api/v1/projects/${pid}/findings?${qs}`);
+  if (!r.ok) { await MnemosUI.showError("Export failed", r); return; }
+  const rows = await r.json();
+  if (!rows.length) {
+    MnemosUI.showToast(MnemosUI.t("Nothing to export."), "warn");
+    return;
+  }
+  // Flatten the JSONB detail blob to its top-level keys for the
+  // CSV — full nested JSON survives in the ``detail_json`` column.
+  const flat = rows.map((f) => ({
+    id: f.id,
+    kind: f.kind,
+    severity: f.severity,
+    status: f.status,
+    subject: f.subject_node_id || f.subject_edge_id || "",
+    detail_json: JSON.stringify(f.detail),
+  }));
+  MnemosUI.exportCsv(flat, ["id", "kind", "severity", "status", "subject", "detail_json"],
+    `findings-${pid.slice(0, 8)}-${Date.now()}.csv`);
+  MnemosUI.showToast(MnemosUI.t("Exported."), "success");
+}
+
+// PR-134 — richer Excel export via ExcelJS. Same data the CSV path
+// produces, but styled (frozen bold header, autofilter, sane column
+// widths) and shipped as a real .xlsx an analyst can pivot on. The
+// ExcelJS library lazy-loads on first click.
+async function exportFindingsXlsx() {
+  const pid = document.getElementById("pid").value.trim();
+  if (!pid) {
+    MnemosUI.showToast(MnemosUI.t("Enter a project ID first."), "warn");
+    return;
+  }
+  const sev = document.getElementById("sev").value;
+  const st = document.getElementById("st").value;
+  const qs = new URLSearchParams();
+  if (sev) qs.set("severity", sev);
+  if (st) qs.set("status", st);
+  const r = await fetch(`/api/v1/projects/${pid}/findings?${qs}`);
+  if (!r.ok) { await MnemosUI.showError("Export failed", r); return; }
+  const rows = await r.json();
+  if (!rows.length) {
+    MnemosUI.showToast(MnemosUI.t("Nothing to export."), "warn");
+    return;
+  }
+  const flat = rows.map((f) => ({
+    id: f.id,
+    kind: f.kind,
+    severity: f.severity,
+    status: f.status,
+    risk_score: f.risk_score,
+    priority: f.priority,
+    subject: f.subject_node_id || f.subject_edge_id || "",
+    remediation: f.remediation || "",
+    detail_json: JSON.stringify(f.detail),
+  }));
+  await MnemosUI.exportXlsx(
+    [{
+      name: "Findings",
+      rows: flat,
+      columns: [
+        { key: "id", header: "ID", width: 38 },
+        { key: "kind", header: "Kind", width: 24 },
+        { key: "severity", header: "Severity", width: 12 },
+        { key: "status", header: "Status", width: 14 },
+        { key: "risk_score", header: "Risk", width: 8 },
+        { key: "priority", header: "Priority", width: 10 },
+        { key: "subject", header: "Subject", width: 40 },
+        { key: "remediation", header: "Remediation", width: 50 },
+        { key: "detail_json", header: "Detail (JSON)", width: 60 },
+      ],
+    }],
+    `findings-${pid.slice(0, 8)}-${Date.now()}.xlsx`,
+  );
+  MnemosUI.showToast(MnemosUI.t("Exported."), "success");
 }
 
 async function rebuild() {
   const pid = document.getElementById("pid").value.trim();
   if (!pid) return;
   const r = await fetch(`/api/v1/projects/${pid}/findings/rebuild`, {method: "POST"});
-  alert(await r.text());
+  if (!r.ok) { await MnemosUI.showError("Rebuild failed", r); return; }
+  MnemosUI.showToast(MnemosUI.t("Findings rebuild queued."), "success");
 }
+
+// P2-7 dashboard drill-down — accept ``?status=open&severity=…`` so
+// the stat-card link arrives with the filter already applied.
+(function fromQuery() {
+  const params = new URLSearchParams(window.location.search);
+  const status = params.get("status");
+  const severity = params.get("severity");
+  const project = params.get("project");
+  if (status) document.getElementById("st").value = status;
+  if (severity) document.getElementById("sev").value = severity;
+  if (project) document.getElementById("pid").value = project;
+  // A deep-link with a project arrives ready to load — match the
+  // graph / report tabs, which auto-render on ?project=.
+  if (project) loadFindings(new Event("submit"));
+})();
 </script>
 {% endblock %}

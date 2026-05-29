@@ -28,6 +28,7 @@ async def submit_plan(
     tasks: list[dict[str, Any]],
     target_component_id: str,
     requester: str,
+    base_sha: str | None = None,
 ) -> dict[str, Any]:
     impacts = await impact_analysis(
         session, project_id=project_id, symbol_id=target_component_id, max_depth=3
@@ -47,8 +48,14 @@ async def submit_plan(
     await session.commit()
     await session.refresh(plan)
 
-    worktree = await create_worktree(plan.id, project_id)
+    from datetime import datetime as _dt
+
+    worktree = await create_worktree(plan.id, project_id, base_sha=base_sha)
     plan.worktree_path = str(worktree)
+    plan.worktree_meta = {
+        "base_sha": base_sha,
+        "created_at": _dt.utcnow().isoformat() + "Z",
+    }
     await session.commit()
 
     return {

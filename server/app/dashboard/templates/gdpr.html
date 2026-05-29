@@ -1,7 +1,7 @@
 {% extends "_layout.html" %}
 {% block title %}GDPR tools — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>GDPR tools</h1></header>
+<header class="page-head"><h1 data-i18n="GDPR tools">GDPR tools</h1></header>
 <section class="hint">
   <p class="muted">
     Supervisory-authority-ready right-to-access and right-to-erasure. Every
@@ -33,7 +33,7 @@
   </p>
   <form onsubmit="return doErase(event)">
     <label>User ID<input type="text" name="user_id" required placeholder="uuid" /></label>
-    <button type="submit" style="background:#c62828;color:#fff;">Erase</button>
+    <button type="submit" class="danger">Erase</button>
   </form>
   <pre id="erase-result" class="muted"></pre>
 </section>

@@ -1,0 +1,18 @@
+{
+  "_about": "Hand-curated ground truth for ggoss-csharp on src/. Mirrors TS/Py fixtures so cross-language accuracy comparisons are meaningful.",
+  "symbols": [
+    {"kind": "class",  "name": "Order",        "location": {"file": "Orders.cs"}},
+    {"kind": "class",  "name": "OrdersRepo",   "location": {"file": "Orders.cs"}},
+    {"kind": "method", "name": "Add",          "location": {"file": "Orders.cs"}},
+    {"kind": "method", "name": "GetById",      "location": {"file": "Orders.cs"}},
+    {"kind": "method", "name": "Cancel",       "location": {"file": "Orders.cs"}},
+    {"kind": "class",  "name": "OrderService", "location": {"file": "Orders.cs"}},
+    {"kind": "method", "name": "CreateOrder",  "location": {"file": "Orders.cs"}},
+    {"kind": "method", "name": "ConfirmOrder", "location": {"file": "Orders.cs"}}
+  ],
+  "edges": [
+    {"kind": "CALLS", "source": "CreateOrder",  "target": "Add"},
+    {"kind": "CALLS", "source": "Cancel",       "target": "GetById"},
+    {"kind": "CALLS", "source": "ConfirmOrder", "target": "GetById"}
+  ]
+}

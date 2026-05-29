@@ -123,7 +123,11 @@ async def _verify_id_token(
     try:
         unverified_header = jwt.get_unverified_header(id_token)
     except InvalidTokenError as exc:
-        raise HTTPException(status_code=401, detail=f"id_token_malformed: {exc}")
+        # PR-132 — generic detail to the caller, full exc in server log.
+        # Exposing the PyJWT message gives an attacker hints about
+        # which token format / claim parsing failed.
+        logger.warning("oidc id_token_malformed: %s", exc)
+        raise HTTPException(status_code=401, detail="id_token_malformed")
 
     kid = unverified_header.get("kid")
     matching = next(
@@ -143,11 +147,16 @@ async def _verify_id_token(
         elif kty == "EC":
             public_key = jwt.algorithms.ECAlgorithm.from_jwk(json.dumps(matching))
         else:
+            # PR-132 — kty is a fixed enum (RSA/EC/oct/OKP), leak risk
+            # nominal but generic detail follows the same pattern as
+            # the other id_token_* responses.
+            logger.warning("oidc id_token_unsupported_kty: %s", kty)
             raise HTTPException(
-                status_code=401, detail=f"id_token_unsupported_kty: {kty}"
+                status_code=401, detail="id_token_unsupported_kty"
             )
     except (ValueError, TypeError) as exc:
-        raise HTTPException(status_code=401, detail=f"id_token_jwk_invalid: {exc}")
+        logger.warning("oidc id_token_jwk_invalid: %s", exc)
+        raise HTTPException(status_code=401, detail="id_token_jwk_invalid")
 
     try:
         claims = jwt.decode(
@@ -159,7 +168,8 @@ async def _verify_id_token(
             leeway=30,
         )
     except InvalidTokenError as exc:
-        raise HTTPException(status_code=401, detail=f"id_token_invalid: {exc}")
+        logger.warning("oidc id_token_invalid: %s", exc)
+        raise HTTPException(status_code=401, detail="id_token_invalid")
     return claims
 
 
@@ -183,12 +193,18 @@ async def login_redirect(request: Request):
     discovery = await _discovery()
     auth_endpoint = discovery["authorization_endpoint"]
     state = _b64url(secrets.token_bytes(24))
+    # PR-130 — OIDC nonce. Defends against id_token replay: a
+    # captured token from a different login attempt won't match
+    # the nonce stashed for *this* state, so /callback rejects it.
+    # Standard recommends this even with state + PKCE for
+    # belt-and-braces.
+    nonce = _b64url(secrets.token_bytes(24))
     verifier, challenge = _pkce_pair()
 
     redis = await get_redis()
     await redis.set(
         f"{_STATE_KEY_PREFIX}{state}",
-        json.dumps({"verifier": verifier}),
+        json.dumps({"verifier": verifier, "nonce": nonce}),
         ex=_STATE_TTL_SEC,
     )
     params = {
@@ -197,6 +213,7 @@ async def login_redirect(request: Request):
         "redirect_uri": s.oidc_redirect_uri,
         "scope": s.oidc_scopes,
         "state": state,
+        "nonce": nonce,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     }
@@ -222,7 +239,13 @@ async def callback(
     if not stashed:
         raise HTTPException(status_code=400, detail="invalid_or_expired_state")
     await redis.delete(f"{_STATE_KEY_PREFIX}{state}")
-    verifier = json.loads(stashed)["verifier"]
+    stashed_data = json.loads(stashed)
+    verifier = stashed_data["verifier"]
+    # PR-130 — nonce echo must match what we stashed in /login.
+    # Older state entries (pre-PR-130) won't carry a nonce key;
+    # treat them as legitimate to avoid kicking valid in-flight
+    # logins during deploy.
+    expected_nonce = stashed_data.get("nonce")
 
     s = _settings()
     discovery = await _discovery()
@@ -253,6 +276,17 @@ async def callback(
         if not id_token:
             raise HTTPException(status_code=401, detail="no_id_token")
         claims = await _verify_id_token(client, discovery, id_token, s)
+
+        # PR-130 — nonce comparison. id_token MUST echo the nonce
+        # we sent at /login. Replay attacks fail here even when
+        # state somehow leaks. If we issued the state pre-nonce
+        # (deploy mid-flight), expected_nonce is None and we skip
+        # the check — the state TTL bounds the staleness anyway.
+        if expected_nonce is not None:
+            id_token_nonce = claims.get("nonce")
+            if id_token_nonce != expected_nonce:
+                logger.warning("oidc nonce mismatch")
+                raise HTTPException(status_code=401, detail="id_token_nonce_mismatch")
 
         # Optional userinfo enrichment — preferred for richer profile
         # data, but we trust id_token claims as the authoritative

@@ -1,0 +1,12 @@
+{
+  "_about": "ggoss-binary-dotnet fixture. Targets the compiled Project.dll from sample-cs-project — record type emits getters/setters auto. Validation focuses on the developer-defined methods (Add/GetById/Cancel/CreateOrder/ConfirmOrder) since auto-generated members are an implementation detail.",
+  "_target_dll": "scripts/accuracy/fixtures/sample-cs-project/bin/Release/net8.0/",
+  "symbols": [
+    {"kind": "export", "name": "Add",          "location": {"file": ""}},
+    {"kind": "export", "name": "GetById",      "location": {"file": ""}},
+    {"kind": "export", "name": "Cancel",       "location": {"file": ""}},
+    {"kind": "export", "name": "CreateOrder",  "location": {"file": ""}},
+    {"kind": "export", "name": "ConfirmOrder", "location": {"file": ""}}
+  ],
+  "edges": []
+}

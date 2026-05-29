@@ -1,0 +1,154 @@
+{% extends "_layout.html" %}
+{% block title %}Health — Mnemos{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1 data-i18n="Platform health">Platform health</h1>
+  <button type="button" class="primary" onclick="reload()" data-i18n="Refresh">Refresh</button>
+</header>
+
+<p class="muted" data-i18n="health-blurb">
+  Live readout of the five readiness checks the platform runs on
+  /api/v1/health/ready. DB / Redis / worker failing flips overall
+  status to degraded (503); analyzer binaries missing is advisory —
+  the platform serves but those languages won't be analysed.
+</p>
+
+<section class="health-grid">
+  <div class="health-block" id="hb-overall">
+    <h2 data-i18n="Overall">Overall</h2>
+    <div class="big" id="hb-overall-value">…</div>
+    <div class="muted" id="hb-overall-when"></div>
+  </div>
+  <div class="health-block" id="hb-database">
+    <h2>Database</h2>
+    <div class="status" id="hb-database-status">…</div>
+    <pre class="health-msg" id="hb-database-msg"></pre>
+  </div>
+  <div class="health-block" id="hb-redis">
+    <h2>Redis</h2>
+    <div class="status" id="hb-redis-status">…</div>
+    <pre class="health-msg" id="hb-redis-msg"></pre>
+  </div>
+  <div class="health-block" id="hb-worker">
+    <h2>Worker</h2>
+    <div class="status" id="hb-worker-status">…</div>
+    <pre class="health-msg" id="hb-worker-msg"></pre>
+  </div>
+  <div class="health-block" id="hb-crypto">
+    <h2>Crypto</h2>
+    <div class="status" id="hb-crypto-status">…</div>
+    <pre class="health-msg" id="hb-crypto-msg"></pre>
+  </div>
+  <div class="health-block" id="hb-analyzers">
+    <h2>Analyzers</h2>
+    <div class="status" id="hb-analyzers-status">…</div>
+    <pre class="health-msg" id="hb-analyzers-msg"></pre>
+  </div>
+</section>
+
+<section>
+  <h2 data-i18n="Operational counts (24h)">Operational counts (24h)</h2>
+  <p class="muted">
+    Pulled directly from Postgres so every browser sees the same
+    numbers, unlike worker-process Prometheus counters.
+  </p>
+  <table class="data" id="metrics-table">
+    <thead><tr><th data-i18n="Metric">Metric</th><th data-i18n="Value">Value</th></tr></thead>
+    <tbody>
+      <tr><td>project_dbs_disabled</td><td id="m-dbs">…</td></tr>
+      <tr><td>break_glass_active</td><td id="m-bg">…</td></tr>
+      <tr><td>runs_last_24h_failed</td><td id="m-runs">…</td></tr>
+      <tr><td>webhook_events_24h</td><td id="m-wh">…</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<style>
+.health-grid {
+  display: grid; gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin: 1rem 0 1.5rem;
+}
+.health-block {
+  border: 1px solid #d0d7de; border-radius: 6px;
+  padding: 0.9rem; background: #fff;
+}
+.health-block h2 { margin: 0 0 0.4rem; font-size: 1rem; color: #57606a; }
+.health-block .big { font-size: 1.8rem; font-weight: 600; }
+.health-block .status { font-size: 1.1rem; font-weight: 600; margin: 0.2rem 0; }
+.health-block .status.ok   { color: #145a1f; }
+.health-block .status.warn { color: #6a4b00; }
+.health-block .status.fail { color: #7a1818; }
+.health-msg {
+  margin: 0.3rem 0 0; font-size: 0.78rem; color: #57606a;
+  white-space: pre-wrap; word-break: break-word;
+}
+</style>
+
+<script>
+function _setStatus(prefix, ok, advisory, message) {
+  const status = document.getElementById(prefix + "-status");
+  const msg = document.getElementById(prefix + "-msg");
+  if (!status || !msg) return;
+  if (ok && !advisory) {
+    status.textContent = "✓ ok";
+    status.className = "status ok";
+  } else if (ok && advisory) {
+    status.textContent = "⚠ degraded";
+    status.className = "status warn";
+  } else {
+    status.textContent = "✗ fail";
+    status.className = "status fail";
+  }
+  msg.textContent = message || "";
+}
+
+async function reload() {
+  try {
+    const r = await fetch("/api/v1/health/ready");
+    let body;
+    try { body = await r.json(); } catch { body = { checks: {} }; }
+    const checks = body.checks || {};
+    _setStatus("hb-database",  checks.database?.ok,  false, checks.database?.message);
+    _setStatus("hb-redis",     checks.redis?.ok,     false, checks.redis?.message);
+    _setStatus("hb-worker",    checks.worker?.ok,    false, checks.worker?.message);
+    _setStatus("hb-crypto",    checks.crypto?.ok,    false, checks.crypto?.message);
+    // Analyzers carry ok=true even when binaries are missing — the
+    // message is "missing: a,b,c". Surface that as a warn block.
+    const aMsg = checks.analyzers?.message || "";
+    _setStatus("hb-analyzers", checks.analyzers?.ok, aMsg.startsWith("missing"), aMsg);
+    // Overall.
+    const oEl = document.getElementById("hb-overall-value");
+    const ow = document.getElementById("hb-overall-when");
+    if (r.ok) {
+      oEl.textContent = "✓ READY";
+      oEl.className = "big ok";
+    } else {
+      oEl.textContent = "✗ DEGRADED";
+      oEl.className = "big fail";
+    }
+    ow.textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById("hb-overall-value").textContent = "?";
+  }
+
+  // Metrics counts — separate endpoint so a transient DB hiccup
+  // on metrics doesn't poison the readiness block above.
+  try {
+    const r = await fetch("/api/v1/health/metrics_summary");
+    if (!r.ok) return;
+    const m = await r.json();
+    document.getElementById("m-dbs").textContent  = m.project_dbs_disabled ?? "?";
+    document.getElementById("m-bg").textContent   = m.break_glass_active ?? "?";
+    document.getElementById("m-runs").textContent = m.runs_last_24h_failed ?? "?";
+    document.getElementById("m-wh").textContent   = m.webhook_events_24h ?? "?";
+  } catch (_) {}
+}
+
+reload();
+// Refresh every 15s so an operator watching this page sees a
+// dependency die in near-real-time without spamming a polling
+// loop on quieter background fetches.
+setInterval(reload, 15000);
+</script>
+{% endblock %}

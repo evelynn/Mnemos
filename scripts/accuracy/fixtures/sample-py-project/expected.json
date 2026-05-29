@@ -1,0 +1,21 @@
+{
+  "_about": "Hand-curated ground truth for ggoss-py on src/. Mirrors the TS fixture's shape (orders domain) so cross-language accuracy comparisons are meaningful. Update both this file and the source together if you change the fixture.",
+  "symbols": [
+    {"kind": "class",          "name": "Order",             "location": {"file": "orders.py"}},
+    {"kind": "class",          "name": "OrdersRepo",        "location": {"file": "orders.py"}},
+    {"kind": "method",         "name": "__init__",          "location": {"file": "orders.py"}},
+    {"kind": "method",         "name": "add",               "location": {"file": "orders.py"}},
+    {"kind": "method",         "name": "get_by_id",         "location": {"file": "orders.py"}},
+    {"kind": "method",         "name": "cancel",            "location": {"file": "orders.py"}},
+    {"kind": "function",       "name": "create_order",      "location": {"file": "orders.py"}},
+    {"kind": "function",       "name": "confirm_order",     "location": {"file": "orders.py"}},
+    {"kind": "async_function", "name": "cancel_and_notify", "location": {"file": "orders.py"}}
+  ],
+  "edges": [
+    {"kind": "CALLS", "source": "create_order",      "target": "Order"},
+    {"kind": "CALLS", "source": "create_order",      "target": "add"},
+    {"kind": "CALLS", "source": "confirm_order",     "target": "get_by_id"},
+    {"kind": "CALLS", "source": "cancel",            "target": "get_by_id"},
+    {"kind": "CALLS", "source": "cancel_and_notify", "target": "cancel"}
+  ]
+}

@@ -1,7 +1,7 @@
 {% extends "_layout.html" %}
 {% block title %}Analysis — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>Analysis</h1></header>
+<header class="page-head"><h1 data-i18n="Analysis">Analysis</h1></header>
 
 <section class="hint">
   <p class="muted">
@@ -12,35 +12,53 @@
   </p>
 </section>
 
+<div id="onboard-banner" class="onboarding-step-cta" hidden>
+  <strong>Step 2 of 3:</strong> Trigger the first analysis run. The
+  project ID is pre-filled below — just press <em>Start analysis</em>.
+</div>
+
 <section>
   <h2>Trigger run</h2>
   <form id="trigger" onsubmit="return triggerRun(event)">
-    <label>Project ID<input type="text" name="project_id" required placeholder="uuid" /></label>
-    <label>Source path<input type="text" name="source_path" required value="/work" /></label>
-    <label>Git SHA<input type="text" name="git_sha" value="HEAD" /></label>
-    <label>Scope
+    <label><span data-i18n="Project ID">Project ID</span><input type="text" name="project_id" required placeholder="uuid" /></label>
+    <label><span data-i18n="Source path">Source path</span><input type="text" name="source_path" required value="/work" /></label>
+    <label><span data-i18n="Git SHA">Git SHA</span><input type="text" name="git_sha" value="HEAD" /></label>
+    <label><span data-i18n="Scope">Scope</span>
       <select name="scope">
         <option value="full" selected>full (L0 extract + findings + L1–L3)</option>
         <option value="continuation">continuation (skip L0; summaries only)</option>
       </select>
     </label>
-    <button type="submit" class="primary">Start analysis</button>
+    <button type="submit" class="primary" data-i18n="Start analysis">Start analysis</button>
   </form>
   <pre id="trigger-result" class="muted"></pre>
 </section>
 
 <section>
-  <h2>Recent runs</h2>
+  <h2 data-i18n="Pipeline latency">Pipeline latency</h2>
+  <p class="muted" data-i18n="Where the analysis time goes, averaged over recent runs. Tune the slowest stage first.">
+    Where the analysis time goes, averaged over recent runs.
+    Tune the slowest stage first.
+  </p>
+  <form onsubmit="return loadLatency(event)">
+    <label><span data-i18n="Project ID">Project ID</span><input type="text" id="lpid" required placeholder="uuid" /></label>
+    <button class="primary" type="submit" data-i18n="Load latency">Load latency</button>
+  </form>
+  <div id="latency-box"></div>
+</section>
+
+<section>
+  <h2 data-i18n="Recent runs">Recent runs</h2>
   <form onsubmit="return loadRuns(event)">
-    <label>Project ID<input type="text" id="rpid" required placeholder="uuid" /></label>
-    <button class="primary" type="submit">Load runs</button>
+    <label><span data-i18n="Project ID">Project ID</span><input type="text" id="rpid" required placeholder="uuid" /></label>
+    <button class="primary" type="submit" data-i18n="Load runs">Load runs</button>
   </form>
   <div id="runs"></div>
 </section>
 
 <section>
-  <h2>Pipeline monitor</h2>
-  <label>Run ID<input type="text" id="run-id" placeholder="uuid" /></label>
+  <h2>Pipeline monitor <span id="sse-status" class="sse-status" hidden></span></h2>
+  <label><span data-i18n="Run ID">Run ID</span><input type="text" id="run-id" placeholder="uuid" /></label>
   <button onclick="monitor()" class="primary">Monitor</button>
   <button onclick="stopMonitor()">Stop</button>
 
@@ -82,7 +100,20 @@ async function triggerRun(ev) {
       source_path: fd.get("source_path"),
     }),
   });
-  document.getElementById("trigger-result").textContent = await resp.text();
+  const body = await resp.text();
+  document.getElementById("trigger-result").textContent = body;
+  if (resp.ok) {
+    // P2-9 onboarding auto-progression: mark step 2 done so the
+    // dashboard's first-run guide updates the next time the operator
+    // visits the home tab.
+    try { localStorage.setItem("mnemos_onboarding_step2_done", "1"); } catch (_) {}
+    // Auto-prefill the Monitor input with the new run id so the
+    // operator doesn't have to copy-paste it from the response blob.
+    try {
+      const j = JSON.parse(body);
+      if (j.id) document.getElementById("run-id").value = j.id;
+    } catch (_) {}
+  }
   return false;
 }
 
@@ -90,27 +121,55 @@ async function loadRuns(ev) {
   ev.preventDefault();
   const pid = document.getElementById("rpid").value.trim();
   const r = await fetch(`/api/v1/projects/${pid}/analysis_runs`);
-  const rows = await r.json();
+  let rows = await r.json();
+  // P2-7 drill-down — apply client-side ``?status=`` / ``?since=24h``
+  // filters when the dashboard sent us here with a specific question.
+  const params = new URLSearchParams(window.location.search);
+  const status = params.get("status");
+  const since = params.get("since");
+  if (Array.isArray(rows) && (status || since)) {
+    rows = rows.filter((r) => {
+      if (status && r.status !== status) return false;
+      if (since === "24h") {
+        const ts = new Date(r.started_at || r.created_at || 0).getTime();
+        if (Date.now() - ts > 24 * 3600 * 1000) return false;
+      }
+      return true;
+    });
+  }
   const out = document.getElementById("runs");
   if (!Array.isArray(rows) || rows.length === 0) {
-    out.innerHTML = '<p class="muted">No runs yet.</p>';
+    out.innerHTML = '<p class="muted" data-i18n="No runs yet.">No runs yet.</p>';
+    MnemosUI.applyI18n(out);
     return false;
   }
   let html = '<table class="data"><thead><tr><th>ID</th><th>Status</th><th>Triggered by</th><th>Git SHA</th><th>Started</th><th>Stats</th><th></th></tr></thead><tbody>';
   for (const r of rows) {
     const stats = r.stats ? JSON.stringify(r.stats) : "";
+    // Tell webhook-driven runs apart from manual ones at a glance —
+    // the audit team flagged the missing distinction in the 3rd round.
+    const tb = String(r.triggered_by || "");
+    let badge;
+    if (tb.startsWith("webhook:")) {
+      badge = `<span class="badge webhook" title="${escapeHtml(tb)}">🔗 webhook</span>`;
+    } else if (tb.startsWith("user:")) {
+      badge = `<span class="badge user" title="${escapeHtml(tb)}">👤 ${escapeHtml(tb.slice(5, 13))}…</span>`;
+    } else {
+      badge = `<span class="badge">${escapeHtml(tb)}</span>`;
+    }
     html += `<tr>
       <td><code>${r.id}</code></td>
       <td><span class="badge ${r.status}">${r.status}</span></td>
-      <td>${r.triggered_by}</td>
-      <td>${r.git_sha}</td>
-      <td>${r.started_at || ""}</td>
-      <td><pre>${stats}</pre></td>
+      <td>${badge}</td>
+      <td><code>${escapeHtml((r.git_sha || "").slice(0, 12))}</code></td>
+      <td>${r.started_at ? `<time data-ts="${r.started_at}">${r.started_at}</time>` : ""}</td>
+      <td><pre class="code">${escapeHtml(stats)}</pre></td>
       <td><button onclick="monitorId('${r.id}')">Monitor</button></td>
     </tr>`;
   }
   html += "</tbody></table>";
   out.innerHTML = html;
+  MnemosUI.hydrateRelativeTimes(out);
   return false;
 }
 
@@ -127,6 +186,13 @@ function stopMonitor() {
   if (_sse) _sse.close();
   if (_poll) clearInterval(_poll);
   _sse = null; _poll = null;
+  // P2-8: a manual Stop clears the cross-tab strip too.
+  if (window.MnemosUI && window.MnemosUI.publishSseState) {
+    window.MnemosUI.publishSseState("idle");
+  }
+  // The in-tab badge gets hidden — no run is being watched.
+  const el = _sseStatusEl();
+  if (el) el.hidden = true;
 }
 
 async function monitor() {
@@ -138,9 +204,44 @@ async function monitor() {
   document.getElementById("pipeline").innerHTML = '<p class="muted">Waiting for stage events…</p>';
 
   await refreshStages(id);
+  await openStream(id);
+}
 
+// Re-connection state for the EventSource — kept module-scoped so a
+// second monitor() call shares the same backoff budget.
+let _sseRetryCount = 0;
+const _SSE_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
+
+function _sseStatusEl() {
+  return document.getElementById("sse-status");
+}
+function _markSseStatus(state) {
+  const el = _sseStatusEl();
+  if (el) {
+    el.hidden = false;
+    el.classList.remove("live", "disconnected");
+    el.classList.add(state);
+    el.textContent = state === "live" ? "live" : "disconnected";
+  }
+  // P2-8 — broadcast to other tabs so the cross-tab strip can
+  // mirror the in-tab badge.
+  if (window.MnemosUI && window.MnemosUI.publishSseState) {
+    window.MnemosUI.publishSseState(state);
+  }
+}
+
+async function openStream(id) {
+  // Close any prior stream so a re-open doesn't leak the previous
+  // EventSource (4th-round audit + Team B 5th-round #6).
+  if (_sse) {
+    try { _sse.close(); } catch (_) {}
+    _sse = null;
+  }
+  _markSseStatus("live");
   _sse = new EventSource(`/api/v1/analysis_runs/${id}/events`);
+
   _sse.addEventListener("progress", async (e) => {
+    _sseRetryCount = 0;  // any successful event resets backoff
     const el = document.getElementById("events");
     el.textContent += e.data + "\n";
     el.scrollTop = el.scrollHeight;
@@ -149,10 +250,76 @@ async function monitor() {
       if (ev.event && ev.event.startsWith("stage_")) {
         await refreshStages(id);
       }
+      if (ev.event === "run_failed") {
+        // PR-41 — also drop a notification so an operator who walked
+        // away from the analysis tab sees the failure on whatever
+        // page they come back to.
+        MnemosUI.notify(
+          MnemosUI.t("Analysis run failed"),
+          { body: ev.error || "(no detail)", level: "error" },
+        );
+      } else if (ev.event === "run_completed") {
+        MnemosUI.notify(
+          MnemosUI.t("Analysis run completed."),
+          { level: "success" },
+        );
+      }
     } catch {}
   });
+
+  _sse.onerror = () => {
+    _markSseStatus("disconnected");
+    // Don't churn a connection while the tab is hidden — the browser
+    // throttles us anyway and we'd just rack up failed attempts.
+    if (document.visibilityState === "hidden") {
+      return;
+    }
+    if (_sseRetryCount >= _SSE_BACKOFF_MS.length) {
+      // 6th-round audit B3: the previous "refresh to retry" message
+      // was ambiguous — full page reload vs Monitor button. Direct
+      // the operator at the Monitor button explicitly so they don't
+      // lose the run id they typed in.
+      MnemosUI.showToast(
+        MnemosUI.t(
+          "Live analysis stream disconnected after 6 retries. "
+          + "Click the Monitor button to start a fresh stream, "
+          + "or reload the page to start over."
+        ),
+        "error",
+      );
+      try { _sse.close(); } catch (_) {}
+      _sse = null;
+      return;
+    }
+    // Exponential backoff + 50% jitter — prevents a thundering herd of
+    // operators all reconnecting in the same millisecond after a
+    // worker restart.
+    const base = _SSE_BACKOFF_MS[_sseRetryCount++];
+    const delay = base * (0.5 + Math.random());
+    setTimeout(() => {
+      if (document.visibilityState === "visible") openStream(id);
+    }, delay);
+  };
+
   _poll = setInterval(() => refreshStages(id), 3000);
 }
+
+// Re-open the stream when the operator switches back to a hidden tab.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && _sse && _sse.readyState === 2) {
+    const id = document.getElementById("run-id")?.value?.trim();
+    if (id) openStream(id);
+  }
+});
+
+// Tear down the stream when the operator navigates away.
+window.addEventListener("beforeunload", () => {
+  if (_sse) {
+    try { _sse.close(); } catch (_) {}
+    _sse = null;
+  }
+  if (_poll) { clearInterval(_poll); _poll = null; }
+});
 
 async function refreshStages(id) {
   try {
@@ -192,6 +359,79 @@ function renderPipeline(stages) {
   }
   html.push('</div>');
   pipeline.innerHTML = html.join("");
+}
+
+// P2-9 onboarding auto-progression — when the operator lands here via
+// the projects-tab "Start the first analysis run →" CTA, pre-fill the
+// project ID into both forms (Trigger + Load runs) and show the
+// step-2 banner so the page makes sense without any further reading.
+(function autoOnboard() {
+  const params = new URLSearchParams(window.location.search);
+  const pid = params.get("project");
+  const onboard = params.get("onboard") === "1";
+  if (pid) {
+    const t = document.querySelector('#trigger input[name="project_id"]');
+    const rpid = document.getElementById("rpid");
+    if (t) t.value = pid;
+    if (rpid) rpid.value = pid;
+  }
+  if (onboard) {
+    const banner = document.getElementById("onboard-banner");
+    if (banner) banner.hidden = false;
+  }
+  // P2-7 drill-down — when arriving with status/since filters, the
+  // operator's intent is "show me the filtered list now". If a
+  // project id is in the URL, auto-trigger Load runs so they don't
+  // also have to click the button.
+  if (pid && (params.has("status") || params.has("since"))) {
+    const form = document.querySelector('form[onsubmit*="loadRuns"]');
+    if (form) form.dispatchEvent(new Event("submit"));
+  }
+})();
+
+// PR-58 — pipeline latency panel (audit A8).
+async function loadLatency(ev) {
+  ev && ev.preventDefault();
+  const pid = document.getElementById("lpid").value.trim();
+  if (!pid) return false;
+  const box = document.getElementById("latency-box");
+  box.innerHTML = '<div class="skeleton skeleton-card"></div>';
+  const r = await fetch(`/api/v1/projects/${pid}/pipeline_latency?runs=10`);
+  if (!r.ok) { await MnemosUI.showError("Latency load failed", r); return false; }
+  const d = await r.json();
+  if (!d.stages.length) {
+    box.innerHTML = '<p class="muted" data-i18n="No completed runs to measure yet.">No completed runs to measure yet.</p>';
+    MnemosUI.applyI18n(box);
+    return false;
+  }
+  const maxMean = Math.max(1, ...d.stages.map(s => s.mean_sec));
+  let html = `<p class="muted">`
+    + `${d.runs_analysed} ` + MnemosUI.t("runs analysed")
+    + (d.mean_total_sec != null
+        ? ` · ` + MnemosUI.t("mean total") + `: ${d.mean_total_sec}s` : "")
+    + (d.slowest_stage
+        ? ` · ` + MnemosUI.t("slowest") + `: <code>${escapeHtml(d.slowest_stage)}</code>` : "")
+    + `</p>`;
+  html += '<table class="data"><thead><tr>'
+    + '<th data-i18n="Stage">Stage</th>'
+    + '<th data-i18n="Mean (s)">Mean (s)</th>'
+    + '<th data-i18n="p95 (s)">p95 (s)</th>'
+    + '<th data-i18n="Max (s)">Max (s)</th>'
+    + '<th></th></tr></thead><tbody>';
+  for (const s of d.stages) {
+    const w = Math.round((s.mean_sec / maxMean) * 200);
+    html += `<tr>
+      <td><code>${escapeHtml(s.name)}</code></td>
+      <td>${s.mean_sec}</td>
+      <td>${s.p95_sec}</td>
+      <td>${s.max_sec}</td>
+      <td><span class="lat-bar" style="width:${w}px"></span></td>
+    </tr>`;
+  }
+  html += "</tbody></table>";
+  box.innerHTML = html;
+  MnemosUI.applyI18n(box);
+  return false;
 }
 </script>
 {% endblock %}

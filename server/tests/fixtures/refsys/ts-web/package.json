@@ -1,0 +1,6 @@
+{
+  "name": "refsys-orders-bff",
+  "version": "1.0.0",
+  "description": "Reference-system TypeScript BFF — analyzer benchmark fixture.",
+  "type": "module"
+}

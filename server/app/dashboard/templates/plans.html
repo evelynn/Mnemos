@@ -1,11 +1,11 @@
 {% extends "_layout.html" %}
 {% block title %}Plans — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>Plans (Gate A)</h1></header>
+<header class="page-head"><h1 data-i18n="Plans (Gate A)">Plans (Gate A)</h1></header>
 
 <form onsubmit="return load(event)">
-  <label>Project ID<input type="text" id="pid" required placeholder="uuid" /></label>
-  <button class="primary" type="submit">Load</button>
+  <label><span data-i18n="Project ID">Project ID</span><input type="text" id="pid" required placeholder="uuid" /></label>
+  <button class="primary" type="submit" data-i18n="Load">Load</button>
 </form>
 <div id="out"></div>
 
@@ -37,11 +37,31 @@ async function load(ev) {
         <button onclick="decide('${p.id}','approve')" class="primary">Approve</button>
         <button onclick="decide('${p.id}','reject')" class="danger">Reject</button>
       </div>
+      <div data-comment-thread data-target="${p.id}" data-mount="plan:${p.id}"></div>
     </div>`;
   }
   out.innerHTML = html;
+  setTimeout(() => {
+    document.querySelectorAll('[data-mount^="plan:"]').forEach((el) => {
+      if (el._mnemosMounted) return;
+      el._mnemosMounted = true;
+      const id = el.getAttribute("data-mount").split(":")[1];
+      MnemosUI.mountCommentThread(el, "plan", id);
+    });
+  }, 0);
   return false;
 }
+// PR-52 — accept ?project=… so the "Create plan from finding"
+// flow can deep-link straight to the new draft.
+(function () {
+  const p = new URLSearchParams(window.location.search).get("project");
+  if (p) {
+    document.getElementById("pid").value = p;
+    const form = document.querySelector('form[onsubmit*="load"]');
+    if (form) form.dispatchEvent(new Event("submit"));
+  }
+})();
+
 async function decide(id, s) {
   const feedback = s === "reject" ? prompt("Feedback?") : null;
   const r = await fetch(`/api/v1/plans/${id}/decide`, {
@@ -49,7 +69,8 @@ async function decide(id, s) {
     headers: {"content-type": "application/json"},
     body: JSON.stringify({status: s, feedback}),
   });
-  alert(await r.text());
+  if (!r.ok) { await MnemosUI.showError("Decision failed", r); return; }
+  MnemosUI.showToast("Plan decision recorded.", "success");
 }
 </script>
 {% endblock %}

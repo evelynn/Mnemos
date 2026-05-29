@@ -15,6 +15,52 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.findings import Finding
 from app.models.graph import Edge, Node
+from app.merge.risk import remediation_for, score_finding
+
+
+async def _blast_radius(
+    session: AsyncSession, project_id: uuid.UUID, subject_node_id: str | None
+) -> int:
+    """Count graph edges touching the subject node — the merge layer
+    feeds this into the risk score so a finding on a heavily-connected
+    node ranks above one on a leaf."""
+    if subject_node_id is None:
+        return 0
+    out = (
+        await session.execute(
+            select(func.count())
+            .select_from(Edge)
+            .where(
+                Edge.project_id == project_id,
+                Edge.valid_to.is_(None),
+                (Edge.source_id == subject_node_id)
+                | (Edge.target_id == subject_node_id),
+            )
+        )
+    ).scalar()
+    return int(out or 0)
+
+
+async def _subject_is_exercised(
+    session: AsyncSession, project_id: uuid.UUID, subject_node_id: str | None
+) -> bool:
+    """True iff the subject node carries the OTLP ``exercised`` flag
+    (PR-25 Tier 2). A finding on a live production path outranks one
+    on apparently-dead code."""
+    if subject_node_id is None:
+        return False
+    node = (
+        await session.execute(
+            select(Node).where(
+                Node.project_id == project_id,
+                Node.id == subject_node_id,
+                Node.valid_to.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if node is None:
+        return False
+    return str((node.data or {}).get("exercised", "")).lower() == "true"
 
 
 async def _upsert_finding(
@@ -28,6 +74,14 @@ async def _upsert_finding(
     subject_edge_id: uuid.UUID | None = None,
 ) -> None:
     now = datetime.now(tz=timezone.utc)
+    # PR-50 — compute the risk score + remediation hint at upsert
+    # time so the dashboard's risk-ordered list is always fresh.
+    blast = await _blast_radius(session, project_id, subject_node_id)
+    exercised = await _subject_is_exercised(session, project_id, subject_node_id)
+    risk = score_finding(
+        severity=severity, exercised=exercised, blast_radius=blast
+    )
+    remediation, cwe_id = remediation_for(kind)
     existing = (
         await session.execute(
             select(Finding).where(
@@ -42,6 +96,11 @@ async def _upsert_finding(
     if existing is not None:
         existing.last_seen_at = now
         existing.detail = detail
+        # Re-score on every re-scan — blast radius / exercised flag
+        # can change as the graph evolves.
+        existing.risk_score = risk
+        existing.remediation = remediation
+        existing.cwe_id = cwe_id
         return
     session.add(
         Finding(
@@ -51,6 +110,9 @@ async def _upsert_finding(
             detail=detail,
             subject_node_id=subject_node_id,
             subject_edge_id=subject_edge_id,
+            risk_score=risk,
+            remediation=remediation,
+            cwe_id=cwe_id,
         )
     )
 
@@ -300,5 +362,32 @@ async def run_all(session: AsyncSession, project_id: uuid.UUID) -> dict[str, int
         "schema_mismatches": await detect_schema_mismatches(session, project_id),
         "opaque_failing": await detect_opaque_failing_components(session, project_id),
     }
+    # PR-104 — snapshot the newly-inserted Finding instances *before*
+    # commit clears them out of ``session.new``. Existing-finding
+    # updates (the in-place last_seen_at / risk_score path above)
+    # land in ``session.dirty`` instead, so they're correctly
+    # excluded — operators only want to hear about first sightings,
+    # not "this thing is still here".
+    new_findings = [o for o in session.new if isinstance(o, Finding)]
     await session.commit()
+    if new_findings:
+        # Refresh so the notifier sees server-assigned IDs in the
+        # drill-down URL.
+        for f in new_findings:
+            try:
+                await session.refresh(f)
+            except Exception:  # noqa: BLE001
+                # A refresh failure is harmless — the notifier just
+                # gets an empty id and links to /findings root.
+                pass
+        try:
+            from app.notify.outbound import notify_new_findings
+
+            await notify_new_findings(new_findings)
+        except Exception:  # noqa: BLE001
+            # Notifier is best-effort; its own internal handler
+            # already logs + bumps a metric. Catching here too is
+            # belt-and-braces so a config error never breaks merge.
+            import logging
+            logging.getLogger(__name__).exception("notify_new_findings raised")
     return stats

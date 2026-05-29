@@ -63,6 +63,40 @@
         {"expr": "sum by (status) (increase(mnemos_analysis_runs_total[24h]))", "legendFormat": "{{status}}"}
       ],
       "datasource": {"type": "prometheus", "uid": "prometheus"}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Webhook → ARQ ingest lag (p50/p95, sec)",
+      "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8},
+      "description": "Time between receiving a GitLab push event and the analyzer subprocess starting. Watches PR-3's `_defer_by` plus queue depth.",
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum by (le) (rate(mnemos_ingest_lag_seconds_bucket[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(mnemos_ingest_lag_seconds_bucket[5m])))", "legendFormat": "p95"}
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "ProjectDBs disabled by re-probe (24h)",
+      "gridPos": {"x": 12, "y": 16, "w": 6, "h": 8},
+      "description": "PR-4 daily probe sweep marks bindings whose credentials lost their read-only character.",
+      "targets": [
+        {"expr": "max(mnemos_project_db_disabled_total)"}
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Cron advisory-lock contention (1h)",
+      "gridPos": {"x": 18, "y": 16, "w": 6, "h": 8},
+      "description": "How often a worker tried to run a cron entry and lost the pg_try_advisory_lock race. Sustained non-zero values mean the multi-worker leader story is working as intended.",
+      "targets": [
+        {"expr": "sum(increase(mnemos_cron_lock_lost_total[1h]))"}
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"}
     }
   ]
 }

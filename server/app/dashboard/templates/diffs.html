@@ -1,22 +1,92 @@
 {% extends "_layout.html" %}
 {% block title %}Diffs — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head"><h1>Diffs (Gate B)</h1></header>
+<header class="page-head"><h1 data-i18n="Diffs (Gate B)">Diffs (Gate B)</h1></header>
 
 <section class="hint">
   <p class="muted">
-    Every submission runs through a multi-pass review (rules →
-    contracts → data_access → impact → second_opinion → validator).
-    Critical findings block approval until an operator files an override
-    with a written rationale (audited). Philosophy: <code>docs/ultrareview.md</code>.
+    Every submission runs through a multi-pass <span data-tip="Multi-pass safety review: a 6-stage pipeline (rules, contracts, data_access, impact, second_opinion, validator) that classifies each diff as clean / warn / blocked. See docs/ultrareview.md.">ultrareview</span>
+    (rules → contracts → data_access → impact → second_opinion →
+    validator). Critical findings block approval. To clear a block
+    an admin first requests a <span data-tip="A single-use 15-minute token an admin issues when ultrareview blocks an otherwise-justified diff. The token must be consumed by a different operator (two-eyes review). Audit-logged from issue to consumption.">break-glass grant</span>
+    (which re-runs the pipeline and is refused while still blocked),
+    then a different user approves with the returned token
+    (initiator ≠ approver, 15-min TTL, single use).
+    Philosophy: <code>docs/ultrareview.md</code>.
   </p>
 </section>
 
 <form onsubmit="return load(event)">
-  <label>Plan ID<input type="text" id="pid" required placeholder="uuid" /></label>
-  <button class="primary" type="submit">Load submissions</button>
+  <label><span data-i18n="Plan ID">Plan ID</span><input type="text" id="pid" required placeholder="uuid" /></label>
+  <button class="primary" type="submit" data-i18n="Load submissions">Load submissions</button>
 </form>
 <div id="out"></div>
+
+<dialog id="grant-dialog" class="modal" aria-labelledby="grant-title">
+  <header><h2 id="grant-title">Issue break-glass grant</h2></header>
+  <div class="body">
+    <p class="muted">
+      Ultrareview will be re-run on the current diff. If the verdict is still
+      <strong>blocked</strong> the grant will be refused. The rationale is
+      stored verbatim in the audit log.
+    </p>
+    <label for="grant-rationale">Rationale (≥ 200 chars)</label>
+    <textarea id="grant-rationale" required minlength="200" aria-invalid="true" autofocus></textarea>
+    <p id="grant-counter" class="counter">0 / 200 chars</p>
+  </div>
+  <menu>
+    <button type="button" onclick="MnemosUI.closeDialog('grant-dialog')">Cancel</button>
+    <button type="button" id="grant-submit" class="primary" onclick="submitGrant()" disabled>Issue grant</button>
+  </menu>
+</dialog>
+
+<dialog id="token-dialog" class="modal" aria-labelledby="token-title" onclose="dismissTokenDialog()">
+  <header><h2 id="token-title">Break-glass token issued</h2></header>
+  <div class="body">
+    <p class="muted">
+      Hand the <strong>token</strong> to a different operator out-of-band
+      (Slack DM, voice call, etc). Send the <strong>share link</strong>
+      separately — clicking it opens the approve dialog with the right
+      submission already loaded. Expires in
+      <strong class="countdown" id="token-countdown">15:00</strong>.
+      Single-use. The initiator (you) cannot consume it.
+    </p>
+
+    <label class="muted">Token (carries authority — copy via secure channel)</label>
+    <div class="token-block">
+      <code id="token-value"></code>
+      <button type="button" class="primary" onclick="copyTokenToClipboard()">Copy</button>
+    </div>
+
+    <label class="muted" style="margin-top:0.8rem; display:block;">Share link (no authority — only loads the right form)</label>
+    <div class="token-block">
+      <input id="share-url" type="text" readonly aria-label="Shareable break-glass token URL" />
+      <button type="button" onclick="copyShareUrl()">Copy link</button>
+    </div>
+    <p class="muted" style="font-size:0.8rem; margin:0.3rem 0 0;">
+      The link contains the submission id and a 6-char grant fingerprint
+      in the URL fragment, so it never reaches the server access log.
+      Clear your browser history after the operator confirms.
+    </p>
+  </div>
+  <menu>
+    <button type="button" onclick="dismissTokenDialog()">Close</button>
+  </menu>
+</dialog>
+
+<dialog id="approve-dialog" class="modal" aria-labelledby="approve-title">
+  <header><h2 id="approve-title">Approve with break-glass token</h2></header>
+  <div class="body">
+    <p class="muted">Paste the token an admin issued for this submission.</p>
+    <label for="approve-token">Token</label>
+    <input id="approve-token" type="text" autocomplete="off" spellcheck="false"
+           oninput="this.value = this.value.trim()" />
+  </div>
+  <menu>
+    <button type="button" onclick="MnemosUI.closeDialog('approve-dialog')">Cancel</button>
+    <button type="button" class="primary" onclick="submitApprove()">Approve → MR</button>
+  </menu>
+</dialog>
 
 <style>
 .submission { border: 1px solid #d0d7de; border-radius: 6px; padding: 0.75rem; margin-bottom: 1rem; background: #fff; }
@@ -47,7 +117,31 @@ async function load(ev) {
     return false;
   }
   out.innerHTML = rows.map(renderSubmission).join("");
+  // PR-106 — gate the dynamically-rendered action buttons too.
+  // The Approve / Reject buttons need operator role; without
+  // re-gating after innerHTML, a viewer would click and 403.
+  MnemosUI.gateByRole(out);
+  setTimeout(mountSubmissionComments, 0);
   return false;
+}
+
+// P2-7 dashboard drill-down — when arriving via the "Break-glass
+// active" stat card we don't have a plan id, so fall back to the
+// org-scoped feed at /api/v1/diff_submissions?verdict=blocked.
+async function loadFiltered(verdict) {
+  const r = await fetch(`/api/v1/diff_submissions?verdict=${encodeURIComponent(verdict)}`);
+  const rows = r.ok ? await r.json() : [];
+  const out = document.getElementById("out");
+  if (!rows.length) {
+    out.innerHTML = `<p class="muted">No ${escapeHtml(verdict)} submissions in your organisation.</p>`;
+    return;
+  }
+  out.innerHTML = rows.map(renderSubmission).join("");
+  // PR-106 — gate the dynamically-rendered action buttons too.
+  // The Approve / Reject buttons need operator role; without
+  // re-gating after innerHTML, a viewer would click and 403.
+  MnemosUI.gateByRole(out);
+  setTimeout(mountSubmissionComments, 0);
 }
 
 function renderSubmission(s) {
@@ -63,7 +157,7 @@ function renderSubmission(s) {
     </details>`;
   }
   const mrBadge = s.gitlab_mr_url ? `<p><a href="${s.gitlab_mr_url}" target="_blank">MR !${s.gitlab_mr_iid}</a></p>` : "";
-  const overrideHint = verdict === "blocked" ? " — approve requires override + rationale" : "";
+  const overrideHint = verdict === "blocked" ? " — needs break-glass grant" : "";
   return `<section class="submission">
     <h3>
       <span>Task ${s.task_id} <span class="muted">${s.status}</span></span>
@@ -73,10 +167,24 @@ function renderSubmission(s) {
     ${passHtml}
     ${mrBadge}
     <div class="actions">
-      <button class="primary" onclick="approve('${s.id}', ${verdict === 'blocked'})">${verdict === 'blocked' ? 'Override + approve' : 'Approve → MR'}</button>
-      <button class="danger" onclick="reject('${s.id}')">Reject</button>
+      ${verdict === 'blocked' && window.MNEMOS_USER_ROLE_HINT === 'admin' ? `<button onclick="issueGrant('${s.id}')">Issue break-glass grant (admin)</button>` : ""}
+      <button class="primary" data-required-role="operator" onclick="approve('${s.id}', ${verdict === 'blocked'})">${verdict === 'blocked' ? 'Approve with token' : 'Approve → MR'}</button>
+      <button class="danger" data-required-role="operator" onclick="reject('${s.id}')">Reject</button>
     </div>
+    <div data-comment-thread data-target="${s.id}" data-mount="diff_submission:${s.id}"></div>
   </section>`;
+}
+
+// PR-45 — mount the comment thread on every submission card after
+// the parent ``out`` has been rendered. We wait one tick so the
+// DOM nodes the helper looks for are in place.
+function mountSubmissionComments() {
+  document.querySelectorAll('[data-mount^="diff_submission:"]').forEach((el) => {
+    if (el._mnemosMounted) return;
+    el._mnemosMounted = true;
+    const id = el.getAttribute("data-mount").split(":")[1];
+    MnemosUI.mountCommentThread(el, "diff_submission", id);
+  });
 }
 
 function renderFinding(f) {
@@ -90,26 +198,199 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
 }
 
-async function approve(id, blocked) {
-  let body = {};
-  if (blocked) {
-    const rationale = prompt("Override rationale (≥20 chars):");
-    if (!rationale || rationale.length < 20) {
-      alert("Rationale must be at least 20 characters.");
-      return;
-    }
-    body = {override: true, rationale};
+let pendingGrantId = null;
+let pendingApproveId = null;
+let countdownTimer = null;
+let grantCounterBound = false;
+
+function bindGrantCounterOnce() {
+  if (grantCounterBound) return;
+  grantCounterBound = true;
+  // IME-safe counter: refreshes during Korean/Japanese composition so
+  // the user sees the count move, but only enables submit on
+  // compositionend (with a 300ms input fallback). See ui.js.
+  MnemosUI.bindRationaleCounter(
+    document.getElementById("grant-rationale"),
+    document.getElementById("grant-counter"),
+    document.getElementById("grant-submit"),
+    200,
+  );
+}
+
+function issueGrant(id) {
+  pendingGrantId = id;
+  const ta = document.getElementById("grant-rationale");
+  ta.value = "";
+  bindGrantCounterOnce();
+  MnemosUI.showDialog("grant-dialog");
+  // <textarea autofocus> handles initial focus; no setTimeout race.
+}
+
+async function submitGrant() {
+  const ta = document.getElementById("grant-rationale");
+  const rationale = ta.value;
+  if (rationale.length < 200) {
+    MnemosUI.showToast("Rationale must be at least 200 characters.", "warn");
+    return;
   }
+  const r = await fetch(`/api/v1/diff_submissions/${pendingGrantId}/break_glass_grant`, {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({rationale}),
+  });
+  if (!r.ok) {
+    await MnemosUI.showError("Grant refused", r);
+    return;
+  }
+  const payload = await r.json();
+  MnemosUI.closeDialog("grant-dialog");
+  showTokenDialog(payload);
+}
+
+function showTokenDialog(payload) {
+  document.getElementById("token-value").textContent = payload.token;
+  // Build the share URL — token NOT included. The fragment carries
+  // only the ids needed to land the operator on the right approve
+  // dialog; the token still travels OOB.
+  const sc = payload.share_context || {};
+  if (sc.submission_id) {
+    const u = new URL(window.location.href);
+    u.hash = `approve=${sc.submission_id}&plan=${sc.plan_id}&g=${sc.grant_id_short}`;
+    u.search = ""; // strip any query params that may be present
+    document.getElementById("share-url").value = u.toString();
+  }
+  // Anchor the countdown against the server clock from `payload.server_now`
+  // (PR-11 added that field). A laptop clock that drifts 5 minutes no
+  // longer makes the dialog lie about how much time is left.
+  const clock = MnemosUI.clockOffsetFromPayload(payload);
+  const expiresAtClientMs = clock.toClientMs(payload.expires_at);
+  const tick = () => {
+    const remaining = Math.max(0, Math.floor((expiresAtClientMs - Date.now()) / 1000));
+    const m = String(Math.floor(remaining / 60)).padStart(2, "0");
+    const s = String(remaining % 60).padStart(2, "0");
+    document.getElementById("token-countdown").textContent = `${m}:${s}`;
+    if (remaining === 0) {
+      MnemosUI.closeDialog("token-dialog");
+      MnemosUI.showToast("Break-glass token expired.", "warn");
+      // dialog `onclose` fires dismissTokenDialog which clears the timer.
+    }
+  };
+  tick();
+  countdownTimer = setInterval(tick, 1000);
+  MnemosUI.showDialog("token-dialog");
+}
+
+async function copyTokenToClipboard() {
+  const token = document.getElementById("token-value").textContent;
+  const ok = await MnemosUI.copyToClipboard(token);
+  if (ok) {
+    MnemosUI.showToast("Token copied to clipboard.", "success");
+  } else {
+    MnemosUI.showToast("Copy failed — select the token manually and copy with Ctrl/Cmd-C.", "warn");
+  }
+}
+
+async function copyShareUrl() {
+  const url = document.getElementById("share-url").value;
+  if (!url) return;
+  const ok = await MnemosUI.copyToClipboard(url);
+  MnemosUI.showToast(
+    ok ? "Share link copied." : "Copy failed — select the URL manually.",
+    ok ? "success" : "warn",
+  );
+}
+
+// Hash router — when the operator visits a share link like
+// `/diffs#approve=<sid>&plan=<pid>`, auto-load the matching plan and
+// pre-fill the approve dialog with the submission id. Only the *token*
+// field is left empty; the operator pastes that in from the OOB channel.
+async function maybeAutoLoadFromHash() {
+  if (!window.location.hash) return;
+  const hash = window.location.hash.slice(1);
+  const params = new URLSearchParams(hash);
+  const sid = params.get("approve");
+  const pid = params.get("plan");
+  if (!sid || !pid) return;
+  const pidInput = document.getElementById("pid");
+  if (pidInput) {
+    pidInput.value = pid;
+    // Trigger the existing load() flow so submissions render.
+    await load(new Event("submit"));
+  }
+  // Now open the approve dialog for that submission.
+  pendingApproveId = sid;
+  document.getElementById("approve-token").value = "";
+  MnemosUI.showDialog("approve-dialog");
+  MnemosUI.showToast(
+    `Loaded shared approval context (submission ${sid.slice(0,8)}…). Paste the token from the OOB channel.`,
+    "success",
+  );
+}
+
+document.addEventListener("DOMContentLoaded", maybeAutoLoadFromHash);
+
+// P2-7 — ``?filter=blocked`` from the dashboard stat-card triggers
+// the org-wide feed instead of the plan-scoped one.
+document.addEventListener("DOMContentLoaded", () => {
+  const verdict = new URLSearchParams(window.location.search).get("filter");
+  if (verdict === "blocked" || verdict === "warn" || verdict === "clean") {
+    loadFiltered(verdict);
+  }
+});
+
+function dismissTokenDialog() {
+  // Called both from the explicit "Close" button and from the dialog's
+  // native ``onclose`` (ESC key, backdrop click). Idempotent so a
+  // user pressing Close on an already-expired dialog doesn't double-fire.
+  if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+  // Avoid calling .close() if the dialog is already closed (would throw).
+  const d = document.getElementById("token-dialog");
+  if (d && d.open) d.close();
+}
+
+function approve(id, blocked) {
+  if (!blocked) {
+    submitApprove(id, null);
+    return;
+  }
+  pendingApproveId = id;
+  document.getElementById("approve-token").value = "";
+  MnemosUI.showDialog("approve-dialog");
+  setTimeout(() => document.getElementById("approve-token").focus(), 50);
+}
+
+async function submitApprove() {
+  const token = document.getElementById("approve-token").value.trim();
+  if (!token) {
+    MnemosUI.showToast("Paste the break-glass token first.", "warn");
+    return;
+  }
+  MnemosUI.closeDialog("approve-dialog");
+  await submitApproveRaw(pendingApproveId, token);
+}
+
+async function submitApproveRaw(id, token) {
+  const body = token ? {break_glass_token: token} : {};
   const r = await fetch(`/api/v1/diff_submissions/${id}/approve`, {
     method: "POST",
     headers: {"content-type": "application/json"},
     body: JSON.stringify(body),
   });
-  alert(await r.text());
+  if (!r.ok) {
+    await MnemosUI.showError("Approve failed", r);
+    return;
+  }
+  MnemosUI.showToast("Approved — GitLab MR created.", "success");
 }
+
+function submitApproveNoToken(id) { return submitApproveRaw(id, null); }
 async function reject(id) {
   const r = await fetch(`/api/v1/diff_submissions/${id}/reject`, {method: "POST"});
-  alert(await r.text());
+  if (!r.ok) {
+    await MnemosUI.showError("Reject failed", r);
+    return;
+  }
+  MnemosUI.showToast("Submission rejected.", "success");
 }
 </script>
 {% endblock %}

@@ -24,11 +24,28 @@ class Finding(Base):
         UUID(as_uuid=True), nullable=True
     )
     detail: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # PR-50 — solution-analysis columns. The 19th-round value audit
+    # found findings were "observations, not decisions": severity was
+    # a static 3-level string with no business-priority ordering and
+    # no fix guidance. These columns turn a finding into something
+    # an operator can triage and act on.
+    #
+    # ``risk_score`` 0-100 — computed by app.merge.risk from severity ×
+    # whether the subject is exercised in production × blast radius.
+    # ``remediation`` — a deterministic fix hint keyed off ``kind``.
+    # ``cwe_id`` — the CWE catalogue entry where one applies, so a
+    # finding can be cross-referenced against a compliance matrix.
+    risk_score: Mapped[int] = mapped_column(nullable=False, default=0)
+    remediation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cwe_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     last_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    acknowledged_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     resolved_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True

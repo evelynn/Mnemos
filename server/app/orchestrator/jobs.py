@@ -26,6 +26,7 @@ from app.extractor.agent import Extractor
 from app.extractor.runner import summarise_l1, summarise_l2, summarise_l3
 from app.merge.contract_id import http_contract_id
 from app.merge.findings import run_all as rebuild_findings
+from app.merge.runtime import reconcile_observations
 from app.merge.writer import upsert_edge, upsert_node
 from app.models.graph import AnalysisRun
 from app.models.projects import Project
@@ -148,7 +149,10 @@ _VERB_ACCEPT = {
     "symbols": {"symbol", "data_entity"},
     "contracts": {"contract", "edge"},
     "calls": {"edge"},
-    "data_access": {"edge"},
+    # data_access emits the logical DataEntity nodes it discovered in
+    # source (e.g. a table named in raw SQL) alongside the READS /
+    # WRITES edges to them.
+    "data_access": {"edge", "data_entity"},
     "live_schema": {"data_entity"},
 }
 
@@ -338,6 +342,26 @@ async def run_ingest(
         ).scalar_one_or_none()
         if project is None:
             return
+        # Observe ingest lag — gap between AnalysisRun row creation
+        # (queued by webhook or `/analyze`) and worker pickup. Spec §2.7
+        # cares about end-to-end freshness; this is the single most
+        # actionable latency metric.
+        run_row = (
+            await session.execute(select(AnalysisRun).where(AnalysisRun.id == run_id))
+        ).scalar_one_or_none()
+        if run_row is not None and run_row.created_at is not None:
+            from app.obs.metrics import ingest_lag_seconds
+
+            created_aware = run_row.created_at
+            if created_aware.tzinfo is None:
+                created_aware = created_aware.replace(tzinfo=timezone.utc)
+            lag = (now - created_aware).total_seconds()
+            source = (
+                "webhook"
+                if (run_row.triggered_by or "").startswith("webhook:")
+                else "api"
+            )
+            ingest_lag_seconds.labels(source=source).observe(max(0.0, lag))
         await _set_run_status(session, run_id, status="running", started_at=now)
 
     await bus.publish(run_id, {"event": "run_started", "at": now.isoformat()})
@@ -379,7 +403,29 @@ async def run_ingest(
             ) as stage:
                 async with SessionLocal() as session:
                     finding_stats = await rebuild_findings(session, project_id)
-                totals["findings"] = sum(finding_stats.values())
+                    # OTLP Tier 2 reconcile hook (P2-1) — replay
+                    # buffered runtime observations against the freshly
+                    # rebuilt edge set. Best-effort: a reconcile failure
+                    # must not fail the analysis run, since the buffer
+                    # is replayed next time around anyway.
+                    try:
+                        from app.models.projects import Project as _Project
+
+                        proj_row = await session.get(_Project, project_id)
+                        if proj_row is not None:
+                            recon = await reconcile_observations(
+                                session,
+                                project_id=project_id,
+                                organization_id=proj_row.organization_id,
+                            )
+                            finding_stats["runtime_matched"] = recon["matched"]
+                            finding_stats["runtime_unmatched"] = recon["unmatched"]
+                            await session.commit()
+                    except Exception:
+                        await session.rollback()
+                totals["findings"] = sum(
+                    v for v in finding_stats.values() if isinstance(v, int)
+                )
                 for _ in range(totals["findings"]):
                     await stage.increment()
                 stage.set_stats(finding_stats)
@@ -491,9 +537,33 @@ async def _shutdown(ctx: dict) -> None:
 
 
 class WorkerSettings:
-    """Reference configuration for ``arq server.app.orchestrator.jobs.WorkerSettings``."""
+    """Reference configuration for ``arq server.app.orchestrator.jobs.WorkerSettings``.
+
+    ``cron_jobs`` runs the periodic background work introduced in PR-4:
+    ``break_glass_expiry`` every 5 minutes, ``probe_recheck`` and
+    ``retention_purge`` once a day. Multi-worker deployments stay safe
+    because each entry holds a Postgres advisory lock for the duration
+    of its run — losers no-op.
+    """
+    from arq.cron import cron  # imported here so importing this module
+    # does not require arq when only the job functions are needed.
+
+    from app.orchestrator.cron_jobs import (
+        run_break_glass_expiry,
+        run_probe_recheck,
+        run_reset_stale_runs,
+        run_retention_purge,
+    )
 
     functions = [run_ingest]
+    cron_jobs = [
+        cron(run_break_glass_expiry, minute=set(range(0, 60, 5))),
+        cron(run_probe_recheck, hour={3}, minute={0}),
+        cron(run_retention_purge, hour={4}, minute={0}),
+        # Every 15 minutes so a wedged run doesn't sit in the GUI
+        # for half a day before the operator notices.
+        cron(run_reset_stale_runs, minute=set(range(0, 60, 15))),
+    ]
     on_startup = _startup
     on_shutdown = _shutdown
     redis_settings = None  # populated at runtime from get_settings().redis_url

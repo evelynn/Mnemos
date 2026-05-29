@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +24,13 @@ from app.db import get_session
 from app.models.auth import User
 from app.models.graph import Node
 from app.models.samples import DataQueryLog, DataSample
+from app.safety.dialects import SUPPORTED_DIALECTS, is_supported
 from app.safety.ratelimit import actor_key, enforce as rl_enforce
+from app.safety.sql_limit import (
+    DEFAULT_MAX_ROWS,
+    WriteStatementBlocked,
+    enforce_limit,
+)
 
 router = APIRouter(
     prefix="/api/v1/projects/{project_id}/data_entities",
@@ -240,6 +246,51 @@ async def refresh_sample(
     }
 
 
+query_log_router = APIRouter(
+    tags=["data"],
+    dependencies=[Depends(require_project_org())],
+)
+
+
+@query_log_router.get("/api/v1/projects/{project_id}/data_query_log")
+async def list_data_query_log(
+    project_id: uuid.UUID,
+    _: CurrentUser,
+    limit: int = 50,
+    db: AsyncSession = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """Spec §13.2: ``GET /api/v1/projects/{id}/data_query_log``.
+
+    The audit reviewer flagged this endpoint as spec'd but absent.
+    Returns the project's recorded ``data.query`` runs newest first —
+    SQL, purpose, requester, row count, execution time, error. The
+    ``DataQueryLog`` rows already exist; this is the read surface.
+    """
+    limit = max(1, min(limit, 500))
+    rows = (
+        await db.execute(
+            select(DataQueryLog)
+            .where(DataQueryLog.project_id == project_id)
+            .order_by(DataQueryLog.executed_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return [
+        {
+            "id": str(r.id),
+            "db_component_id": r.db_component_id,
+            "sql": r.sql,
+            "purpose": r.purpose,
+            "requester": r.requester,
+            "row_count": r.row_count,
+            "execution_ms": r.execution_ms,
+            "error": r.error,
+            "executed_at": r.executed_at.isoformat(),
+        }
+        for r in rows
+    ]
+
+
 query_router = APIRouter(
     prefix="/api/v1/projects/{project_id}/data",
     tags=["data"],
@@ -254,6 +305,17 @@ class QueryRequest(BaseModel):
     sql: str
     purpose: str = Field(min_length=3)
     execution_ms: int | None = None
+    max_rows: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Operator-supplied row cap. Values above the platform max "
+            "(10 000) are silently clamped and the response carries a "
+            "Warning header (RFC 7234) so the operator can see what we "
+            "trimmed. The analyzer honours the same cap via "
+            "MNEMOS_MAX_ROWS on its fetchmany loop."
+        ),
+    )
 
 
 @query_router.post("/query")
@@ -261,6 +323,7 @@ async def query_data(
     project_id: uuid.UUID,
     body: QueryRequest,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_session),
     user: User = Depends(require_operator),
 ) -> dict[str, Any]:
@@ -274,14 +337,76 @@ async def query_data(
     # production DBs, so even operators need a ceiling.
     request.state.user = user
     await rl_enforce(actor_key(request, "data.query"), limit=30, window_sec=60)
-    if not body.sql.strip().lower().startswith("select"):
-        raise HTTPException(status_code=400, detail="only_select_allowed")
+
+    # AST-level write block + row-cap (spec §2.8). Regex "starts-with-SELECT"
+    # is not sufficient — a `WITH cte AS (UPDATE ...) SELECT ...` form
+    # is a SELECT shell over a write statement.
+    pdb_for_dialect = await resolve_project_db(db, project_id, body.db_component_id)
+    if pdb_for_dialect is None or not is_supported(pdb_for_dialect.kind):
+        # Refuse to guess a dialect for an unbound or unknown kind.
+        # The previous fallback to postgres would silently mis-parse
+        # MSSQL ``TOP`` / Oracle ``FETCH FIRST`` quirks.
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "db_component_unbound_or_unsupported",
+                "component_id": body.db_component_id,
+                "supported": sorted(SUPPORTED_DIALECTS),
+            },
+        )
+
+    # Clamp the operator-supplied max_rows instead of refusing (Team B
+    # critique 1.3: UX-driven choice, audit trail tells the truth).
+    requested = body.max_rows or DEFAULT_MAX_ROWS
+    effective_cap = min(requested, DEFAULT_MAX_ROWS)
+    cap_clamped = requested > DEFAULT_MAX_ROWS
+    if cap_clamped:
+        # RFC 7234 §5.5 — Warning: 299 from a non-cache agent communicates
+        # a transformation the operator should know about.
+        response.headers["Warning"] = (
+            f'299 - "max_rows clamped from {requested} to {DEFAULT_MAX_ROWS}"'
+        )
+
+    try:
+        enforced = enforce_limit(
+            body.sql,
+            dialect=pdb_for_dialect.kind,
+            max_rows=effective_cap,
+        )
+    except WriteStatementBlocked as exc:
+        await audit_record(
+            actor=f"user:{user.id}",
+            action="data.write_blocked",
+            target=body.db_component_id,
+            project_id=project_id,
+            details={"kind": exc.kind, "purpose": body.purpose},
+        )
+        raise HTTPException(status_code=400, detail=f"write_blocked:{exc.kind}")
+    except Exception as exc:  # sqlglot.ParseError and friends
+        # Surface a structured detail so the dashboard can render a
+        # friendlier error than the raw sqlglot exception string —
+        # 4th-round audit (scenario 2 / C3).
+        detail = {
+            "code": "sql_parse_failed",
+            "message": (
+                "The SQL could not be parsed as a read-only SELECT. "
+                "Common causes: missing FROM clause, dialect mismatch, "
+                "or a write keyword that slipped through (INSERT/UPDATE/"
+                "DELETE/MERGE)."
+            ),
+            "parser_error": str(exc)[:300],
+        }
+        raise HTTPException(status_code=400, detail=detail)
 
     # Per-project-DB policy: block sensitive tables, enforce AWR consent
     # and maintenance windows, and apply masking overrides
     # (spec §7.4, §12.2, §14.2). No row means the platform falls back to
     # defaults — operators are expected to register DBs before first use.
-    pdb = await resolve_project_db(db, project_id, body.db_component_id)
+    # We reuse the lookup we already did to choose a parse dialect; the
+    # row enforces project-DB policy too.
+    pdb = pdb_for_dialect
+    if pdb is not None and pdb.disabled_at is not None:
+        raise HTTPException(status_code=423, detail="project_db_disabled")
     engine: MaskingEngine | None = None
     awr_needed = requires_awr(body.sql)
     try:
@@ -301,6 +426,12 @@ async def query_data(
 
     masked_rows, _flags, any_masked = mask_rows(body.columns, body.rows, engine)
 
+    # The analyzer is contractually capped at ``effective_limit`` rows
+    # but we double-check here so the platform never serves more than
+    # promised even if an older analyzer ignored the cap.
+    if len(masked_rows) > enforced.effective_limit:
+        masked_rows = masked_rows[: enforced.effective_limit]
+
     log = DataQueryLog(
         project_id=project_id,
         db_component_id=body.db_component_id,
@@ -317,7 +448,13 @@ async def query_data(
         action="data.query",
         target=body.db_component_id,
         project_id=project_id,
-        details={"purpose": body.purpose, "rows": len(masked_rows)},
+        details={
+            "purpose": body.purpose,
+            "rows": len(masked_rows),
+            "limit_clamp": enforced.clamp,
+            "original_limit": enforced.original_limit,
+            "effective_limit": enforced.effective_limit,
+        },
     )
     return {
         "columns": body.columns,
@@ -326,4 +463,8 @@ async def query_data(
         "execution_ms": body.execution_ms,
         "masking_applied": any_masked,
         "executed_at": datetime.utcnow(),
+        "limit_clamp": enforced.clamp,
+        "original_limit": enforced.original_limit,
+        "effective_limit": enforced.effective_limit,
+        "rewritten_sql": enforced.sql,
     }

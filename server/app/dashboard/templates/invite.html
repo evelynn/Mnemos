@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Accept invite — Mnemos{% endblock %}
+{% block body %}
+<main class="login">
+  <h1>Mnemos</h1>
+  <p class="subtitle" data-i18n="Accept invite">Accept invite</p>
+  <p class="muted" data-i18n="Choose a username and password to finish setting up your account.">
+    Choose a username and password to finish setting up your account.
+  </p>
+  <form id="invite-form" class="login-form" onsubmit="return acceptInvite(event)">
+    <label>
+      <span data-i18n="Username">Username</span>
+      <input type="text" id="i-username" pattern="[a-zA-Z0-9_.\-]{2,64}" required autocomplete="username" />
+    </label>
+    <label>
+      <span data-i18n="Display name">Display name</span>
+      <input type="text" id="i-display" maxlength="200" />
+    </label>
+    <label>
+      <span data-i18n="Password">Password</span>
+      <input type="password" id="i-password" required minlength="12" autocomplete="new-password" />
+    </label>
+    <button type="submit" class="primary" data-i18n="Create account">Create account</button>
+  </form>
+  <p id="invite-result" class="muted" hidden></p>
+</main>
+<script>
+function _getTokenFromHash() {
+  const h = (window.location.hash || "").replace(/^#/, "");
+  return new URLSearchParams(h).get("token") || "";
+}
+async function acceptInvite(ev) {
+  ev.preventDefault();
+  const token = _getTokenFromHash();
+  if (!token) {
+    MnemosUI.showToast(MnemosUI.t("Invite token is missing from the URL."), "error");
+    return false;
+  }
+  const r = await fetch("/api/v1/invites/accept", {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({
+      token: token,
+      username: document.getElementById("i-username").value.trim(),
+      display_name: document.getElementById("i-display").value.trim() || null,
+      password: document.getElementById("i-password").value,
+    }),
+  });
+  const out = document.getElementById("invite-result");
+  out.hidden = false;
+  if (r.ok) {
+    out.setAttribute("data-i18n", "Account created. Redirecting to sign in…");
+    out.textContent = "Account created. Redirecting to sign in…";
+    MnemosUI.applyI18n(out);
+    setTimeout(() => { window.location.href = "/login"; }, 1200);
+  } else {
+    const body = await r.json().catch(() => ({}));
+    out.textContent = body.detail || "Invite acceptance failed.";
+  }
+  return false;
+}
+</script>
+{% endblock %}

@@ -1,32 +1,203 @@
 {% extends "base.html" %}
 {% block body %}
+<script>
+  // UX-only hint — the server enforces authorisation on every
+  // admin-only endpoint with `require_admin`. Client-side this just
+  // hides buttons that would 403 anyway, so a viewer doesn't see a
+  // button labelled "(admin)" and click it just to be told no.
+  // Team B 5th-round must-fix #7 (variable rename) + comment.
+  window.MNEMOS_USER_ROLE_HINT = "{{ user.role }}";
+</script>
+<div id="sse-cross-tab-strip" hidden role="status" aria-live="polite">
+  <span class="sse-status disconnected"></span>
+  <span class="sse-strip-text" data-i18n="Analysis stream disconnected — open the Analysis tab to reconnect.">Analysis stream disconnected — open the Analysis tab to reconnect.</span>
+</div>
+<button class="menu-toggle" id="menu-toggle" aria-label="Toggle navigation"
+        aria-controls="sidebar" aria-expanded="false">☰</button>
 <div class="layout">
-  <aside class="sidebar">
-    <div class="brand">Mnemos</div>
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <div class="brand">
+        <svg class="brand-logo" xmlns="http://www.w3.org/2000/svg"
+             width="24" height="24" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <!-- "M" knot: two strokes meeting at a sealed knowledge graph -->
+          <path d="M4 19V6l4 6 4-6 4 6 4-6v13" />
+          <circle cx="12" cy="14" r="1.6" fill="currentColor" />
+        </svg>
+        <span class="brand-name">Mnemos</span>
+      </div>
+      <div class="notif-wrap">
+        <button type="button" id="notif-bell" class="notif-bell"
+                aria-label="Notifications" aria-haspopup="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round"
+                  d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0"/>
+          </svg>
+          <span id="notif-badge" class="notif-badge" hidden>0</span>
+        </button>
+        <div id="notif-panel" class="notif-panel" role="dialog" aria-label="Notifications">
+          <header>
+            <strong data-i18n="Notifications">Notifications</strong>
+            <button type="button" id="notif-clear" class="link-btn" data-i18n="Clear all">Clear all</button>
+          </header>
+          <ul id="notif-list" class="notif-list"></ul>
+        </div>
+      </div>
+    </div>
     <nav>
-      <a href="/" class="{% if active_tab == 'dashboard' %}active{% endif %}">Dashboard</a>
-      <a href="/projects" class="{% if active_tab == 'projects' %}active{% endif %}">Projects</a>
-      <a href="/analysis" class="{% if active_tab == 'analysis' %}active{% endif %}">Analysis</a>
-      <a href="/data" class="{% if active_tab == 'data' %}active{% endif %}">Data</a>
-      <a href="/plans" class="{% if active_tab == 'plans' %}active{% endif %}">Plans</a>
-      <a href="/diffs" class="{% if active_tab == 'diffs' %}active{% endif %}">Diffs</a>
-      <a href="/findings" class="{% if active_tab == 'findings' %}active{% endif %}">Findings</a>
-      <a href="/audit" class="{% if active_tab == 'audit' %}active{% endif %}">Audit</a>
-      <a href="/settings" class="{% if active_tab == 'settings' %}active{% endif %}">Settings</a>
+      <a href="/" class="{% if active_tab == 'dashboard' %}active{% endif %}" data-i18n="Dashboard">Dashboard</a>
+      <a href="/projects" class="{% if active_tab == 'projects' %}active{% endif %}" data-i18n="Projects">Projects</a>
+      <a href="/analysis" class="{% if active_tab == 'analysis' %}active{% endif %}" data-i18n="Analysis">Analysis</a>
+      <a href="/data" class="{% if active_tab == 'data' %}active{% endif %}" data-i18n="Data">Data</a>
+      <a href="/graph" class="{% if active_tab == 'graph' %}active{% endif %}" data-i18n="Graph">Graph</a>
+      <a href="/plans" class="{% if active_tab == 'plans' %}active{% endif %}" data-i18n="Plans">Plans</a>
+      <a href="/diffs" class="{% if active_tab == 'diffs' %}active{% endif %}" data-i18n="Diffs">Diffs</a>
+      <a href="/findings" class="{% if active_tab == 'findings' %}active{% endif %}" data-i18n="Findings">Findings</a>
+      <a href="/report" class="{% if active_tab == 'report' %}active{% endif %}" data-i18n="Report">Report</a>
+      <a href="/audit" class="{% if active_tab == 'audit' %}active{% endif %}" data-i18n="Audit">Audit</a>
+      <a href="/profile" class="{% if active_tab == 'profile' %}active{% endif %}" data-i18n="Profile">Profile</a>
+      <a href="/settings" class="{% if active_tab == 'settings' %}active{% endif %}" data-i18n="Settings">Settings</a>
+      <a href="/health" class="{% if active_tab == 'health' %}active{% endif %}" data-i18n="Health">Health</a>
+      <a href="/docs" class="{% if active_tab == 'docs' %}active{% endif %}" data-i18n="Docs">Docs</a>
       {% if user.role == 'admin' %}
-      <div class="nav-section muted">Admin</div>
-      <a href="/organizations" class="{% if active_tab == 'organizations' %}active{% endif %}">Organizations</a>
-      <a href="/sso" class="{% if active_tab == 'sso' %}active{% endif %}">SSO / OIDC</a>
-      <a href="/gdpr" class="{% if active_tab == 'gdpr' %}active{% endif %}">GDPR tools</a>
+      <div class="nav-section muted" data-i18n="Admin">Admin</div>
+      <a href="/users" class="{% if active_tab == 'users' %}active{% endif %}" data-i18n="Users">Users</a>
+      <a href="/organizations" class="{% if active_tab == 'organizations' %}active{% endif %}" data-i18n="Organizations">Organizations</a>
+      <a href="/sso" class="{% if active_tab == 'sso' %}active{% endif %}" data-i18n="SSO / OIDC">SSO / OIDC</a>
+      <a href="/gdpr" class="{% if active_tab == 'gdpr' %}active{% endif %}" data-i18n="GDPR tools">GDPR tools</a>
       {% endif %}
     </nav>
     <form method="post" action="/logout" class="logout-form">
       <span class="muted">{{ user.username }}</span>
-      <button type="submit">Sign out</button>
+      <button type="submit" data-i18n="Sign out">Sign out</button>
     </form>
+    <div class="locale-switcher" role="group" aria-label="Language">
+      <button type="button" data-locale="en" class="locale-btn">EN</button>
+      <button type="button" data-locale="ko" class="locale-btn">한국어</button>
+    </div>
+    <div class="theme-switcher" role="group" aria-label="Theme">
+      <button type="button" data-theme-pref="light" class="theme-btn" title="Light"
+              aria-label="Light theme">☀</button>
+      <button type="button" data-theme-pref="auto" class="theme-btn" title="System default"
+              aria-label="System default theme">⌂</button>
+      <button type="button" data-theme-pref="dark" class="theme-btn" title="Dark"
+              aria-label="Dark theme">☾</button>
+    </div>
   </aside>
   <main class="content">
     {% block content %}{% endblock %}
   </main>
+  <div class="sidebar-scrim" id="sidebar-scrim"></div>
 </div>
+
+<!-- PR-42 — command palette. Opened with cmd/ctrl+K or "/" anywhere
+     on the dashboard. -->
+<div id="cmdk-overlay" class="cmdk-overlay" role="dialog"
+     aria-modal="true" aria-label="Quick navigation">
+  <div class="cmdk-modal">
+    <div class="cmdk-header">
+      <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18"
+           viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.7" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round"
+              d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/>
+      </svg>
+      <input id="cmdk-input" type="text" autocomplete="off"
+             spellcheck="false"
+             data-i18n-placeholder="Search projects, jump to a tab… (cmd/ctrl+K)"
+             placeholder="Search projects, jump to a tab… (cmd/ctrl+K)" />
+      <kbd class="cmdk-esc">Esc</kbd>
+    </div>
+    <ul id="cmdk-list" class="cmdk-list"></ul>
+    <div class="cmdk-footer muted">
+      <span><kbd>↑</kbd><kbd>↓</kbd> <span data-i18n="navigate">navigate</span></span>
+      <span><kbd>↵</kbd> <span data-i18n="open">open</span></span>
+      <span><kbd>g</kbd>+<kbd>p</kbd> <span data-i18n="go to projects">go to projects</span></span>
+    </div>
+  </div>
+</div>
+<script>
+  // P2-3 — locale switcher. Persists to localStorage and re-applies
+  // every ``data-i18n`` element on the page so the operator sees the
+  // change instantly without a reload.
+  document.addEventListener("DOMContentLoaded", function () {
+    var current = (function () {
+      try { return localStorage.getItem("mnemos_locale") || ""; } catch (_) { return ""; }
+    })();
+    var btns = document.querySelectorAll(".locale-btn");
+    for (var i = 0; i < btns.length; i++) {
+      var btn = btns[i];
+      if (btn.getAttribute("data-locale") === current) btn.classList.add("active");
+      btn.addEventListener("click", function (ev) {
+        var loc = ev.currentTarget.getAttribute("data-locale");
+        if (window.MnemosUI && window.MnemosUI.setLocale) {
+          window.MnemosUI.setLocale(loc);
+          for (var j = 0; j < btns.length; j++) btns[j].classList.remove("active");
+          ev.currentTarget.classList.add("active");
+        }
+      });
+    }
+  });
+
+  // PR-41 — mobile sidebar drawer (hamburger toggle).
+  document.addEventListener("DOMContentLoaded", function () {
+    var toggle = document.getElementById("menu-toggle");
+    var sidebar = document.getElementById("sidebar");
+    var scrim = document.getElementById("sidebar-scrim");
+    if (!toggle || !sidebar) return;
+    function setOpen(open) {
+      sidebar.classList.toggle("open", open);
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+    toggle.addEventListener("click", function () {
+      setOpen(!sidebar.classList.contains("open"));
+    });
+    if (scrim) scrim.addEventListener("click", function () { setOpen(false); });
+    // Close on any nav link click so navigating in a phone viewport
+    // doesn't leave the drawer open on top of the new page.
+    sidebar.querySelectorAll("nav a").forEach(function (a) {
+      a.addEventListener("click", function () { setOpen(false); });
+    });
+    // Esc closes the drawer (keyboard a11y).
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape" && sidebar.classList.contains("open")) {
+        setOpen(false);
+      }
+    });
+  });
+
+  // PR-40 — theme switcher: light / auto (= system) / dark.
+  document.addEventListener("DOMContentLoaded", function () {
+    var stored = (function () {
+      try { return localStorage.getItem("mnemos_theme") || "auto"; } catch (_) { return "auto"; }
+    })();
+    var btns = document.querySelectorAll(".theme-btn");
+    function markActive(pref) {
+      for (var i = 0; i < btns.length; i++) {
+        btns[i].classList.toggle("active",
+          btns[i].getAttribute("data-theme-pref") === pref);
+      }
+    }
+    markActive(stored);
+
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener("click", function (ev) {
+        var pref = ev.currentTarget.getAttribute("data-theme-pref");
+        try {
+          if (pref === "auto") {
+            localStorage.removeItem("mnemos_theme");
+            document.documentElement.removeAttribute("data-theme");
+          } else {
+            localStorage.setItem("mnemos_theme", pref);
+            document.documentElement.setAttribute("data-theme", pref);
+          }
+        } catch (_) {}
+        markActive(pref);
+      });
+    }
+  });
+</script>
 {% endblock %}

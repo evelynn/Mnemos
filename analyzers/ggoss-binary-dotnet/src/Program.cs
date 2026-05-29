@@ -120,7 +120,10 @@ static int Symbols(string[] args)
                     signature = method.FullName,
                     location = (object?)null,
                     visibility = "public",
-                    is_entry_point = method.IsConstructor,
+                    // is_entry_point used to alias IsConstructor (every
+                    // ctor was wrongly flagged the assembly entry). The
+                    // assembly entry point is asm.MainModule.EntryPoint.
+                    is_entry_point = ReferenceEquals(method, asm.MainModule.EntryPoint),
                     xml_doc = (string?)null,
                     metadata = new { assembly = asm.Name.Name },
                     certainty = "verified",

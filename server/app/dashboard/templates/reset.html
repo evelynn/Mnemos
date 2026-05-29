@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Reset password — Mnemos{% endblock %}
+{% block body %}
+<main class="login">
+  <h1>Mnemos</h1>
+  <p class="subtitle" data-i18n="Reset password">Reset password</p>
+  <p class="muted" data-i18n="Pick a new password. Minimum 12 characters with at least one letter and one digit.">
+    Pick a new password. Minimum 12 characters with at least one
+    letter and one digit.
+  </p>
+  <form id="reset-form" class="login-form" onsubmit="return consumeReset(event)">
+    <label>
+      <span data-i18n="New password">New password</span>
+      <input type="password" id="r-new" autocomplete="new-password" required minlength="12" />
+    </label>
+    <label>
+      <span data-i18n="Confirm new password">Confirm new password</span>
+      <input type="password" id="r-confirm" autocomplete="new-password" required minlength="12" />
+    </label>
+    <button type="submit" class="primary" data-i18n="Set new password">Set new password</button>
+  </form>
+  <p id="reset-result" class="muted" hidden></p>
+</main>
+<script>
+function _getTokenFromHash() {
+  const h = (window.location.hash || "").replace(/^#/, "");
+  const p = new URLSearchParams(h);
+  return p.get("token") || "";
+}
+async function consumeReset(ev) {
+  ev.preventDefault();
+  const token = _getTokenFromHash();
+  const next = document.getElementById("r-new").value;
+  const conf = document.getElementById("r-confirm").value;
+  if (next !== conf) {
+    MnemosUI.showToast(MnemosUI.t("New password and confirmation do not match."), "error");
+    return false;
+  }
+  if (!token) {
+    MnemosUI.showToast(MnemosUI.t("Reset token is missing from the URL."), "error");
+    return false;
+  }
+  const r = await fetch("/api/v1/auth/reset/consume", {
+    method: "POST",
+    headers: {"content-type": "application/json"},
+    body: JSON.stringify({token: token, new_password: next}),
+  });
+  const out = document.getElementById("reset-result");
+  out.hidden = false;
+  if (r.ok || r.status === 204) {
+    out.textContent = "";
+    out.setAttribute("data-i18n", "Password updated. You can now sign in with the new password.");
+    out.textContent = "Password updated. You can now sign in with the new password.";
+    MnemosUI.applyI18n(out);
+    setTimeout(() => { window.location.href = "/login"; }, 1200);
+  } else {
+    const body = await r.json().catch(() => ({}));
+    out.textContent = body.detail || "Reset failed.";
+  }
+  return false;
+}
+</script>
+{% endblock %}

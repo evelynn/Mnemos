@@ -4,6 +4,21 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# Known placeholder values an operator might leave in a fresh ``.env``.
+# A production deploy that signs cookies with one of these is trivially
+# forgeable, so ``get_settings`` refuses to load (raises) — same
+# fail-closed pattern as the FERNET_KEY check in safety/kms.py.
+_INSECURE_SECRET_KEYS = frozenset({
+    "",
+    "change-me-in-production",
+    "change-me-to-a-random-32-byte-secret",
+    "change-me",
+    "changeme",
+    "secret",
+    "password",
+})
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -46,7 +61,31 @@ class Settings(BaseSettings):
     # Retained for forward-compatibility; unused by the current backends.
     kms_key_arn: str = Field(default="")
 
+    # PR-104 — outbound webhook for new P1 findings. Empty disables
+    # notifications. Body is a small JSON envelope (project id, kind,
+    # risk score, drill-down URL) — Slack incoming-webhook format
+    # is the most common target. Best-effort: a failure is logged +
+    # audited but never blocks the finding write.
+    notify_webhook_url: str = Field(default="")
+    # The base URL operators want in notification links — usually the
+    # public hostname Mnemos serves on. Falls back to a relative path
+    # so links still work when an operator forgets to set it.
+    notify_link_base: str = Field(default="")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()
+    s = Settings()
+    # PR-97 — fail-closed on a placeholder SECRET_KEY in production. A
+    # cookie signed with "change-me-..." is forgeable by anyone who has
+    # read the README; the platform refuses to boot instead of running
+    # with a forgeable session.
+    if (s.mnemos_env or "").lower() == "production":
+        key = (s.secret_key or "").strip().lower()
+        if key in _INSECURE_SECRET_KEYS or key.startswith("change-me"):
+            raise RuntimeError(
+                "config: SECRET_KEY is a placeholder and MNEMOS_ENV=production. "
+                "Set SECRET_KEY to a random 32+ char string. Generate with "
+                "`python -c 'import secrets; print(secrets.token_urlsafe(48))'`."
+            )
+    return s

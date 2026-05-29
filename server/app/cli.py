@@ -86,6 +86,85 @@ def _prompt_password() -> str:
         return p1
 
 
+async def _verify() -> int:
+    """One-command boot self-test (PR-102). Mirrors /health/ready but
+    runs from the CLI on a freshly-built image, so an operator can
+    catch a bad env / missing analyzer / wrong-rotated FERNET_KEY
+    BEFORE the first webhook arrives. Returns 0 if every hard-fail
+    check passes; 1 otherwise. Soft warnings (missing analyzer
+    binaries) print but don't change the exit code."""
+    import shutil as _shutil
+    import sys as _sys
+
+    from app.config import get_settings
+
+    failures: list[str] = []
+
+    # 1) config — get_settings re-runs the PR-97 SECRET_KEY guard.
+    try:
+        s = get_settings()
+    except RuntimeError as exc:
+        print(f"FAIL  config: {exc}", file=_sys.stderr)
+        return 1
+    print(f"ok    config: mnemos_env={s.mnemos_env}")
+
+    # 2) DB connect.
+    try:
+        from app.db import SessionLocal
+        from sqlalchemy import text
+
+        async with SessionLocal() as db:
+            await db.execute(text("SELECT 1"))
+        print("ok    database")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL  database: {exc.__class__.__name__}: {exc}", file=_sys.stderr)
+        failures.append("database")
+
+    # 3) Redis connect.
+    try:
+        from app.db import get_redis
+
+        r = await get_redis()
+        pong = await r.ping()
+        if not pong:
+            raise RuntimeError("no pong")
+        print("ok    redis")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL  redis: {exc.__class__.__name__}: {exc}", file=_sys.stderr)
+        failures.append("redis")
+
+    # 4) Crypto round-trip — catches a wrong-rotated FERNET_KEY.
+    try:
+        from app.safety.crypto import decrypt, encrypt
+
+        probe = "mnemos-verify-probe"
+        ct, iv = encrypt(probe)
+        if decrypt(ct, iv) != probe:
+            raise RuntimeError("round_trip_mismatch")
+        print("ok    crypto: round_trip")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL  crypto: {exc.__class__.__name__}: {exc}", file=_sys.stderr)
+        failures.append("crypto")
+
+    # 5) Analyzer binaries on PATH (advisory).
+    from app.analyzers.registry import _BINARIES
+
+    missing = [b for b in _BINARIES.values() if _shutil.which(b) is None]
+    if missing:
+        print(
+            f"warn  analyzers missing on PATH: {','.join(missing)} "
+            "(stages will skip; run `docker compose --profile analyzers build`)"
+        )
+    else:
+        print("ok    analyzers: all present")
+
+    if failures:
+        print(f"\nverify FAILED: {','.join(failures)}", file=_sys.stderr)
+        return 1
+    print("\nverify OK")
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -117,7 +196,64 @@ def main() -> None:
         "--dry-run", action="store_true", help="count without writing changes"
     )
 
+    sub.add_parser(
+        "verify",
+        help=(
+            "boot self-test: env (FERNET_KEY/SECRET_KEY/MNEMOS_ENV), "
+            "DB + Redis connect, crypto round-trip, analyzer binaries "
+            "on PATH. Non-zero exit on a hard fail."
+        ),
+    )
+
+    seed = sub.add_parser(
+        "seed-demo",
+        help=(
+            "PR-109 — populate a realistic demo dataset (org + project "
+            "+ graph + findings + runs) so a new operator can explore "
+            "the dashboard without registering GitLab. Idempotent. "
+            "Refuses on MNEMOS_ENV=production unless --force."
+        ),
+    )
+    seed.add_argument(
+        "--force", action="store_true",
+        help="allow seeding on MNEMOS_ENV=production (use with care).",
+    )
+    seed.add_argument(
+        "--keep", action="store_true",
+        help="skip the destructive prelude — keep prior demo rows.",
+    )
+
+    serve = sub.add_parser(
+        "serve-local",
+        help=(
+            "PR-135 — run the whole platform with NO Docker: SQLite + "
+            "in-process fakeredis + inline jobs + local analyzer "
+            "binaries. Single process, zero external services."
+        ),
+    )
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", default="8080")
+    serve.add_argument("--db", default="./mnemos-local.db")
+    serve.add_argument("--seed-demo", action="store_true")
+    serve.add_argument("--reset", action="store_true")
+
     args = parser.parse_args()
+
+    if args.cmd == "serve-local":
+        # serve_local must control env (DATABASE_URL etc) BEFORE any
+        # app.* import. This module already imported app.db, so hand
+        # off to a clean process via execv rather than importing here.
+        import os
+
+        cmd = [
+            sys.executable, "-m", "app.serve_local",
+            "--host", args.host, "--port", str(args.port), "--db", args.db,
+        ]
+        if args.seed_demo:
+            cmd.append("--seed-demo")
+        if args.reset:
+            cmd.append("--reset")
+        os.execvp(sys.executable, cmd)
 
     if args.cmd == "create-user":
         password = args.password or _prompt_password()
@@ -131,6 +267,27 @@ def main() -> None:
             _rotate_fernet_key(args.old_key, args.new_key, args.dry_run)
         )
         sys.exit(rc)
+    if args.cmd == "verify":
+        rc = asyncio.run(_verify())
+        sys.exit(rc)
+    if args.cmd == "seed-demo":
+        from app.seed_demo import seed_demo
+
+        try:
+            summary = asyncio.run(seed_demo(force=args.force, keep=args.keep))
+        except RuntimeError as exc:
+            print(f"seed-demo refused: {exc}", file=sys.stderr)
+            sys.exit(2)
+        print("seed-demo OK:")
+        for k, v in summary.items():
+            print(f"  {k}: {v}")
+        if "password" in summary:
+            print("")
+            print("=" * 60)
+            print(f"  Login: {summary['user']} / {summary['password']}")
+            print("  ↑ printed ONCE — save it before clearing the terminal.")
+            print("=" * 60)
+        sys.exit(0)
 
 
 if __name__ == "__main__":

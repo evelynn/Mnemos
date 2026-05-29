@@ -7,6 +7,13 @@ Phase-1 patterns match spec §8.3:
 
 The engine is intentionally simple and synchronous so it can be reused
 from both the sampler and the query executor.
+
+3rd-round addition (Team B must-fix #2 + #3): the Korean PII validators
+in :mod:`app.safety.pii` are now invoked alongside the regex matches.
+A 13-digit string that matches the RRN shape but fails the checksum
+is masked with the ``[UNVERIFIED_RRN]`` label rather than being left
+in the clear — leaking gibberish that *looks* like an RRN is still a
+data-exposure problem under §2.8.
 """
 
 from __future__ import annotations
@@ -15,20 +22,69 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+from app.safety.pii import (
+    is_valid_card_luhn,
+    is_valid_foreigner_id,
+    is_valid_korean_drivers_license,
+    is_valid_rrn,
+)
+
 logger = logging.getLogger(__name__)
 
 FULL_MASK_COLUMNS = re.compile(
     r"(?i)\b(password|token|secret|api[_-]?key|ssn|rrn)\b"
 )
-PARTIAL_MASK_COLUMNS = re.compile(r"(?i)\b(email|phone|name|address|mobile)\b")
+# English keywords use ``\b`` word boundaries; Korean keywords cannot
+# rely on ``\b`` (which is ASCII-only in CPython's stock regex
+# engine), so they are matched bare. The 4th-round audit (A5/B5)
+# pointed out that a column literally called ``주민번호`` was slipping
+# through because the previous pattern was English-only. The Korean
+# additions cover the columns most operators name in production
+# Korean DBs: 이름 (name), 주소 (address), 전화 (phone), 휴대폰 (mobile),
+# 주민 (RRN-bearing), 이메일 (email).
+PARTIAL_MASK_COLUMNS = re.compile(
+    r"(?i)(?:\b(email|phone|name|address|mobile)\b"
+    r"|이름|주소|전화|휴대폰|주민|이메일)"
+)
 
 _VALUE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "[EMAIL]"),
+    # Korean mobile prefixes (010/011/016/017/018/019). Matched before
+    # the more permissive PHONE pattern so the audit log shows that
+    # PII identification was specific, not generic.
+    (re.compile(r"\b01[016789]-?\d{3,4}-?\d{4}\b"), "[PHONE_KR]"),
     (re.compile(r"\b\d{2,3}-?\d{3,4}-?\d{4}\b"), "[PHONE]"),
-    (re.compile(r"\b\d{6}-?\d{7}\b"), "[RRN]"),
-    (re.compile(r"\b(?:\d{4}[- ]?){3}\d{4}\b"), "[CARD]"),
     (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "[IP]"),
 ]
+
+# Validated patterns — same regex as above, but a positive match is
+# label-replaced only after the validator agrees. RRN/foreigner share
+# the same shape (`\d{6}-\d{7}`) so we try RRN first, then foreigner;
+# if both fail the value is masked with ``[UNVERIFIED_NUMERIC_ID]``
+# instead of being left in the clear (Team B 3rd-round must-fix).
+_KR_RRN_PATTERN = re.compile(r"\b\d{6}-?\d{7}\b")
+_CARD_PATTERN = re.compile(r"\b(?:\d{4}[- ]?){3}\d{4}\b")
+_LICENSE_PATTERN = re.compile(r"\b\d{2}-?\d{2}-?\d{6}-?\d{2}\b")
+
+
+def _label_for_id_match(value: str) -> str:
+    if is_valid_rrn(value):
+        return "[RRN]"
+    if is_valid_foreigner_id(value):
+        return "[FOREIGNER_ID]"
+    return "[UNVERIFIED_NUMERIC_ID]"
+
+
+def _label_for_card_match(value: str) -> str:
+    return "[CARD]" if is_valid_card_luhn(value) else "[UNVERIFIED_CARD]"
+
+
+def _label_for_license_match(value: str) -> str:
+    return (
+        "[DRIVERS_LICENSE]"
+        if is_valid_korean_drivers_license(value)
+        else "[UNVERIFIED_LICENSE]"
+    )
 
 
 @dataclass
@@ -81,6 +137,23 @@ class MaskingEngine:
             if new != masked:
                 changed = True
                 masked = new
+        # Validator-backed labels — checksum decides between verified
+        # tag and ``UNVERIFIED_*``. Either way the digits are
+        # replaced, so a bogus-but-RRN-shaped value does not leak.
+        new = _KR_RRN_PATTERN.sub(lambda m: _label_for_id_match(m.group(0)), masked)
+        if new != masked:
+            changed = True
+            masked = new
+        new = _CARD_PATTERN.sub(lambda m: _label_for_card_match(m.group(0)), masked)
+        if new != masked:
+            changed = True
+            masked = new
+        new = _LICENSE_PATTERN.sub(
+            lambda m: _label_for_license_match(m.group(0)), masked
+        )
+        if new != masked:
+            changed = True
+            masked = new
         return (masked if changed else value), changed
 
 

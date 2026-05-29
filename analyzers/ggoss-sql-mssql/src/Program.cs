@@ -6,7 +6,7 @@ const string SourceVersion = "1.0.0";
 
 if (args.Length == 0)
 {
-    Console.Error.WriteLine("usage: ggoss-sql-mssql <probe|inventory|live_schema|live_stats|sample|query|schema> [args...]");
+    Console.Error.WriteLine("usage: ggoss-sql-mssql <probe|inventory|live_schema|live_stats|sample|query|db_probe|schema> [args...]");
     return 2;
 }
 
@@ -23,6 +23,7 @@ try
         "live_stats"  => LiveStats(rest),
         "sample"      => await SampleAsync(rest),
         "query"       => await QueryAsync(rest),
+        "db_probe"    => await DbProbeAsync(rest),
         "schema"      => PrintSchema(),
         _             => Unknown(verb)
     };
@@ -82,6 +83,19 @@ static string? FindConnArg(string[] args, string flag)
     for (int i = 0; i < args.Length - 1; i++) if (args[i] == flag) return args[i + 1];
     return null;
 }
+
+// A table name is interpolated into a FROM clause (an identifier can't
+// be a bind parameter), so the only safe defence is to reject anything
+// that isn't a plain, optionally schema-qualified, identifier.
+static bool IsValidTableName(string? table) =>
+    table is not null &&
+    System.Text.RegularExpressions.Regex.IsMatch(
+        table, @"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$");
+
+// Hard row cap for the query verb (analyzer-contract §1.0).
+static int MaxRows() =>
+    int.TryParse(Environment.GetEnvironmentVariable("MNEMOS_MAX_ROWS"), out var n)
+        && n > 0 ? n : 10000;
 
 static async Task<int> LiveSchemaAsync(string[] args)
 {
@@ -158,9 +172,15 @@ static async Task<int> SampleAsync(string[] args)
         return 2;
     }
     var limit = int.TryParse(limitStr, out var n) ? Math.Clamp(n, 1, 100) : 10;
+    if (!IsValidTableName(table))
+    {
+        Console.Error.WriteLine(JsonSerializer.Serialize(new { level = "error", message = "invalid_table_name", recoverable = false }));
+        return 2;
+    }
 
     await using var c = new SqlConnection(conn);
     await c.OpenAsync();
+    // table is a validated plain identifier; limit is a clamped int.
     var sql = $"SELECT TOP ({limit}) * FROM {table}";
     await using var cmd = new SqlCommand(sql, c) { CommandTimeout = 10 };
     await using var rdr = await cmd.ExecuteReaderAsync();
@@ -191,11 +211,21 @@ static async Task<int> QueryAsync(string[] args)
         return 2;
     }
     var sql = await File.ReadAllTextAsync(sqlFile);
-    if (!sql.TrimStart().StartsWith("select", StringComparison.OrdinalIgnoreCase))
+    // A trailing ; is tolerated and stripped; an embedded one means a
+    // second statement (MSSQL runs batches) and is rejected.
+    var trimmed = sql.Trim().TrimEnd(';').Trim();
+    if (!trimmed.StartsWith("select", StringComparison.OrdinalIgnoreCase)
+        && !trimmed.StartsWith("with", StringComparison.OrdinalIgnoreCase))
     {
         Console.Error.WriteLine(JsonSerializer.Serialize(new { level = "error", message = "only_select_allowed", recoverable = false }));
         return 2;
     }
+    if (trimmed.Contains(';'))
+    {
+        Console.Error.WriteLine(JsonSerializer.Serialize(new { level = "error", message = "multi_statement_not_allowed", recoverable = false }));
+        return 2;
+    }
+    var maxRows = MaxRows();
     await using var c = new SqlConnection(conn);
     await c.OpenAsync();
     await using var cmd = new SqlCommand(sql, c) { CommandTimeout = 30 };
@@ -205,14 +235,173 @@ static async Task<int> QueryAsync(string[] args)
     for (int i = 0; i < rdr.FieldCount; i++)
         cols.Add(new { name = rdr.GetName(i), type = rdr.GetDataTypeName(i) });
     var rows = new List<object[]>();
+    var truncated = false;
     while (await rdr.ReadAsync())
     {
+        if (rows.Count >= maxRows) { truncated = true; break; }
         var row = new object?[rdr.FieldCount];
         for (int i = 0; i < rdr.FieldCount; i++)
             row[i] = rdr.IsDBNull(i) ? null : rdr.GetValue(i)?.ToString();
         rows.Add(row!);
     }
-    Emit("query_result", new { columns = cols, rows });
+    Emit("query_result", new { columns = cols, rows, rows_truncated = truncated });
+    return 0;
+}
+
+static async Task<int> DbProbeAsync(string[] args)
+{
+    // Metadata-only read-only credential probe (spec §2.5, §2.8).
+    // Does NOT execute INSERT/UPDATE/DELETE — not even rolled-back ones.
+    // SQL Server captures rolled-back DML in the transaction log and may
+    // fire triggers (audit, mail) that ROLLBACK cannot undo. We never
+    // leave a trace in the live DB.
+    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+    var conn = FindConnArg(args, "--conn")
+               ?? Environment.GetEnvironmentVariable("MNEMOS_DB_CONN")
+               ?? Environment.GetEnvironmentVariable("MNEMOS_MSSQL_CONN");
+    if (string.IsNullOrWhiteSpace(conn))
+    {
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            status = "fail_connect",
+            connect_ok = false,
+            read_ok = false,
+            write_blocked = (bool?)null,
+            grants = new Dictionary<string, string[]>(),
+            facts = Array.Empty<object>(),
+            latency_ms = 0,
+            error = "missing_connection_string",
+        }));
+        return 0;
+    }
+
+    var grants = new Dictionary<string, List<string>>();
+    var facts = new List<object>();
+    var writePrivs = new HashSet<string>(new[] {
+        "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE TABLE",
+        "ALTER", "DROP TABLE", "TRUNCATE",
+    });
+
+    try
+    {
+        await using var c = new SqlConnection(conn);
+        await c.OpenAsync();
+
+        // Engine banner (metadata only).
+        await using (var cmd = new SqlCommand("SELECT @@VERSION", c) { CommandTimeout = 5 })
+        {
+            var version = (await cmd.ExecuteScalarAsync())?.ToString();
+            if (!string.IsNullOrEmpty(version))
+            {
+                facts.Add(new
+                {
+                    value = version!.Split('\n')[0].Trim(),
+                    source = "@@VERSION",
+                    confidence = "verified",
+                });
+            }
+        }
+
+        await using (var cmd = new SqlCommand("SELECT 1", c) { CommandTimeout = 5 })
+        {
+            await cmd.ExecuteScalarAsync();
+        }
+
+        // Effective permissions for the current login. ``fn_my_permissions``
+        // returns rows like (entity_name, subentity_name, permission_name,
+        // class, ...). NULL entity → server-wide; entity set → per-object.
+        const string permSql = @"
+            SELECT permission_name, ISNULL(entity_name, '') AS entity
+              FROM fn_my_permissions(NULL, 'DATABASE')";
+        await using (var cmd = new SqlCommand(permSql, c) { CommandTimeout = 10 })
+        await using (var rdr = await cmd.ExecuteReaderAsync())
+        {
+            while (await rdr.ReadAsync())
+            {
+                var permission = rdr.GetString(0).ToUpperInvariant();
+                var entity = rdr.IsDBNull(1) ? "__database__" : rdr.GetString(1);
+                if (!grants.TryGetValue(entity, out var perms))
+                {
+                    perms = new List<string>();
+                    grants[entity] = perms;
+                }
+                perms.Add(permission);
+            }
+        }
+        facts.Add(new
+        {
+            value = new { entities = grants.Count },
+            source = "fn_my_permissions",
+            confidence = "verified",
+        });
+
+        // Role membership — db_owner alone is enough to write anything.
+        await using (var cmd = new SqlCommand(
+            "SELECT name FROM sys.database_role_members rm "
+            + "JOIN sys.database_principals r ON r.principal_id = rm.role_principal_id "
+            + "WHERE rm.member_principal_id = DATABASE_PRINCIPAL_ID()", c) { CommandTimeout = 5 })
+        await using (var rdr = await cmd.ExecuteReaderAsync())
+        {
+            var memberRoles = new List<string>();
+            while (await rdr.ReadAsync())
+                memberRoles.Add(rdr.GetString(0));
+            if (memberRoles.Count > 0)
+            {
+                grants["__roles__"] = memberRoles;
+                facts.Add(new
+                {
+                    value = memberRoles,
+                    source = "sys.database_role_members",
+                    confidence = "verified",
+                });
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        stopwatch.Stop();
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            status = "fail_connect",
+            connect_ok = false,
+            read_ok = false,
+            write_blocked = (bool?)null,
+            grants = new Dictionary<string, string[]>(),
+            facts,
+            latency_ms = (int)stopwatch.ElapsedMilliseconds,
+            error = $"connect_failed: {ex.Message}",
+        }));
+        return 0;
+    }
+
+    stopwatch.Stop();
+
+    var heldWrite = grants.Values
+        .SelectMany(p => p)
+        .Where(p => writePrivs.Contains(p) || p == "DB_OWNER")
+        .Distinct()
+        .ToList();
+    var roles = grants.TryGetValue("__roles__", out var rl) ? rl : new List<string>();
+    var writeBlocked = heldWrite.Count == 0
+                       && !roles.Any(r => r == "db_owner" || r == "db_datawriter" || r == "db_ddladmin");
+
+    facts.Add(new
+    {
+        value = writeBlocked ? "no write privileges held" : (object)heldWrite,
+        source = "verdict",
+        confidence = "verified",
+    });
+
+    Console.WriteLine(JsonSerializer.Serialize(new
+    {
+        status = writeBlocked ? "pass" : "fail_rw",
+        connect_ok = true,
+        read_ok = true,
+        write_blocked = writeBlocked,
+        grants,
+        facts,
+        latency_ms = (int)stopwatch.ElapsedMilliseconds,
+    }));
     return 0;
 }
 

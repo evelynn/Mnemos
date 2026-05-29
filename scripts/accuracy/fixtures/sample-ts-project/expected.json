@@ -1,0 +1,18 @@
+{
+  "_about": "Hand-curated ground truth for ggoss-ts on src/. Used by scripts/accuracy/measure.py to score precision/recall. Update both this file and the source together if you change the fixture.",
+  "symbols": [
+    {"kind": "interface", "name": "Order",         "location": {"file": "orders.ts"}},
+    {"kind": "type",      "name": "OrderId",       "location": {"file": "orders.ts"}},
+    {"kind": "class",     "name": "OrdersRepo",    "location": {"file": "orders.ts"}},
+    {"kind": "method",    "name": "add",           "location": {"file": "orders.ts"}},
+    {"kind": "method",    "name": "getById",       "location": {"file": "orders.ts"}},
+    {"kind": "method",    "name": "cancel",        "location": {"file": "orders.ts"}},
+    {"kind": "function",  "name": "createOrder",   "location": {"file": "orders.ts"}},
+    {"kind": "function",  "name": "confirmOrder",  "location": {"file": "orders.ts"}}
+  ],
+  "edges": [
+    {"kind": "CALLS", "source": "createOrder",  "target": "add"},
+    {"kind": "CALLS", "source": "confirmOrder", "target": "getById"},
+    {"kind": "CALLS", "source": "cancel",       "target": "getById"}
+  ]
+}
