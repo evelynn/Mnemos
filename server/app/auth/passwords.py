@@ -1,12 +1,28 @@
-"""Password hashing + policy (PR-39 closes audit E5)."""
+"""Password hashing + policy (PR-39 closes audit E5).
+
+PR-135 — hash via the ``bcrypt`` library directly rather than
+through passlib's ``CryptContext``. passlib 1.7.4 (its last release,
+2020) runs a one-time backend self-test that feeds bcrypt a 73-byte
+probe; bcrypt ≥ 4.1 raises ``ValueError`` on >72 bytes instead of
+truncating, so passlib's bcrypt backend fails to initialise on any
+modern install — breaking *all* hashing. Calling bcrypt directly
+sidesteps the dead self-test. The on-disk format is unchanged
+(standard ``$2b$`` bcrypt), so existing passlib-produced hashes
+verify without migration.
+"""
 
 from __future__ import annotations
 
 import re
 
-from passlib.context import CryptContext
+import bcrypt
 
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# bcrypt only consumes the first 72 bytes of the password; bcrypt 5
+# *raises* on longer input rather than truncating, so we truncate
+# explicitly. The LoginRequest/UserCreate bounds (PR-133) keep real
+# inputs far below this, but defence-in-depth.
+_BCRYPT_MAX_BYTES = 72
+_BCRYPT_ROUNDS = 12  # matches the passlib default this replaces
 
 
 # ---------------------------------------------------------------------------
@@ -76,17 +92,28 @@ def validate_password_policy(password: str) -> None:
         )
 
 
+def _to_bcrypt_bytes(plain: str) -> bytes:
+    """UTF-8 encode + truncate to bcrypt's 72-byte working limit."""
+    return plain.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+
+
 def hash_password(plain: str) -> str:
     """Hash a password *after* running it through the policy.
 
     Centralising the check here means every entry point (CLI
     create-user, REST POST /users, change-password) gets the same
-    rules. Tests and migrations that need to bypass the policy can
-    call ``_pwd_context.hash(...)`` directly.
+    rules.
     """
     validate_password_policy(plain)
-    return _pwd_context.hash(plain)
+    digest = bcrypt.hashpw(_to_bcrypt_bytes(plain), bcrypt.gensalt(rounds=_BCRYPT_ROUNDS))
+    return digest.decode("ascii")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return _pwd_context.verify(plain, hashed)
+    """Constant-time bcrypt verify. Tolerant of a malformed stored
+    hash (returns False rather than raising) so a corrupted row can't
+    500 the login path."""
+    try:
+        return bcrypt.checkpw(_to_bcrypt_bytes(plain), hashed.encode("utf-8"))
+    except (ValueError, TypeError):
+        return False

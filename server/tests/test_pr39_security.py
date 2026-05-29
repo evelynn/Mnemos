@@ -88,7 +88,10 @@ def test_hash_password_runs_policy_first():
         hash_password("short")
     body = _read(_APP / "auth" / "passwords.py")
     policy_idx = body.find("validate_password_policy(plain)")
-    bcrypt_idx = body.find("_pwd_context.hash(plain)")
+    # PR-135 — hashing now calls bcrypt.hashpw directly (passlib's
+    # CryptContext was dropped; its bcrypt backend self-test breaks
+    # on bcrypt ≥ 4.1). Policy must still run before the hash call.
+    bcrypt_idx = body.find("bcrypt.hashpw(")
     assert 0 < policy_idx < bcrypt_idx
 
 

@@ -13,7 +13,18 @@ _redis: redis_asyncio.Redis | None = None
 def _client() -> redis_asyncio.Redis:
     global _redis
     if _redis is None:
-        _redis = redis_asyncio.from_url(_settings.redis_url, decode_responses=True)
+        # PR-135 — local mode shares the single in-process fakeredis
+        # keyspace so sessions created here are visible everywhere.
+        from app.local_mode import is_local_mode
+
+        if is_local_mode():
+            from app.local_mode import get_fake_redis
+
+            _redis = get_fake_redis()
+        else:
+            _redis = redis_asyncio.from_url(
+                _settings.redis_url, decode_responses=True
+            )
     return _redis
 
 

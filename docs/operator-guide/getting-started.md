@@ -14,7 +14,36 @@ Mnemos 는 **복합 언어 · 복합 DB 시스템을 지속적으로 분석 · �
 - Claude Code 같은 에이전트가 MCP 로 조회
 - 모든 운영 기능은 GUI 에서 가능 (CLI 는 부팅 자가진단 + 데모만)
 
-## 1. 5분: 데모로 즉시 체험
+## 0.5. Docker 없이 1분 실행 (PR-135)
+
+Docker 데몬·compose 없이 노트북에서 바로 띄울 수 있습니다. SQLite +
+in-process fakeredis + inline 잡 + 로컬 analyzer 바이너리로 **단일
+프로세스, 외부 서비스 0**:
+
+```bash
+cd server
+pip install -e .            # + aiosqlite, fakeredis, bcrypt
+python -m app.serve_local --seed-demo
+# Mnemos local mode (no Docker)
+#   database : sqlite+aiosqlite:///./mnemos-local.db
+#   redis    : in-process fakeredis
+#   jobs     : inline (asyncio background tasks)
+#   ============================================================
+#     Login: demo-admin / Demo-xxxxxxxxxxxx1234
+#   ============================================================
+#   → http://127.0.0.1:8080
+```
+
+옵션: `--port 9000`, `--db /path/to.db`, `--reset` (깨끗한 슬레이트).
+프로덕션 토폴로지(Postgres+Redis+worker)는 그대로 docker-compose
+경로를 쓰면 됩니다 — local mode 분기는 전부 `is_local_mode()` 로
+게이트되어 프로덕션에 영향 0.
+
+analyzer 는 로컬 바이너리로 동작: TypeScript/JS 는 `node`,
+Python 은 인터프리터, C#/.NET 은 `dotnet`. (docker 이미지 불필요 —
+PR-114/115/127 에서 실측 검증.)
+
+## 1. 5분: 데모로 즉시 체험 (docker-compose 경로)
 
 GitLab 프로젝트 등록 없이 모든 GUI 가 실제 데이터로 채워진 모습을
 보고 싶다면:

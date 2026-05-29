@@ -223,7 +223,37 @@ def main() -> None:
         help="skip the destructive prelude — keep prior demo rows.",
     )
 
+    serve = sub.add_parser(
+        "serve-local",
+        help=(
+            "PR-135 — run the whole platform with NO Docker: SQLite + "
+            "in-process fakeredis + inline jobs + local analyzer "
+            "binaries. Single process, zero external services."
+        ),
+    )
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", default="8080")
+    serve.add_argument("--db", default="./mnemos-local.db")
+    serve.add_argument("--seed-demo", action="store_true")
+    serve.add_argument("--reset", action="store_true")
+
     args = parser.parse_args()
+
+    if args.cmd == "serve-local":
+        # serve_local must control env (DATABASE_URL etc) BEFORE any
+        # app.* import. This module already imported app.db, so hand
+        # off to a clean process via execv rather than importing here.
+        import os
+
+        cmd = [
+            sys.executable, "-m", "app.serve_local",
+            "--host", args.host, "--port", str(args.port), "--db", args.db,
+        ]
+        if args.seed_demo:
+            cmd.append("--seed-demo")
+        if args.reset:
+            cmd.append("--reset")
+        os.execvp(sys.executable, cmd)
 
     if args.cmd == "create-user":
         password = args.password or _prompt_password()

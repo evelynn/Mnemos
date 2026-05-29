@@ -163,8 +163,9 @@ def test_no_print_in_production_code():
         rel = str(f.relative_to(_APP))
         if "__pycache__" in rel:
             continue
-        # CLI 모듈은 사용자-facing 출력 합법.
-        if rel.endswith("cli.py") or rel.endswith("seed_demo.py"):
+        # CLI / 런처 모듈은 사용자-facing 출력 합법.
+        if rel.endswith("cli.py") or rel.endswith("seed_demo.py") \
+                or rel.endswith("serve_local.py"):
             continue
         src = f.read_text(encoding="utf-8")
         # Strip docstrings rough — just check non-docstring code

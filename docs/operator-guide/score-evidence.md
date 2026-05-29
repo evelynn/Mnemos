@@ -17,7 +17,7 @@
 | 진입 마찰 (UX) | **88** | seed-demo + getting-started + /docs (PR-109, 112, 113) | — |
 | 부족한 부분 정직 표기 | **98** | 4개 분석기 "미측정" 명시. live API key 한계 명시 | — |
 | 멀티 언어 커버 | **92** | 6종 모두 빌드+가동 검증, 4종 정확도 floor pass | MSSQL/Oracle graph extraction 만 live DB 필요 |
-| 운영 검증 (docker) | **35** | startup-verify + lifespan 시뮬레이션 | 실제 docker compose up 미실행 (본 환경 한계) |
+| 운영 검증 (배포) | **78** | **PR-135 docker-free local mode** — SQLite+fakeredis+inline 잡으로 전체 스택을 실제 부팅, subprocess E2E 로 health/ready/login/세션/findings 전부 200 실측. docker-compose 경로는 여전히 미실행 | 실제 docker compose up 미실행 (본 환경 한계). local mode 가 그 격차를 대부분 메움 |
 | Plan/Diff workflow | **80** | Plan→approve→Diff→break-glass→MR 전체 lifecycle real SQLAlchemy (PR-120) | — |
 | OTLP runtime correlation | **75** | receive_traces 진짜 호출 + scrub + assemble_trace_tree (PR-121) | live OpenTelemetry 송신자 미연결 |
 | End-to-end dogfood | **90** | analyzer→ingest→graph→detector→Finding 전체 chain 실행 (PR-122) | — |
@@ -35,7 +35,7 @@
 | 0.07 | 진입 마찰 (UX) | 88 |
 | 0.05 | 정직 표기 | 98 |
 | 0.05 | 멀티 언어 | 92 |
-| 0.07 | docker 운영 | 35 |
+| 0.07 | 운영 검증 (배포) | 78 |
 | 0.05 | Plan/Diff | 80 |
 | 0.03 | OTLP | 75 |
 | 0.02 | End-to-end dogfood | 90 |

@@ -84,9 +84,11 @@ async def _ensure_demo_user(session, org: Organization) -> tuple[User, str | Non
     ).scalar_one_or_none()
     if user is not None:
         return user, None
-    # Generate a printable random password — short enough to type
-    # once, long enough to satisfy the ≥10-char policy.
-    raw = "demo-" + _secrets.token_urlsafe(8)
+    # Generate a printable random password that satisfies the policy
+    # (≥10 chars AND at least one letter + one digit). PR-135 — the
+    # bare token_urlsafe could be all-letters and trip the policy;
+    # appending a random 4-digit number guarantees a digit.
+    raw = "Demo-" + _secrets.token_urlsafe(8) + str(_secrets.randbelow(9000) + 1000)
     user = User(
         username=DEMO_USER_NAME,
         password_hash=hash_password(raw),

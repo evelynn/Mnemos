@@ -17,10 +17,19 @@ _client: redis_asyncio.Redis | None = None
 async def get_redis() -> redis_asyncio.Redis:
     global _client
     if _client is None:
-        settings = get_settings()
-        _client = redis_asyncio.from_url(
-            settings.redis_url, encoding="utf-8", decode_responses=True
-        )
+        # PR-135 — docker-free local mode swaps in an in-process
+        # fakeredis sharing one keyspace with sessions etc.
+        from app.local_mode import is_local_mode
+
+        if is_local_mode():
+            from app.local_mode import get_fake_redis
+
+            _client = get_fake_redis()
+        else:
+            settings = get_settings()
+            _client = redis_asyncio.from_url(
+                settings.redis_url, encoding="utf-8", decode_responses=True
+            )
     return _client
 
 

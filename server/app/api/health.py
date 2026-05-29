@@ -185,6 +185,14 @@ async def metrics_summary() -> JSONResponse:
 
 
 async def _check_worker() -> tuple[bool, str]:
+    # PR-135 — in docker-free local mode there is no separate ARQ
+    # worker process: jobs run inline on the API event loop, so the
+    # API *is* the worker. A heartbeat would never appear; report
+    # healthy with a mode marker instead of a spurious 503.
+    from app.local_mode import is_local_mode
+
+    if is_local_mode():
+        return True, "inline"
     try:
         redis = await get_redis()
         beat = await redis.get(_WORKER_HEARTBEAT_KEY)
