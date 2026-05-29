@@ -611,6 +611,71 @@
     });
   }
 
+  // ─── Mermaid renderer (PR-136 — graphs/sequence/charts) ──────────
+  //
+  // ``MnemosUI.renderMermaid(host, code, opts?)`` renders Mermaid
+  // syntax (flowchart, sequence, gantt, pie, state, ER, journey, …)
+  // into ``host``. The library (~3.2 MB minified) is **lazy-loaded**
+  // on first call so tabs that never render a diagram pay zero bytes
+  // for it — same pattern as ``_loadExcelJS``. Served from
+  // ``/static/mermaid.min.js`` (self-hosted, MIT) so the locked-down
+  // CSP from PR-130 never has to allow a third-party origin.
+
+  var _mermaidPromise = null;
+  var _mermaidSeq = 0;
+
+  function _loadMermaid() {
+    if (window.mermaid) return Promise.resolve(window.mermaid);
+    if (_mermaidPromise) return _mermaidPromise;
+    _mermaidPromise = new Promise(function (resolve, reject) {
+      var s = document.createElement("script");
+      s.src = "/static/mermaid.min.js";
+      s.async = true;
+      s.onload = function () {
+        if (window.mermaid) {
+          var theme = document.documentElement
+            .getAttribute("data-theme") === "dark" ? "dark" : "default";
+          window.mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: "strict",  // sanitises labels — no inline HTML
+            theme: theme,
+            fontFamily: "var(--font-mono, monospace)",
+          });
+          resolve(window.mermaid);
+        } else {
+          reject(new Error("mermaid loaded but window.mermaid missing"));
+        }
+      };
+      s.onerror = function () {
+        _mermaidPromise = null;  // allow a retry on next call
+        reject(new Error("failed to load /static/mermaid.min.js"));
+      };
+      document.head.appendChild(s);
+    });
+    return _mermaidPromise;
+  }
+
+  function renderMermaid(host, code, opts) {
+    opts = opts || {};
+    if (typeof host === "string") host = document.querySelector(host);
+    if (!host) return Promise.reject(new Error("renderMermaid: host missing"));
+    return _loadMermaid().then(function (mermaid) {
+      var id = "mermaid-" + (++_mermaidSeq);
+      return mermaid.render(id, String(code || "")).then(function (out) {
+        host.innerHTML = out.svg;
+        if (typeof out.bindFunctions === "function") {
+          out.bindFunctions(host);
+        }
+        return host;
+      });
+    }).catch(function (err) {
+      host.innerHTML = '<p class="muted" role="alert">'
+        + escapeHtml(t("Diagram render failed: ") + (err && err.message || err))
+        + "</p>";
+      throw err;
+    });
+  }
+
   // ─── Command palette (PR-42, audit C2 + D3) ──────────────────────
   //
   // ``cmd/ctrl+K`` (or ``/``) anywhere on the dashboard opens a
@@ -1998,6 +2063,7 @@
     icon: icon,
     exportCsv: exportCsv,
     exportXlsx: exportXlsx,
+    renderMermaid: renderMermaid,
     notify: notify,
     readNotifications: readNotifications,
     clearNotifications: clearNotifications,
