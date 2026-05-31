@@ -112,6 +112,33 @@ notify_failures_total = Counter(
 )
 
 
+# PR-138 — LLM extractor silent-fallback visibility. Pre-PR-138 every
+# silent fallback (anthropic timeout, agent-sdk JSON parse fail,
+# missing API key, no SDK installed) collapsed into
+# ``model_used="stub"`` so an operator had no idea whether the
+# pipeline was running on Claude or a stub. Increments mean "a
+# Summary row was written from the stub path because backend X
+# failed with reason Y" — pair it with summaries.model_used to debug.
+llm_fallback_total = Counter(
+    "mnemos_llm_fallback_total",
+    "Times the L1~L3 extractor fell back to the deterministic stub, "
+    "labelled by which backend failed and why.",
+    labelnames=("from", "reason"),
+)
+
+# PR-138 — embedding-search silent fallback. Setting
+# ``MNEMOS_EMBEDDING_PROVIDER=voyage`` without installing pgvector or
+# without running alembic 0022 collapses to BM25-only retrieval
+# invisibly. This counter increments on every search that wanted the
+# vector path but had to use lexical only.
+embedding_silent_fallback_total = Counter(
+    "mnemos_embedding_silent_fallback_total",
+    "Search queries whose vector backend was configured but unusable "
+    "(pgvector missing / column absent / API call failed).",
+    labelnames=("reason",),
+)
+
+
 class PrometheusMiddleware(BaseHTTPMiddleware):
     """Records the HTTP counter and histogram for every handled request.
 

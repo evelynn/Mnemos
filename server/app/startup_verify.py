@@ -124,6 +124,47 @@ def _check_analyzers_soft() -> None:
         log.info("startup_verify.analyzers OK")
 
 
+def _check_embeddings_soft() -> None:
+    """PR-138 — surface MNEMOS_EMBEDDING_PROVIDER misconfigs at boot.
+
+    The MCP audit found that setting ``MNEMOS_EMBEDDING_PROVIDER=voyage``
+    without (a) installing the ``[search]`` extra or (b) running
+    alembic 0022 collapses vector search to BM25-only **silently**. By
+    the time anyone notices, every search has been lexical-only for
+    days. Catching it at boot (advisory only — the platform still
+    serves) tells the operator on log line 1 instead of after a
+    support escalation.
+    """
+    import os
+
+    provider = (os.environ.get("MNEMOS_EMBEDDING_PROVIDER") or "").strip()
+    if not provider:
+        return  # operator hasn't asked for embeddings — nothing to verify
+    # pgvector is an optional install — surface its absence loudly.
+    try:
+        import pgvector  # noqa: F401
+    except ImportError:
+        log.warning(
+            "startup_verify.embeddings MISCONFIGURED: "
+            "MNEMOS_EMBEDDING_PROVIDER=%s but pgvector is not installed. "
+            "Vector search will silently degrade to BM25. "
+            "Fix: pip install 'mnemos-platform[search]'",
+            provider,
+        )
+        return
+    # API key is per-provider — list the one we need.
+    key_var = "VOYAGE_API_KEY" if provider == "voyage" else "OPENAI_API_KEY"
+    if not (os.environ.get(key_var) or "").strip():
+        log.warning(
+            "startup_verify.embeddings MISCONFIGURED: "
+            "MNEMOS_EMBEDDING_PROVIDER=%s set but %s is empty. "
+            "Vector search will silently degrade to BM25.",
+            provider, key_var,
+        )
+        return
+    log.info("startup_verify.embeddings OK (provider=%s)", provider)
+
+
 async def run_startup_verify() -> None:
     """Orchestrate the boot-time checks. Hard fails raise
     :class:`StartupCheckFailed`; soft fails are logged but allow
@@ -143,4 +184,5 @@ async def run_startup_verify() -> None:
     await _check_db_soft()
     await _check_redis_soft()
     _check_analyzers_soft()
+    _check_embeddings_soft()
     log.info("startup_verify complete")
