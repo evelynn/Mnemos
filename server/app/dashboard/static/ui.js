@@ -1233,8 +1233,76 @@
     return false;
   };
 
+  // PR-138e — replaced the bare ``prompt("Edit comment:")`` with a
+  // proper Promise-based modal. ``window.prompt`` is unstyled, has
+  // no validation, and breaks dark theme — the UX audit's "drops to
+  // circa-2000" complaint. The modal preserves Cancel/Save semantics
+  // (returns null on Cancel) and wires Esc/Enter for keyboard ops.
+  function _editCommentDialog(currentBody) {
+    return new Promise(function (resolve) {
+      var existing = document.getElementById("mnemos-edit-comment-dialog");
+      if (existing) existing.remove();
+      var dlg = document.createElement("dialog");
+      dlg.id = "mnemos-edit-comment-dialog";
+      dlg.className = "modal";
+      dlg.setAttribute("aria-labelledby", "mnemos-edit-comment-title");
+      dlg.innerHTML =
+        '<header><h2 id="mnemos-edit-comment-title">'
+        + escapeHtml(t("Edit comment")) + '</h2></header>'
+        + '<div class="body">'
+        + '<textarea id="mnemos-edit-comment-ta" '
+        + 'aria-label="' + escapeHtml(t("Comment body")) + '"></textarea>'
+        + '</div>'
+        + '<menu>'
+        + '<button type="button" id="mnemos-edit-comment-cancel">'
+        + escapeHtml(t("Cancel")) + '</button>'
+        + '<button type="button" id="mnemos-edit-comment-save" '
+        + 'class="primary">' + escapeHtml(t("Save")) + '</button>'
+        + '</menu>';
+      document.body.appendChild(dlg);
+      var ta = dlg.querySelector("textarea");
+      ta.value = currentBody || "";
+      function _close(value) {
+        try { dlg.close(); } catch (_) {}
+        try { dlg.remove(); } catch (_) {}
+        resolve(value);
+      }
+      dlg.querySelector("#mnemos-edit-comment-cancel")
+        .addEventListener("click", function () { _close(null); });
+      dlg.querySelector("#mnemos-edit-comment-save")
+        .addEventListener("click", function () {
+          var v = ta.value.trim();
+          _close(v || null);
+        });
+      dlg.addEventListener("cancel", function (ev) {
+        ev.preventDefault();
+        _close(null);
+      });
+      ta.addEventListener("keydown", function (ev) {
+        // Cmd/Ctrl+Enter = Save, matches GitHub's comment textarea.
+        if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") {
+          ev.preventDefault();
+          var v = ta.value.trim();
+          _close(v || null);
+        }
+      });
+      try { dlg.showModal(); } catch (_) { dlg.setAttribute("open", ""); }
+      setTimeout(function () { ta.focus(); }, 0);
+    });
+  }
+
   window._mnemosEditComment = async function (commentId, kind, targetId) {
-    var fresh = prompt("Edit comment:");
+    // Fetch current body so the textarea pre-fills (the UX nit from
+    // the original prompt() — operators had to retype everything).
+    var current = "";
+    try {
+      var existing = await fetch("/api/v1/comments/" + commentId);
+      if (existing.ok) {
+        var row = await existing.json();
+        current = row.body || "";
+      }
+    } catch (_) {}
+    var fresh = await _editCommentDialog(current);
     if (fresh == null || !fresh.trim()) return;
     var r = await fetch("/api/v1/comments/" + commentId, {
       method: "PATCH",
