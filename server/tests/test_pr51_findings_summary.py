@@ -103,13 +103,17 @@ def test_risk_index_arithmetic():
 def test_mttr_excludes_unresolved():
     """A finding with no ``resolved_at`` must not enter the MTTR
     average — only resolved findings have a duration."""
-    # This is a logic assertion; the handler appends to
-    # resolve_durations only inside ``if f.resolved_at is not None``.
+    # The handler appends to resolve_durations only inside the
+    # ``if resolved is not None`` branch (resolved = _aware(
+    # f.resolved_at) — PR-138d coerces SQLite-naive datetimes to
+    # UTC-aware for cross-backend comparisons).
     body = _read(_APP / "api" / "findings.py")
     mttr_idx = body.find("resolve_durations: list")
     end = body.find("mttr =", mttr_idx)
     slab = body[mttr_idx:end]
-    assert "if f.resolved_at is not None" in slab
+    assert "if resolved is not None" in slab
+    # And the source of the local is the model's resolved_at column.
+    assert "_aware(f.resolved_at)" in slab
 
 
 # ---------------------------------------------------------------------------

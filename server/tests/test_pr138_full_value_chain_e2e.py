@@ -47,11 +47,34 @@ os.environ.setdefault("MNEMOS_SKIP_STARTUP_VERIFY", "1")
 @pytest.fixture(scope="module")
 def db_path(tmp_path_factory):
     """Per-module SQLite DB so the seeded graph state stays consistent
-    across the chain assertions. Removed at fixture teardown."""
+    across the chain assertions. Removed at fixture teardown.
+
+    PR-138d — when a previous test module already created the
+    ``app.db.engine`` against a different URL, dispose it and rebuild
+    against ours so seed_demo writes to the right DB.
+    """
     p = tmp_path_factory.mktemp("pr138_e2e") / "chain.db"
     os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{p}"
     from app.config import get_settings
     get_settings.cache_clear()  # type: ignore[attr-defined]
+    # Force fresh app.db engine bound to OUR sqlite URL — otherwise
+    # a previous module's engine wins and seed_demo writes to that DB.
+    import sys
+    import asyncio as _asyncio
+    if "app.db" in sys.modules:
+        import importlib
+        from app import db as _db
+        try:
+            _asyncio.get_event_loop().run_until_complete(
+                _db.engine.dispose()
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        importlib.reload(_db)
+    for mod in ("app.local_mode", "app.seed_demo"):
+        if mod in sys.modules:
+            import importlib
+            importlib.reload(sys.modules[mod])
     return p
 
 

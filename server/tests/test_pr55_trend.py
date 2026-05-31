@@ -54,7 +54,9 @@ def test_trend_bucket_carries_new_resolved_net():
     the net (new − resolved). Net > 0 = growing backlog."""
     body = _read(_APP / "api" / "findings.py")
     trend_idx = body.find("async def findings_trend(")
-    slab = body[trend_idx:trend_idx + 3000]
+    # Widen slab to 4000 chars after PR-138d added the tz-coercion
+    # helper inside findings_trend (~300 chars of comment + body).
+    slab = body[trend_idx:trend_idx + 4000]
     assert '"new": 0' in slab
     assert '"resolved": 0' in slab
     assert 'b["net"] = b["new"] - b["resolved"]' in slab

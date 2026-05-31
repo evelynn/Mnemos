@@ -231,6 +231,15 @@ async def findings_summary(
     resolved_last_7d = 0
     new_last_7d = 0
 
+    def _aware(ts: datetime | None) -> datetime | None:
+        # PR-138d — SQLite (polyglot) returns naive datetimes; the
+        # model declares ``DateTime(timezone=True)`` so Postgres
+        # yields aware. Coerce so comparisons with aware ``week_ago``
+        # work on both.
+        if ts is not None and ts.tzinfo is None:
+            return ts.replace(tzinfo=timezone.utc)
+        return ts
+
     for f in rows:
         by_status[f.status] = by_status.get(f.status, 0) + 1
         by_kind[f.kind] = by_kind.get(f.kind, 0) + 1
@@ -242,13 +251,15 @@ async def findings_summary(
             by_priority[label] += 1
             if label == "P1":
                 open_p1 += 1
-        if f.first_seen_at and f.first_seen_at >= week_ago:
+        first_seen = _aware(f.first_seen_at)
+        resolved = _aware(f.resolved_at)
+        if first_seen and first_seen >= week_ago:
             new_last_7d += 1
-        if f.resolved_at is not None:
-            if f.resolved_at >= week_ago:
+        if resolved is not None:
+            if resolved >= week_ago:
                 resolved_last_7d += 1
-            if f.first_seen_at is not None:
-                hours = (f.resolved_at - f.first_seen_at).total_seconds() / 3600.0
+            if first_seen is not None:
+                hours = (resolved - first_seen).total_seconds() / 3600.0
                 if hours >= 0:
                     resolve_durations.append(hours)
 
@@ -340,6 +351,12 @@ async def findings_trend(
         )
 
     def _bucket_index(ts: datetime) -> int | None:
+        # PR-138d — SQLite (polyglot) returns timezone-naive datetimes
+        # since it has no native tz storage. The model declares
+        # ``DateTime(timezone=True)`` so Postgres yields aware values.
+        # Normalise to UTC-aware so the comparison works in both.
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
         if ts < window_start or ts >= now:
             return None
         delta_days = (ts - window_start).total_seconds() / 86400.0
@@ -425,6 +442,11 @@ async def findings_roi(
             continue
         # Terminal states are windowed: a finding triaged outside the
         # window doesn't count toward recent ROI / precision.
+        # PR-138d — coerce SQLite (naive) values to UTC so the
+        # comparison against aware ``window_start`` works on both
+        # backends.
+        if resolved_at is not None and resolved_at.tzinfo is None:
+            resolved_at = resolved_at.replace(tzinfo=timezone.utc)
         if window_start is not None and (
             resolved_at is None or resolved_at < window_start
         ):
