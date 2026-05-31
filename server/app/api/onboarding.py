@@ -125,10 +125,16 @@ async def accept_invite(
         )
     ).scalar_one_or_none()
     now = datetime.now(tz=timezone.utc)
+    # PR-138h — SQLite (polyglot) returns naive datetimes; Postgres
+    # returns aware. Coerce before comparing to ``now`` so the local
+    # mode + tests don't TypeError on the comparison.
+    expires_at = invite.expires_at if invite else None
+    if expires_at is not None and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
     if (
         invite is None
         or invite.consumed_at is not None
-        or invite.expires_at < now
+        or expires_at < now
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -235,10 +241,15 @@ async def consume_password_reset(
         )
     ).scalar_one_or_none()
     now = datetime.now(tz=timezone.utc)
+    # PR-138h — coerce SQLite-naive expires_at to UTC so the
+    # comparison works on both backends.
+    rt_expires = rt.expires_at if rt else None
+    if rt_expires is not None and rt_expires.tzinfo is None:
+        rt_expires = rt_expires.replace(tzinfo=timezone.utc)
     if (
         rt is None
         or rt.consumed_at is not None
-        or rt.expires_at < now
+        or rt_expires < now
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
