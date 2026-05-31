@@ -472,8 +472,11 @@ async function loadLlmHealth() {
   const rows = [];
   for (const p of slice) {
     try {
+      // PR-138g — ``?days=7`` so the dashboard shows the recent
+      // rolling window, not all-time. A burst of stub fallbacks
+      // 3 months ago shouldn't dominate today's health bar.
       const r = await fetch(
-        `/api/v1/projects/${p.id}/llm_fallback_breakdown`
+        `/api/v1/projects/${p.id}/llm_fallback_breakdown?days=7`
       );
       if (!r.ok) continue;
       const body = await r.json();
@@ -509,6 +512,31 @@ async function loadLlmHealth() {
   }).join("");
   box.innerHTML = html;
   MnemosUI.applyI18n(box);
+
+  // PR-138g — fallback-spike alert. When ≥1 project has crossed the
+  // SPIKE_THRESHOLD fallback rate (default 30%) in the rolling 7d
+  // window, surface a one-time toast. Operators don't have to be
+  // staring at the dashboard to know the pipeline degraded —
+  // refresh raises it, and once shown for a (project, day) we don't
+  // re-alert until the next session (localStorage gate).
+  const SPIKE_THRESHOLD = 0.30;
+  const today = new Date().toISOString().slice(0, 10);
+  for (const r of rows) {
+    if (r.fallback_rate < SPIKE_THRESHOLD) continue;
+    const ackKey = `mnemos_llm_spike_ack:${r.name}:${today}`;
+    if (localStorage.getItem(ackKey)) continue;
+    try {
+      MnemosUI.showToast(
+        MnemosUI.t(
+          'LLM fallback spike on "$1": $2% of recent summaries hit the stub path.',
+          { name: r.name, pct: Math.round(100 * r.fallback_rate) },
+        ),
+        "warn",
+        12000,
+      );
+      localStorage.setItem(ackKey, "1");
+    } catch (_) {}
+  }
 }
 
 loadReady();

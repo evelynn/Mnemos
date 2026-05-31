@@ -717,6 +717,7 @@ async def project_llm_cost(
 async def project_llm_fallback_breakdown(
     project_id: uuid.UUID,
     _: CurrentUser,
+    days: int | None = None,
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """PR-138b — per-project breakdown of "why this summary missed the
@@ -727,11 +728,28 @@ async def project_llm_fallback_breakdown(
     surface (a) how many summaries used the real LLM vs stub, and
     (b) WHY each fallback happened, without parsing model_used strings.
 
-    Returns ``{ok: int, fallbacks: {reason: count}, total: int}`` —
-    the operator's "is the pipeline actually working?" answer at a
-    glance.
+    Returns ``{ok: int, fallbacks: {reason: count}, total: int,
+    fallback_rate: float, window_days: int | null}`` — the operator's
+    "is the pipeline actually working?" answer at a glance.
+
+    PR-138g — ``?days=N`` filters to the rolling window so an alert
+    rule can ask "fallbacks in the last 7 days" instead of all-time
+    (otherwise old burst events keep dominating the rate forever).
+    Bounded 1–365; absent means all-time (back-compat).
     """
+    from datetime import datetime, timedelta, timezone
+
     from app.models.findings import Summary
+
+    where_clauses = [
+        Summary.project_id == project_id,
+        Summary.superseded_by.is_(None),
+    ]
+    window_days: int | None = None
+    if days is not None:
+        window_days = max(1, min(int(days), 365))
+        since = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
+        where_clauses.append(Summary.generated_at >= since)
 
     rows = (
         await db.execute(
@@ -739,10 +757,7 @@ async def project_llm_fallback_breakdown(
                 Summary.fallback_reason,
                 func.count().label("n"),
             )
-            .where(
-                Summary.project_id == project_id,
-                Summary.superseded_by.is_(None),
-            )
+            .where(*where_clauses)
             .group_by(Summary.fallback_reason)
         )
     ).all()
@@ -762,4 +777,5 @@ async def project_llm_fallback_breakdown(
         "fallback_rate": (
             round(sum(fallbacks.values()) / total, 3) if total else 0.0
         ),
+        "window_days": window_days,
     }
