@@ -123,9 +123,16 @@ async function createSecret(ev) {
       value: fd.get("value"),
     }),
   });
-  document.getElementById("secret-create-result").textContent =
-    `HTTP ${r.status}\n${await r.text()}`;
-  if (r.ok) { ev.target.reset(); loadSecrets(); }
+  // PR-137 — failures via showError, success via toast — no raw body.
+  const out = document.getElementById("secret-create-result");
+  out.textContent = "";
+  if (!r.ok) {
+    await MnemosUI.showError(MnemosUI.t("Secret creation failed"), r);
+    return false;
+  }
+  MnemosUI.showToast(MnemosUI.t("Secret stored."), "success");
+  ev.target.reset();
+  loadSecrets();
   return false;
 }
 

@@ -450,5 +450,22 @@ async function reject(id) {
   }
   MnemosUI.showToast("Submission rejected.", "success");
 }
+
+// PR-137 — Plan ID picker. Loads plans for the picker so the
+// operator doesn't have to memorise a UUID. Falls back to a plain
+// input if the projects list is empty.
+(function () {
+  // diffs.html takes a Plan ID, not a Project ID — keep the input as
+  // a text box but pre-fill from ``?plan=<id>``.
+  var u = new URLSearchParams(window.location.search);
+  var preset = u.get("plan");
+  if (preset) {
+    var el = document.getElementById("pid");
+    if (el) {
+      el.value = preset;
+      el.form && el.form.dispatchEvent(new Event("submit", { bubbles: true }));
+    }
+  }
+})();
 </script>
 {% endblock %}

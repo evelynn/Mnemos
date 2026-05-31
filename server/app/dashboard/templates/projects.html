@@ -48,8 +48,18 @@ async function createProject(ev) {
     }),
   });
   const text = await r.text();
-  document.getElementById("create-result").textContent = `HTTP ${r.status}\n${text}`;
-  if (r.ok) {
+  // PR-137 — raw HTTP body looked like server errors. Failures now
+  // route through MnemosUI.showError (toast + structured detail).
+  if (!r.ok) {
+    document.getElementById("create-result").textContent = "";
+    await MnemosUI.showError(
+      MnemosUI.t("Project creation failed"),
+      r,
+    );
+    return false;
+  }
+  document.getElementById("create-result").textContent = "";
+  {
     ev.target.reset();
     // P2-9 onboarding auto-progression: mark step 1 done, surface a
     // "Analyse this project" CTA next to the create result so the
@@ -82,12 +92,26 @@ async function loadProjects() {
   const r = await fetch("/api/v1/projects");
   const out = document.getElementById("projects-list");
   if (!r.ok) {
-    out.innerHTML = `<p class="error">HTTP ${r.status}</p>`;
+    out.innerHTML = '<p class="muted"></p>';
+    await MnemosUI.showError(
+      MnemosUI.t("Could not load projects"),
+      r,
+    );
     return;
   }
   const rows = await r.json();
   if (!rows.length) {
-    out.innerHTML = '<p class="muted">No projects in your organisation.</p>';
+    // PR-137 — empty state with a CTA so a fresh-org operator
+    // doesn't land in a dead end.
+    out.innerHTML =
+      '<p class="muted">' + MnemosUI.escapeHtml(MnemosUI.t(
+        "No projects in your organisation yet."
+      )) + '</p>' +
+      '<p><a class="primary" href="#register-project" '
+      + 'onclick="document.querySelector(&quot;form&quot;).scrollIntoView({behavior:&quot;smooth&quot;});return false;">'
+      + MnemosUI.escapeHtml(MnemosUI.t(
+          "Register your first project →"
+        )) + '</a></p>';
     return;
   }
   let html = '<table class="data"><thead><tr><th>Name</th><th>Languages</th><th>Branch</th><th>ID</th><th></th></tr></thead><tbody>';

@@ -611,6 +611,104 @@
     });
   }
 
+  // ─── Project picker (PR-137 — UX friction kill) ────────────────
+  //
+  // ``MnemosUI.mountProjectPicker(host, opts?)`` upgrades a UUID
+  // ``<input>`` into a ``<select>`` populated from ``/api/v1/projects``,
+  // pre-filled from ``?project=<id>``, and optionally auto-submitting
+  // its parent form. Pre-fix every dashboard tab demanded that the
+  // operator copy a 36-char UUID by hand — the #1 friction the audit
+  // surfaced.
+  //
+  // - ``host``: an ``<input>`` (replaced) or ``<select>`` (filled).
+  //   The picker keeps the host's ``name`` / ``id`` / ``required`` so
+  //   form submission stays identical for downstream code.
+  // - ``opts.autoSubmit`` (bool, default false): if a ``?project=…``
+  //   param was honoured, dispatch a ``submit`` event on the parent
+  //   form so the operator lands on a pre-loaded view, not a blank one.
+  // - ``opts.placeholder`` (str): first option label when no project
+  //   is preselected (default: localised "Select a project").
+  //
+  // The fetch is cached for the page lifetime — multiple pickers on
+  // one screen share one API round-trip.
+
+  var _projectsPromise = null;
+
+  function _fetchProjectsOnce() {
+    if (_projectsPromise) return _projectsPromise;
+    _projectsPromise = fetch("/api/v1/projects", { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .catch(function () { return []; });
+    return _projectsPromise;
+  }
+
+  function currentProjectFromUrl() {
+    try {
+      var u = new URLSearchParams(window.location.search);
+      return u.get("project") || "";
+    } catch (_) { return ""; }
+  }
+
+  function mountProjectPicker(host, opts) {
+    opts = opts || {};
+    if (typeof host === "string") host = document.querySelector(host);
+    if (!host) return Promise.resolve(null);
+    var preset = currentProjectFromUrl();
+    var name = host.getAttribute("name") || "project_id";
+    var hostId = host.id || "project-picker";
+    var required = host.hasAttribute("required");
+    var formEl = host.closest("form");
+
+    return _fetchProjectsOnce().then(function (projects) {
+      var sel = document.createElement("select");
+      sel.id = hostId;
+      sel.setAttribute("name", name);
+      if (required) sel.setAttribute("required", "");
+      sel.className = "mnemos-project-picker";
+      var ph = document.createElement("option");
+      ph.value = "";
+      ph.textContent = opts.placeholder || t("Select a project");
+      sel.appendChild(ph);
+      var matched = false;
+      (projects || []).forEach(function (p) {
+        var o = document.createElement("option");
+        o.value = p.id;
+        o.textContent = p.name + " — " + (p.id || "").slice(0, 8);
+        if (p.id === preset) { o.selected = true; matched = true; }
+        sel.appendChild(o);
+      });
+      // Operator landed on /findings?project=<id> for a project we
+      // can't see — surface that without silently dropping the value.
+      if (preset && !matched) {
+        var o = document.createElement("option");
+        o.value = preset;
+        o.textContent = t("Unknown project") + " — " + preset.slice(0, 8);
+        o.selected = true;
+        sel.appendChild(o);
+      }
+      // Replace the input in-place so existing CSS classes /
+      // <label> ``for=`` references survive.
+      if (host.parentNode) host.parentNode.replaceChild(sel, host);
+
+      if (opts.autoSubmit && preset && formEl) {
+        // Defer one tick so caller's load() handler is registered
+        // before we trigger it.
+        setTimeout(function () {
+          try {
+            if (typeof formEl.requestSubmit === "function") {
+              formEl.requestSubmit();
+            } else {
+              formEl.dispatchEvent(new Event("submit", {
+                bubbles: true, cancelable: true,
+              }));
+            }
+          } catch (_) { /* ignore */ }
+        }, 0);
+      }
+      return sel;
+    });
+  }
+
   // ─── Mermaid renderer (PR-136 — graphs/sequence/charts) ──────────
   //
   // ``MnemosUI.renderMermaid(host, code, opts?)`` renders Mermaid
@@ -2064,6 +2162,8 @@
     exportCsv: exportCsv,
     exportXlsx: exportXlsx,
     renderMermaid: renderMermaid,
+    mountProjectPicker: mountProjectPicker,
+    currentProjectFromUrl: currentProjectFromUrl,
     notify: notify,
     readNotifications: readNotifications,
     clearNotifications: clearNotifications,

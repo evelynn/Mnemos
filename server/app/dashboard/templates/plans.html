@@ -121,5 +121,10 @@ async function decide(id, s) {
   if (!r.ok) { await MnemosUI.showError("Decision failed", r); return; }
   MnemosUI.showToast("Plan decision recorded.", "success");
 }
+
+// PR-137 — project picker upgrade. Preserves id="pid" so the form's
+// load() still works; autoSubmit fires once a ``?project=<id>``
+// deep-link populates the dropdown.
+MnemosUI.mountProjectPicker("#pid", { autoSubmit: true });
 </script>
 {% endblock %}

@@ -322,5 +322,9 @@ function renderLifecycleDiagram() {
     buildReport(null);
   }
 })();
+
+// PR-137 — project picker; auto-submit off because the deep-link
+// branch above already fires buildReport().
+MnemosUI.mountProjectPicker("#rpid", { autoSubmit: false });
 </script>
 {% endblock %}

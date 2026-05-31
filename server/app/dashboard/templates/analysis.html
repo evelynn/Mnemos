@@ -101,8 +101,15 @@ async function triggerRun(ev) {
     }),
   });
   const body = await resp.text();
+  // PR-137 — surface failures via toast + structured detail rather
+  // than a raw HTTP body dump.
+  if (!resp.ok) {
+    document.getElementById("trigger-result").textContent = "";
+    await MnemosUI.showError(MnemosUI.t("Trigger failed"), resp);
+    return false;
+  }
   document.getElementById("trigger-result").textContent = body;
-  if (resp.ok) {
+  {
     // P2-9 onboarding auto-progression: mark step 2 done so the
     // dashboard's first-run guide updates the next time the operator
     // visits the home tab.
@@ -433,5 +440,9 @@ async function loadLatency(ev) {
   MnemosUI.applyI18n(box);
   return false;
 }
+
+// PR-137 — project picker. The page already handles ``?project=`` in
+// the onboarding section above; picker just kills the UUID copy-paste.
+MnemosUI.mountProjectPicker("#rpid", { autoSubmit: false });
 </script>
 {% endblock %}
