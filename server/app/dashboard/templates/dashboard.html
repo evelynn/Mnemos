@@ -78,6 +78,23 @@
   </a>
 </section>
 
+<!-- PR-138e — LLM pipeline health. Renders only when at least one
+     project is in the org so we don't churn the screen for fresh
+     installs. The breakdown comes from PR-138c's
+     /api/v1/projects/{id}/llm_fallback_breakdown — operator sees at a
+     glance whether the platform is on the real LLM, on the stub, or
+     hitting a specific failure mode (timeout / budget / no key). -->
+<section id="llm-health-section" hidden>
+  <h2 data-i18n="LLM pipeline health">LLM pipeline health</h2>
+  <p class="muted" data-i18n="Per-project breakdown of how many summaries used the real LLM vs the stub, and why.">
+    Per-project breakdown of how many summaries used the real LLM
+    vs the stub, and why.
+  </p>
+  <div id="llm-health-box">
+    <div class="skeleton skeleton-card"></div>
+  </div>
+</section>
+
 <section>
   <h2 data-i18n="Latest analysis runs">Latest analysis runs</h2>
   <div id="runs-box"><p class="muted" data-i18n="Loading…">Loading…</p></div>
@@ -151,6 +168,40 @@ a.stat-link:focus-visible {
 .triage .triage-item a { color: var(--accent); text-decoration: none; }
 .triage .triage-item a:hover { text-decoration: underline; }
 .triage .triage-where { color: var(--text-muted); font-size: 0.85rem; }
+
+/* PR-138e — LLM pipeline health bars. Token-themed: real LLM is
+   success-green, fallback to stub is warn-yellow. */
+.llm-health-row {
+  margin: var(--sp-2) 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.llm-health-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.9rem;
+  margin-bottom: var(--sp-1);
+}
+.llm-health-bar {
+  display: flex;
+  height: 6px;
+  width: 100%;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--surface-alt);
+}
+.llm-health-bar .llm-health-ok { background: var(--success); }
+.llm-health-bar .llm-health-fb { background: var(--warn); }
+.llm-health-reasons {
+  margin-top: var(--sp-1);
+  font-size: 0.75rem;
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
 </style>
 
 <script>
@@ -402,11 +453,70 @@ async function loadActivity() {
   } catch (_) {}
 }
 
+// PR-138e — per-project LLM pipeline health. Renders the
+// /llm_fallback_breakdown payload as ok-vs-fallback bars so an
+// operator sees "is the LLM pipeline actually working" at a glance.
+async function loadLlmHealth() {
+  let projects = [];
+  try {
+    const pr = await fetch("/api/v1/projects");
+    if (pr.ok) projects = await pr.json();
+  } catch (_) {}
+  if (!projects.length) return;  // section stays hidden on empty orgs
+  const section = document.getElementById("llm-health-section");
+  const box = document.getElementById("llm-health-box");
+  if (!section || !box) return;
+  // Limit to the first 8 projects to keep render bounded — the
+  // executive report page covers per-project deep-dives.
+  const slice = projects.slice(0, 8);
+  const rows = [];
+  for (const p of slice) {
+    try {
+      const r = await fetch(
+        `/api/v1/projects/${p.id}/llm_fallback_breakdown`
+      );
+      if (!r.ok) continue;
+      const body = await r.json();
+      if (body.total === 0) continue;
+      rows.push({ name: p.name, ...body });
+    } catch (_) {}
+  }
+  if (!rows.length) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  const html = rows.map((r) => {
+    const okPct = r.total
+      ? Math.round((100 * r.ok) / r.total) : 0;
+    const fbPct = 100 - okPct;
+    const fbList = Object.entries(r.fallbacks)
+      .sort((a, b) => b[1] - a[1])
+      .map(([reason, n]) => `<code class="muted">${escapeHtml(reason)}=${n}</code>`)
+      .join(" ");
+    return `<div class="llm-health-row">
+      <div class="llm-health-head">
+        <strong>${escapeHtml(r.name)}</strong>
+        <span class="muted">${r.ok}/${r.total} on LLM</span>
+      </div>
+      <div class="llm-health-bar" role="img"
+           aria-label="${okPct}% real LLM, ${fbPct}% fallback">
+        <span class="llm-health-ok" style="width:${okPct}%"></span>
+        <span class="llm-health-fb" style="width:${fbPct}%"></span>
+      </div>
+      ${fbList ? `<div class="llm-health-reasons">${fbList}</div>` : ""}
+    </div>`;
+  }).join("");
+  box.innerHTML = html;
+  MnemosUI.applyI18n(box);
+}
+
 loadReady();
 loadSummary();
 loadMetricsSummary();
 loadActivity();
 loadTriage();
+loadLlmHealth();
 
 // PR-57 — first-run guided tour. Fires once per browser; the
 // operator can re-trigger it from the Profile page.
