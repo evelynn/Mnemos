@@ -16,13 +16,57 @@ from typing import Any
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.extractor.agent import Extractor
+from app.extractor.agent import (
+    FALLBACK_NO_BACKEND,
+    Extractor,
+    ExtractorResult,
+)
+from app.extractor.cost import BudgetExceeded, require_budget
 from app.extractor.packing import evidence_hash, pack_by_budget
 from app.extractor.validator import validate_claims
 from app.models.findings import Summary
 from app.models.graph import Edge, Node
 
 _HASH_KEY = "_evidence_hash"
+FALLBACK_BUDGET_EXCEEDED = "budget_exceeded"
+
+
+async def _summarize_with_budget(
+    session: AsyncSession,
+    extractor: Extractor,
+    project_id: uuid.UUID,
+    level: int,
+    target_id: str,
+    evidence: list[dict[str, Any]],
+) -> ExtractorResult:
+    """Run the extractor with the budget guard pre-check.
+
+    When the project has exhausted its rolling-window cap (cap > 0,
+    spend ≥ cap), we skip the LLM call and synthesise a stub result
+    with a clearly-labelled reason. Operators see this on
+    ``summaries.model_used`` and the Prometheus counter (PR-138).
+
+    Default deployments leave ``MNEMOS_LLM_BUDGET_USD_PER_PROJECT``
+    at 0 (disabled), so this guard is a no-op until an operator
+    explicitly opts in.
+    """
+    try:
+        await require_budget(session, project_id)
+    except BudgetExceeded:
+        # Fall through to the stub path; tick the same counter the
+        # silent-fallback path uses so the operator sees a unified
+        # "this run did NOT hit the LLM" metric.
+        try:
+            from app.obs.metrics import llm_fallback_total
+            llm_fallback_total.labels(
+                **{"from": "extractor", "reason": FALLBACK_BUDGET_EXCEEDED}
+            ).inc()
+        except Exception:  # noqa: BLE001
+            pass
+        return Extractor._stub(
+            level, target_id, evidence, FALLBACK_BUDGET_EXCEEDED,
+        )
+    return await extractor.summarize(level, target_id, evidence)
 
 
 async def _current_summary(
@@ -225,7 +269,17 @@ async def summarise_l1(
                 await progress_cb()
             continue
 
-        result = await extractor.summarize(1, sym.id, evidence)
+        # PR-138 — budget guard. If the project crossed the configured
+        # cap in the rolling window, skip the LLM call and let the
+        # extractor fall through to the stub path; the operator sees
+        # ``model_used="stub:budget_exceeded"`` and the runaway-spend
+        # event is recorded on ``mnemos_llm_fallback_total``. When the
+        # cap is unset (``MNEMOS_LLM_BUDGET_USD_PER_PROJECT=0``,
+        # default) ``check_budget`` returns ``enabled=False`` so the
+        # call is free.
+        result = await _summarize_with_budget(
+            session, extractor, project_id, 1, sym.id, evidence
+        )
         accepted, _rejected = await validate_claims(
             session, project_id=project_id, claims=result.claims
         )
@@ -242,6 +296,13 @@ async def summarise_l1(
                 open_questions=result.open_questions,
                 model_used=result.model_used,
                 tokens_used=result.tokens_used,
+                # PR-138b — persist the structured fallback reason so
+                # the dashboard / API can render "why this is a stub"
+                # without parsing the model_used string. ``None`` on
+                # the happy path (real LLM call succeeded).
+                fallback_reason=(
+                    result.fallback_reason or None
+                ),
                 generated_at=datetime.now(tz=timezone.utc),
             )
         )
@@ -317,14 +378,21 @@ async def summarise_l2(
         partials: list[str] = []
         for i, chunk in enumerate(chunks):
             target_label = file_path if len(chunks) == 1 else f"{file_path}#chunk{i + 1}"
-            partial = await extractor.summarize(2, target_label, chunk)
+            # PR-138 — every L2 LLM call passes through the budget guard.
+            partial = await _summarize_with_budget(
+                session, extractor, project_id, 2, target_label, chunk
+            )
             partials.append(partial.summary)
 
         if len(partials) == 1:
-            result = await extractor.summarize(2, file_path, raw)
+            result = await _summarize_with_budget(
+                session, extractor, project_id, 2, file_path, raw
+            )
         else:
             rollup_input = [{"kind": "node", "node_id": file_path, "partial_summary": p} for p in partials]
-            result = await extractor.summarize(2, file_path, rollup_input)
+            result = await _summarize_with_budget(
+                session, extractor, project_id, 2, file_path, rollup_input
+            )
 
         accepted, _ = await validate_claims(
             session, project_id=project_id, claims=result.claims
@@ -341,6 +409,13 @@ async def summarise_l2(
                 open_questions=result.open_questions,
                 model_used=result.model_used,
                 tokens_used=result.tokens_used,
+                # PR-138b — persist the structured fallback reason so
+                # the dashboard / API can render "why this is a stub"
+                # without parsing the model_used string. ``None`` on
+                # the happy path (real LLM call succeeded).
+                fallback_reason=(
+                    result.fallback_reason or None
+                ),
                 generated_at=datetime.now(tz=timezone.utc),
             )
         )
@@ -400,14 +475,22 @@ async def summarise_l3(
 
         chunks = pack_by_budget(raw, max_tokens=4000)
         if len(chunks) == 1:
-            result = await extractor.summarize(3, module, raw)
+            # PR-138 — budget guard wraps every L3 call.
+            result = await _summarize_with_budget(
+                session, extractor, project_id, 3, module, raw
+            )
         else:
             partials: list[str] = []
             for i, chunk in enumerate(chunks):
-                r = await extractor.summarize(3, f"{module}#chunk{i + 1}", chunk)
+                r = await _summarize_with_budget(
+                    session, extractor, project_id, 3,
+                    f"{module}#chunk{i + 1}", chunk,
+                )
                 partials.append(r.summary)
             rollup = [{"kind": "node", "node_id": module, "partial_summary": p} for p in partials]
-            result = await extractor.summarize(3, module, rollup)
+            result = await _summarize_with_budget(
+                session, extractor, project_id, 3, module, rollup
+            )
 
         accepted, _ = await validate_claims(
             session, project_id=project_id, claims=result.claims
@@ -424,6 +507,13 @@ async def summarise_l3(
                 open_questions=result.open_questions,
                 model_used=result.model_used,
                 tokens_used=result.tokens_used,
+                # PR-138b — persist the structured fallback reason so
+                # the dashboard / API can render "why this is a stub"
+                # without parsing the model_used string. ``None`` on
+                # the happy path (real LLM call succeeded).
+                fallback_reason=(
+                    result.fallback_reason or None
+                ),
                 generated_at=datetime.now(tz=timezone.utc),
             )
         )
