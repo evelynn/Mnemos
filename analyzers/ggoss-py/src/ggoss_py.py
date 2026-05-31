@@ -415,6 +415,296 @@ def cmd_calls(target: Path, out_stream) -> None:
             out_stream.write(_envelope("edge", data) + "\n")
 
 
+# ─── contracts (HTTP routes) ─────────────────────────────────────
+#
+# PR-137 — Python equivalent of ggoss-ts's NestJS decorator scan.
+# Detects FastAPI / Flask / Starlette / aiohttp / Sanic / Django
+# REST framework routes from decorators on the source side, and
+# ``requests`` / ``httpx`` calls from the client side. Each EXPOSES /
+# CALLS edge connects a symbol to a contract node.
+
+_HTTP_DECO_NAMES = {
+    "get", "post", "put", "delete", "patch", "head", "options",
+    "route",   # Flask: @app.route("/x", methods=["GET"])
+}
+
+
+def _string_literal(node: ast.expr) -> str | None:
+    """Return the literal value of a Constant string (Python 3.8+).
+    Returns None for f-strings / dynamic expressions — we don't
+    pretend to evaluate them."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _deco_route(deco: ast.expr) -> tuple[str, str] | None:
+    """Inspect a decorator AST node and, if it looks like
+    ``@<router>.<verb>("/path")`` (FastAPI/Starlette/Sanic/aiohttp) or
+    ``@app.route("/path", methods=["POST"])`` (Flask), return
+    ``(http_method, route)``. Bound to known verb names only — avoids
+    flagging e.g. ``@functools.wraps``.
+    """
+    # @something(...) — must be a Call, otherwise no path arg.
+    if not isinstance(deco, ast.Call):
+        return None
+    func = deco.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    verb = func.attr.lower()
+    if verb not in _HTTP_DECO_NAMES:
+        return None
+    if not deco.args:
+        return None
+    path = _string_literal(deco.args[0])
+    if not path:
+        return None
+    # @app.route("/x", methods=["POST"]) — pick the first listed
+    # method, default GET.
+    if verb == "route":
+        method = "GET"
+        for kw in deco.keywords:
+            if kw.arg == "methods":
+                m_node = kw.value
+                if isinstance(m_node, (ast.List, ast.Tuple)) and m_node.elts:
+                    m = _string_literal(m_node.elts[0])
+                    if m:
+                        method = m.upper()
+                break
+        return method, path
+    return verb.upper(), path
+
+
+def cmd_contracts(target: Path, out_stream) -> None:
+    """Stream ``record_type=contract`` + the EXPOSES edges that
+    connect them to the function/method symbol carrying the route."""
+    target = target.resolve()
+    comp_id = _component_id(target)
+    for path in _iter_py_files(target):
+        try:
+            src = path.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(src, filename=str(path))
+        except SyntaxError:
+            continue
+        rel = str(path.resolve())
+        symbols = _walk_symbols(tree, rel)
+        sym_by_line: dict[int, _Symbol] = {s.line: s for s in symbols}
+
+        for node in ast.walk(tree):
+            if not isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                continue
+            for deco in getattr(node, "decorator_list", []):
+                hit = _deco_route(deco)
+                if not hit:
+                    continue
+                method, route = hit
+                sym = sym_by_line.get(node.lineno)
+                if not sym:
+                    continue
+                contract_id = f"contract:http:{method}:{route}"
+                out_stream.write(_envelope("contract", {
+                    "id": contract_id,
+                    "kind": "http",
+                    "method": method,
+                    "path": route,
+                    "component_id": comp_id,
+                    "location": {"file": rel, "line": deco.lineno, "col": 1},
+                    "created_by": [_SOURCE_NAME],
+                    "certainty": "asserted",
+                }) + "\n")
+                out_stream.write(_envelope("edge", {
+                    "source_id": sym.id,
+                    "target_id": contract_id,
+                    "kind": "EXPOSES",
+                    "certainty": "asserted",
+                    "created_by": [_SOURCE_NAME],
+                    "metadata": {
+                        "framework": _deco_framework(deco),
+                        "line": deco.lineno,
+                    },
+                }) + "\n")
+
+
+def _deco_framework(deco: ast.expr) -> str:
+    """Best-effort framework hint from the receiver name (``app`` /
+    ``router`` / ``api``) — not authoritative, just useful metadata."""
+    if isinstance(deco, ast.Call) and isinstance(deco.func, ast.Attribute):
+        recv = deco.func.value
+        if isinstance(recv, ast.Name):
+            return recv.id
+    return "unknown"
+
+
+# ─── data_access (READS/WRITES) ──────────────────────────────────
+#
+# Minimal but honest detector. Two patterns:
+#
+#  1. ``session.execute(text("SELECT/INSERT/UPDATE/DELETE FROM t ..."))``
+#     — common SQLAlchemy raw-SQL shape. The verb decides READS vs
+#     WRITES; the table is the first identifier after FROM/INTO/UPDATE.
+#
+#  2. ``session.query(Model)`` / ``select(Model)`` — Model name is the
+#     logical entity. READS-only.
+#
+# Limits intentionally documented per analyzer-contract.md:
+# - No type inference; Model in select(Model) is taken at face value.
+# - Schema-qualification falls to the merge layer (DB analyzers emit
+#   schema-qualified entities; this one emits ``data.<table>``).
+
+import re as _re
+
+_SQL_VERB_RE = _re.compile(
+    r"^\s*(SELECT|INSERT|UPDATE|DELETE)\s+",
+    _re.IGNORECASE | _re.MULTILINE,
+)
+_SQL_TABLE_RE = {
+    "SELECT": _re.compile(r"\bFROM\s+([A-Za-z_][\w.]*)", _re.IGNORECASE),
+    "INSERT": _re.compile(r"\bINTO\s+([A-Za-z_][\w.]*)", _re.IGNORECASE),
+    "UPDATE": _re.compile(r"\bUPDATE\s+([A-Za-z_][\w.]*)", _re.IGNORECASE),
+    "DELETE": _re.compile(r"\bFROM\s+([A-Za-z_][\w.]*)", _re.IGNORECASE),
+}
+_VERB_TO_KIND = {
+    "SELECT": "READS", "INSERT": "WRITES",
+    "UPDATE": "WRITES", "DELETE": "WRITES",
+}
+
+
+def _sql_targets(sql: str) -> list[tuple[str, str]]:
+    """Return ``[(kind, table_name), ...]`` from a raw SQL string."""
+    out: list[tuple[str, str]] = []
+    for m in _SQL_VERB_RE.finditer(sql):
+        verb = m.group(1).upper()
+        kind = _VERB_TO_KIND[verb]
+        tail = sql[m.end():]
+        tm = _SQL_TABLE_RE[verb].search(tail)
+        if tm:
+            out.append((kind, tm.group(1)))
+    return out
+
+
+def _fns_with_qname(tree: ast.Module) -> Iterator[tuple[Any, str]]:
+    """Yield ``(fn_node, qual_name)`` so a nested class's methods get
+    the ``Class.method`` qname (matching ``_walk_symbols``)."""
+    def walk(node: ast.AST, stack: list[str]) -> Iterator:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                yield from walk(child, stack + [child.name])
+            elif isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                qname = ".".join(stack + [child.name])
+                yield child, qname
+                # Nested defs inside a function are unusual but
+                # legal — recurse so they're not lost.
+                yield from walk(child, stack + [child.name])
+            else:
+                yield from walk(child, stack)
+    yield from walk(tree, [])
+
+
+def cmd_data_access(target: Path, out_stream) -> None:
+    """Stream READS/WRITES edges and the data_entity nodes they
+    reference. Emits one ``data_entity`` per distinct table the file
+    touches (deduped within a file)."""
+    target = target.resolve()
+    comp_id = _component_id(target)
+    for path in _iter_py_files(target):
+        try:
+            src = path.read_text(encoding="utf-8", errors="replace")
+            tree = ast.parse(src, filename=str(path))
+        except SyntaxError:
+            continue
+        rel = str(path.resolve())
+        symbols = _walk_symbols(tree, rel)
+        sym_by_qname: dict[str, _Symbol] = {s.qual_name: s for s in symbols}
+        emitted_entities: set[str] = set()
+
+        # Walk every Call node within a function/method scope.
+        for fn, qname in _fns_with_qname(tree):
+            sym = sym_by_qname.get(qname)
+            if not sym:
+                continue
+            for call in ast.walk(fn):
+                if not isinstance(call, ast.Call):
+                    continue
+                # Pattern A: text("SQL") or execute("SQL"). The SQL
+                # may sit as the first arg or inside a text() wrapper.
+                sql_blob: str | None = None
+                if call.args:
+                    a0 = call.args[0]
+                    if isinstance(a0, ast.Constant) and isinstance(a0.value, str):
+                        sql_blob = a0.value
+                    elif (
+                        isinstance(a0, ast.Call) and
+                        isinstance(a0.func, ast.Name) and
+                        a0.func.id == "text" and a0.args
+                    ):
+                        nested = a0.args[0]
+                        if isinstance(nested, ast.Constant) \
+                                and isinstance(nested.value, str):
+                            sql_blob = nested.value
+                if sql_blob:
+                    for kind, table in _sql_targets(sql_blob):
+                        ent_id = f"data:{table.lower()}"
+                        if ent_id not in emitted_entities:
+                            emitted_entities.add(ent_id)
+                            out_stream.write(_envelope("data_entity", {
+                                "id": ent_id,
+                                "logical_name": table.lower(),
+                                "component_id": comp_id,
+                                "schema": None,
+                                "created_by": [_SOURCE_NAME],
+                                "certainty": "inferred",
+                            }) + "\n")
+                        out_stream.write(_envelope("edge", {
+                            "source_id": sym.id,
+                            "target_id": ent_id,
+                            "kind": kind,
+                            "certainty": "inferred",
+                            "created_by": [_SOURCE_NAME],
+                            "metadata": {
+                                "via": "raw_sql",
+                                "line": call.lineno,
+                            },
+                        }) + "\n")
+
+                # Pattern B: session.query(Model) / select(Model).
+                f = call.func
+                method_name = None
+                if isinstance(f, ast.Attribute):
+                    method_name = f.attr
+                elif isinstance(f, ast.Name):
+                    method_name = f.id
+                if method_name in {"query", "select"} and call.args:
+                    arg0 = call.args[0]
+                    if isinstance(arg0, ast.Name):
+                        model = arg0.id
+                        ent_id = f"data:{model.lower()}"
+                        if ent_id not in emitted_entities:
+                            emitted_entities.add(ent_id)
+                            out_stream.write(_envelope("data_entity", {
+                                "id": ent_id,
+                                "logical_name": model.lower(),
+                                "component_id": comp_id,
+                                "schema": None,
+                                "created_by": [_SOURCE_NAME],
+                                "certainty": "inferred",
+                            }) + "\n")
+                        out_stream.write(_envelope("edge", {
+                            "source_id": sym.id,
+                            "target_id": ent_id,
+                            "kind": "READS",
+                            "certainty": "inferred",
+                            "created_by": [_SOURCE_NAME],
+                            "metadata": {
+                                "via": f"orm_{method_name}",
+                                "line": call.lineno,
+                            },
+                        }) + "\n")
+
+
 def cmd_schema() -> dict[str, Any]:
     """Static description — what records this analyzer can emit.
     The orchestrator uses this to validate the configured pipeline."""
@@ -422,7 +712,8 @@ def cmd_schema() -> dict[str, Any]:
         "language": "python",
         "version": _SOURCE_VERSION,
         "symbol_kinds": ["class", "function", "method", "async_function"],
-        "edge_kinds": ["CALLS"],
+        "edge_kinds": ["CALLS", "EXPOSES", "READS", "WRITES"],
+        "record_types": ["symbol", "edge", "contract", "data_entity"],
     }
 
 
@@ -432,13 +723,18 @@ def cmd_schema() -> dict[str, Any]:
 def main(argv: list[str]) -> int:
     if not argv:
         sys.stderr.write(
-            "usage: ggoss-py <probe|inventory|symbols|calls|schema> <target>\n"
+            "usage: ggoss-py "
+            "<probe|inventory|symbols|calls|contracts|data_access|schema> "
+            "<target>\n"
         )
         return 2
     verb = argv[0]
     rest = argv[1:]
     target_str = next((a for a in rest if not a.startswith("-")), None)
-    if verb in {"probe", "inventory", "symbols", "calls"} and target_str is None:
+    if verb in {
+        "probe", "inventory", "symbols", "calls",
+        "contracts", "data_access",
+    } and target_str is None:
         sys.stderr.write(f"missing target arg for verb {verb!r}\n")
         return 2
     target = Path(target_str) if target_str else Path(".")
@@ -454,6 +750,12 @@ def main(argv: list[str]) -> int:
         return 0
     if verb == "calls":
         cmd_calls(target, sys.stdout)
+        return 0
+    if verb == "contracts":
+        cmd_contracts(target, sys.stdout)
+        return 0
+    if verb == "data_access":
+        cmd_data_access(target, sys.stdout)
         return 0
     if verb == "schema":
         print(json.dumps(cmd_schema()))
