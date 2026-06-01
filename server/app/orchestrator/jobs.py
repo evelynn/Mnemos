@@ -18,7 +18,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.analyzers.registry import runner_for
+from app.analyzers.registry import binary_for, runner_for
 from app.audit.logger import record as audit_record
 from app.config import get_settings
 from app.db import SessionLocal
@@ -212,6 +212,98 @@ async def _run_analyzer_stage(
         stage.set_stats({k: totals.get(k, 0) for k in ("symbols", "edges", "contracts", "data_entities")})
 
 
+async def _run_agent_extraction_stage(
+    bus: ProgressBus,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    language: str,
+    path: str,
+    position: int,
+    totals: dict[str, int],
+    file_limit: int,
+) -> None:
+    """PR-140 — Claude-Code source extraction for a language with no
+    deterministic ggoss analyzer (spec principle #4: delegate to Claude
+    Code). Hands each source file to the operator's Claude Code
+    subscription and ingests the inferred symbols/edges through the same
+    graph path as the analyzers. Degrades to a recorded skip when the
+    Agent SDK isn't available or the language has no known file types."""
+    from app.extractor.agent_extract import (
+        AGENT_LANGUAGE_EXTENSIONS,
+        discover_source_files,
+        extract_file_via_agent_sdk,
+        is_agent_sdk_available,
+        to_envelopes,
+    )
+
+    stage_name = f"agent_extract:{language}"
+
+    if not is_agent_sdk_available():
+        async with StageTracker(
+            bus, run_id, project_id, stage_name, language=language, position=position
+        ) as stage:
+            stage.set_stats({"skipped": True, "reason": "agent_sdk_unavailable"})
+        return
+    if language not in AGENT_LANGUAGE_EXTENSIONS:
+        async with StageTracker(
+            bus, run_id, project_id, stage_name, language=language, position=position
+        ) as stage:
+            stage.set_stats({"skipped": True, "reason": "language_not_supported"})
+        return
+
+    files = discover_source_files(path, language, limit=file_limit)
+    if not files:
+        async with StageTracker(
+            bus, run_id, project_id, stage_name, language=language, position=position
+        ) as stage:
+            stage.set_stats({"skipped": True, "reason": "no_source_files"})
+        return
+
+    accept = {"symbol", "edge"}
+    files_done = 0
+    async with StageTracker(
+        bus, run_id, project_id, stage_name,
+        language=language, position=position, time_budget_sec=3600,
+    ) as stage:
+        async with SessionLocal() as session:
+            for fpath in files:
+                try:
+                    code = fpath.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                file_rel = str(fpath.relative_to(path)) if str(fpath).startswith(
+                    str(path)
+                ) else fpath.name
+                extracted = await extract_file_via_agent_sdk(
+                    language=language, file_rel=file_rel, code=code
+                )
+                files_done += 1
+                if not extracted:
+                    continue
+                for env in to_envelopes(language, file_rel, extracted):
+                    before = sum(totals.values())
+                    await _record_payload(
+                        session,
+                        project_id=project_id,
+                        payload=env,
+                        accept_kinds=accept,
+                        totals=totals,
+                    )
+                    after = sum(totals.values())
+                    if after > before:
+                        await stage.increment(after - before)
+                # Commit per file so a later timeout still persists progress.
+                await session.commit()
+        stage.set_stats(
+            {
+                "files_analyzed": files_done,
+                "symbols": totals.get("symbols", 0),
+                "edges": totals.get("edges", 0),
+                "extractor": "claude_code",
+            }
+        )
+
+
 async def _run_db_live_schema_stages(
     bus: ProgressBus,
     project_id: uuid.UUID,
@@ -383,6 +475,21 @@ async def run_ingest(
                     await _run_analyzer_stage(
                         bus, project_id, run_id, language, verb, path, position, totals
                     )
+
+            # Stage L0-Agent: for any project language with no deterministic
+            # ggoss analyzer, delegate extraction to the operator's Claude
+            # Code subscription (spec principle #4) so the platform is never
+            # blind to a language just because no analyzer binary ships for
+            # it. Bounded by ``agent_extract_limit`` files per language.
+            agent_limit = int(opts.get("agent_extract_limit", 12))
+            if agent_limit > 0:
+                for language in project.languages:
+                    if binary_for(language) is None:
+                        position += 1
+                        await _run_agent_extraction_stage(
+                            bus, project_id, run_id, language, path,
+                            position, totals, agent_limit,
+                        )
 
             # Stage L0-DB: live database schema for every registered
             # ProjectDB. Skipped silently when no DBs are bound to the

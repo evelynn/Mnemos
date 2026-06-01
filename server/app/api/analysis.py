@@ -30,6 +30,9 @@ class AnalysisTriggerRequest(BaseModel):
     l1_limit: int = Field(default=25, ge=1, le=1000)
     l2_limit: int = Field(default=25, ge=1, le=1000)
     l3_limit: int = Field(default=25, ge=1, le=1000)
+    # PR-140 — per-language file budget for Claude-Code extraction of
+    # languages with no deterministic analyzer. 0 disables the path.
+    agent_extract_limit: int = Field(default=12, ge=0, le=500)
 
 
 class AnalysisRunOut(BaseModel):
@@ -99,6 +102,7 @@ async def trigger_analysis(
             "l1_limit": body.l1_limit,
             "l2_limit": body.l2_limit,
             "l3_limit": body.l3_limit,
+            "agent_extract_limit": body.agent_extract_limit,
         },
     )
     await audit_record(

@@ -14,6 +14,11 @@ _BINARIES = {
 }
 
 
+# Languages with a deterministic ggoss analyzer. Languages outside this
+# set fall back to Claude-Code agent extraction (PR-140) when eligible.
+ANALYZER_LANGUAGES = frozenset(_BINARIES)
+
+
 def binary_for(language: str) -> str | None:
     return _BINARIES.get(language)
 
