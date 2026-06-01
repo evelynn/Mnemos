@@ -8,6 +8,7 @@ clients — the full exception is still logged server-side at ERROR level.
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import FastAPI, HTTPException, Request
@@ -39,9 +40,14 @@ async def validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
     rid = get_request_id()
+    # pydantic v2 puts the original exception object in ``ctx`` (e.g. a
+    # field_validator's ValueError), which JSONResponse can't serialize and
+    # would turn a clean 422 into a 500. Round-trip through json with
+    # ``default=str`` so any non-JSON value degrades to its string form.
+    safe_errors = json.loads(json.dumps(exc.errors(), default=str))
     return _body(
         422,
-        {"errors": exc.errors()},
+        {"errors": safe_errors},
         rid,
     )
 
