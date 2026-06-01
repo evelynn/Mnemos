@@ -234,5 +234,8 @@ function _showNextDataPage() {
     more.onclick = _showNextDataPage;
   }
 }
+
+// PR-137 — project picker.
+MnemosUI.mountProjectPicker("#pid", { autoSubmit: true });
 </script>
 {% endblock %}

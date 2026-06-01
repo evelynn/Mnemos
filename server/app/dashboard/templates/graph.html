@@ -612,5 +612,10 @@ async function submitFactConfirmation(ev) {
     loadGraph(null);
   }
 })();
+
+// PR-137 — upgrade #gpid (which loadGraph reads via getElementById)
+// into a project picker. Auto-submit is off because loadGraph already
+// fires on the ?project= deep-link above; we just want the dropdown.
+MnemosUI.mountProjectPicker("#gpid", { autoSubmit: false });
 </script>
 {% endblock %}

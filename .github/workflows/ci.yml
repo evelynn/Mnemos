@@ -87,6 +87,18 @@ jobs:
           count=$(pytest --co -q -m integration 2>/dev/null | grep -cE '::test_')
           echo "integration tests collected: $count"
           test "$count" -ge 9
+      - name: Verify PR-138 real-execution E2E tests collected
+        # The PR-138 series adds substantive real-execution tests
+        # (HTTP via ASGITransport, polyglot SQLite, real seed graph).
+        # A future refactor that deletes the files or breaks the
+        # module-scoped fixtures must fail CI loudly, not silently
+        # regress the suite. ≥30 PR-138* tests should always be
+        # collected.
+        working-directory: server
+        run: |
+          count=$(pytest --co -q tests/test_pr138*.py 2>/dev/null | grep -cE '::test_')
+          echo "PR-138 real-execution tests collected: $count"
+          test "$count" -ge 30
 
   docker-build:
     runs-on: ubuntu-latest

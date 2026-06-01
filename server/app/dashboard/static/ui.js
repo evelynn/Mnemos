@@ -611,6 +611,169 @@
     });
   }
 
+  // ─── Project picker (PR-137 — UX friction kill) ────────────────
+  //
+  // ``MnemosUI.mountProjectPicker(host, opts?)`` upgrades a UUID
+  // ``<input>`` into a ``<select>`` populated from ``/api/v1/projects``,
+  // pre-filled from ``?project=<id>``, and optionally auto-submitting
+  // its parent form. Pre-fix every dashboard tab demanded that the
+  // operator copy a 36-char UUID by hand — the #1 friction the audit
+  // surfaced.
+  //
+  // - ``host``: an ``<input>`` (replaced) or ``<select>`` (filled).
+  //   The picker keeps the host's ``name`` / ``id`` / ``required`` so
+  //   form submission stays identical for downstream code.
+  // - ``opts.autoSubmit`` (bool, default false): if a ``?project=…``
+  //   param was honoured, dispatch a ``submit`` event on the parent
+  //   form so the operator lands on a pre-loaded view, not a blank one.
+  // - ``opts.placeholder`` (str): first option label when no project
+  //   is preselected (default: localised "Select a project").
+  //
+  // The fetch is cached for the page lifetime — multiple pickers on
+  // one screen share one API round-trip.
+
+  var _projectsPromise = null;
+
+  function _fetchProjectsOnce() {
+    if (_projectsPromise) return _projectsPromise;
+    _projectsPromise = fetch("/api/v1/projects", { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .catch(function () { return []; });
+    return _projectsPromise;
+  }
+
+  function currentProjectFromUrl() {
+    try {
+      var u = new URLSearchParams(window.location.search);
+      return u.get("project") || "";
+    } catch (_) { return ""; }
+  }
+
+  function mountProjectPicker(host, opts) {
+    opts = opts || {};
+    if (typeof host === "string") host = document.querySelector(host);
+    if (!host) return Promise.resolve(null);
+    var preset = currentProjectFromUrl();
+    var name = host.getAttribute("name") || "project_id";
+    var hostId = host.id || "project-picker";
+    var required = host.hasAttribute("required");
+    var formEl = host.closest("form");
+
+    return _fetchProjectsOnce().then(function (projects) {
+      var sel = document.createElement("select");
+      sel.id = hostId;
+      sel.setAttribute("name", name);
+      if (required) sel.setAttribute("required", "");
+      sel.className = "mnemos-project-picker";
+      var ph = document.createElement("option");
+      ph.value = "";
+      ph.textContent = opts.placeholder || t("Select a project");
+      sel.appendChild(ph);
+      var matched = false;
+      (projects || []).forEach(function (p) {
+        var o = document.createElement("option");
+        o.value = p.id;
+        o.textContent = p.name + " — " + (p.id || "").slice(0, 8);
+        if (p.id === preset) { o.selected = true; matched = true; }
+        sel.appendChild(o);
+      });
+      // Operator landed on /findings?project=<id> for a project we
+      // can't see — surface that without silently dropping the value.
+      if (preset && !matched) {
+        var o = document.createElement("option");
+        o.value = preset;
+        o.textContent = t("Unknown project") + " — " + preset.slice(0, 8);
+        o.selected = true;
+        sel.appendChild(o);
+      }
+      // Replace the input in-place so existing CSS classes /
+      // <label> ``for=`` references survive.
+      if (host.parentNode) host.parentNode.replaceChild(sel, host);
+
+      if (opts.autoSubmit && preset && formEl) {
+        // Defer one tick so caller's load() handler is registered
+        // before we trigger it.
+        setTimeout(function () {
+          try {
+            if (typeof formEl.requestSubmit === "function") {
+              formEl.requestSubmit();
+            } else {
+              formEl.dispatchEvent(new Event("submit", {
+                bubbles: true, cancelable: true,
+              }));
+            }
+          } catch (_) { /* ignore */ }
+        }, 0);
+      }
+      return sel;
+    });
+  }
+
+  // ─── Mermaid renderer (PR-136 — graphs/sequence/charts) ──────────
+  //
+  // ``MnemosUI.renderMermaid(host, code, opts?)`` renders Mermaid
+  // syntax (flowchart, sequence, gantt, pie, state, ER, journey, …)
+  // into ``host``. The library (~3.2 MB minified) is **lazy-loaded**
+  // on first call so tabs that never render a diagram pay zero bytes
+  // for it — same pattern as ``_loadExcelJS``. Served from
+  // ``/static/mermaid.min.js`` (self-hosted, MIT) so the locked-down
+  // CSP from PR-130 never has to allow a third-party origin.
+
+  var _mermaidPromise = null;
+  var _mermaidSeq = 0;
+
+  function _loadMermaid() {
+    if (window.mermaid) return Promise.resolve(window.mermaid);
+    if (_mermaidPromise) return _mermaidPromise;
+    _mermaidPromise = new Promise(function (resolve, reject) {
+      var s = document.createElement("script");
+      s.src = "/static/mermaid.min.js";
+      s.async = true;
+      s.onload = function () {
+        if (window.mermaid) {
+          var theme = document.documentElement
+            .getAttribute("data-theme") === "dark" ? "dark" : "default";
+          window.mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: "strict",  // sanitises labels — no inline HTML
+            theme: theme,
+            fontFamily: "var(--font-mono, monospace)",
+          });
+          resolve(window.mermaid);
+        } else {
+          reject(new Error("mermaid loaded but window.mermaid missing"));
+        }
+      };
+      s.onerror = function () {
+        _mermaidPromise = null;  // allow a retry on next call
+        reject(new Error("failed to load /static/mermaid.min.js"));
+      };
+      document.head.appendChild(s);
+    });
+    return _mermaidPromise;
+  }
+
+  function renderMermaid(host, code, opts) {
+    opts = opts || {};
+    if (typeof host === "string") host = document.querySelector(host);
+    if (!host) return Promise.reject(new Error("renderMermaid: host missing"));
+    return _loadMermaid().then(function (mermaid) {
+      var id = "mermaid-" + (++_mermaidSeq);
+      return mermaid.render(id, String(code || "")).then(function (out) {
+        host.innerHTML = out.svg;
+        if (typeof out.bindFunctions === "function") {
+          out.bindFunctions(host);
+        }
+        return host;
+      });
+    }).catch(function (err) {
+      host.innerHTML = '<p class="muted" role="alert">'
+        + escapeHtml(t("Diagram render failed: ") + (err && err.message || err))
+        + "</p>";
+      throw err;
+    });
+  }
+
   // ─── Command palette (PR-42, audit C2 + D3) ──────────────────────
   //
   // ``cmd/ctrl+K`` (or ``/``) anywhere on the dashboard opens a
@@ -1070,8 +1233,76 @@
     return false;
   };
 
+  // PR-138e — replaced the bare ``prompt("Edit comment:")`` with a
+  // proper Promise-based modal. ``window.prompt`` is unstyled, has
+  // no validation, and breaks dark theme — the UX audit's "drops to
+  // circa-2000" complaint. The modal preserves Cancel/Save semantics
+  // (returns null on Cancel) and wires Esc/Enter for keyboard ops.
+  function _editCommentDialog(currentBody) {
+    return new Promise(function (resolve) {
+      var existing = document.getElementById("mnemos-edit-comment-dialog");
+      if (existing) existing.remove();
+      var dlg = document.createElement("dialog");
+      dlg.id = "mnemos-edit-comment-dialog";
+      dlg.className = "modal";
+      dlg.setAttribute("aria-labelledby", "mnemos-edit-comment-title");
+      dlg.innerHTML =
+        '<header><h2 id="mnemos-edit-comment-title">'
+        + escapeHtml(t("Edit comment")) + '</h2></header>'
+        + '<div class="body">'
+        + '<textarea id="mnemos-edit-comment-ta" '
+        + 'aria-label="' + escapeHtml(t("Comment body")) + '"></textarea>'
+        + '</div>'
+        + '<menu>'
+        + '<button type="button" id="mnemos-edit-comment-cancel">'
+        + escapeHtml(t("Cancel")) + '</button>'
+        + '<button type="button" id="mnemos-edit-comment-save" '
+        + 'class="primary">' + escapeHtml(t("Save")) + '</button>'
+        + '</menu>';
+      document.body.appendChild(dlg);
+      var ta = dlg.querySelector("textarea");
+      ta.value = currentBody || "";
+      function _close(value) {
+        try { dlg.close(); } catch (_) {}
+        try { dlg.remove(); } catch (_) {}
+        resolve(value);
+      }
+      dlg.querySelector("#mnemos-edit-comment-cancel")
+        .addEventListener("click", function () { _close(null); });
+      dlg.querySelector("#mnemos-edit-comment-save")
+        .addEventListener("click", function () {
+          var v = ta.value.trim();
+          _close(v || null);
+        });
+      dlg.addEventListener("cancel", function (ev) {
+        ev.preventDefault();
+        _close(null);
+      });
+      ta.addEventListener("keydown", function (ev) {
+        // Cmd/Ctrl+Enter = Save, matches GitHub's comment textarea.
+        if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") {
+          ev.preventDefault();
+          var v = ta.value.trim();
+          _close(v || null);
+        }
+      });
+      try { dlg.showModal(); } catch (_) { dlg.setAttribute("open", ""); }
+      setTimeout(function () { ta.focus(); }, 0);
+    });
+  }
+
   window._mnemosEditComment = async function (commentId, kind, targetId) {
-    var fresh = prompt("Edit comment:");
+    // Fetch current body so the textarea pre-fills (the UX nit from
+    // the original prompt() — operators had to retype everything).
+    var current = "";
+    try {
+      var existing = await fetch("/api/v1/comments/" + commentId);
+      if (existing.ok) {
+        var row = await existing.json();
+        current = row.body || "";
+      }
+    } catch (_) {}
+    var fresh = await _editCommentDialog(current);
     if (fresh == null || !fresh.trim()) return;
     var r = await fetch("/api/v1/comments/" + commentId, {
       method: "PATCH",
@@ -1998,6 +2229,9 @@
     icon: icon,
     exportCsv: exportCsv,
     exportXlsx: exportXlsx,
+    renderMermaid: renderMermaid,
+    mountProjectPicker: mountProjectPicker,
+    currentProjectFromUrl: currentProjectFromUrl,
     notify: notify,
     readNotifications: readNotifications,
     clearNotifications: clearNotifications,

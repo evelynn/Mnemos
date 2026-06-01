@@ -78,6 +78,23 @@
   </a>
 </section>
 
+<!-- PR-138e — LLM pipeline health. Renders only when at least one
+     project is in the org so we don't churn the screen for fresh
+     installs. The breakdown comes from PR-138c's
+     /api/v1/projects/{id}/llm_fallback_breakdown — operator sees at a
+     glance whether the platform is on the real LLM, on the stub, or
+     hitting a specific failure mode (timeout / budget / no key). -->
+<section id="llm-health-section" hidden>
+  <h2 data-i18n="LLM pipeline health">LLM pipeline health</h2>
+  <p class="muted" data-i18n="Per-project breakdown of how many summaries used the real LLM vs the stub, and why.">
+    Per-project breakdown of how many summaries used the real LLM
+    vs the stub, and why.
+  </p>
+  <div id="llm-health-box">
+    <div class="skeleton skeleton-card"></div>
+  </div>
+</section>
+
 <section>
   <h2 data-i18n="Latest analysis runs">Latest analysis runs</h2>
   <div id="runs-box"><p class="muted" data-i18n="Loading…">Loading…</p></div>
@@ -96,40 +113,45 @@
 </section>
 
 <style>
+/* PR-137 — every colour goes through a design token so dark mode
+   inverts correctly. Pre-fix this block hardcoded ~13 hex values
+   (#fff7f7, #fff, #7a1818, #1f6feb …) which read as white-on-white
+   when the user toggled the dark theme. */
 .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin: 1rem 0 1.5rem; }
-.stat-card { border: 1px solid #d0d7de; border-radius: 6px; padding: 0.9rem; background: #fff; }
-.stat-card h3 { margin: 0 0 0.3rem; font-size: 0.85rem; color: #57606a; text-transform: uppercase; letter-spacing: 0.03em; }
+.stat-card { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 0.9rem; background: var(--surface); }
+.stat-card h3 { margin: 0 0 0.3rem; font-size: 0.85rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
 .stat-card .big { font-size: 1.8rem; font-weight: 600; margin-bottom: 0.3rem; }
-.stat-card .big.ok { color: #145a1f; }
-.stat-card .big.warn { color: #6a4b00; }
-.stat-card .big.fail { color: #7a1818; }
+.stat-card .big.ok { color: var(--success); }
+.stat-card .big.warn { color: var(--warn); }
+.stat-card .big.fail { color: var(--danger); }
 /* P2-7 drill-down — entire card is the affordance, so make it look
    clickable when the card is wrapped in an <a>. */
 a.stat-link {
   display: block;
   text-decoration: none;
   color: inherit;
-  transition: border-color 0.15s, box-shadow 0.15s, transform 0.05s;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast), transform 0.05s;
 }
 a.stat-link:hover {
-  border-color: #1f6feb;
-  box-shadow: 0 1px 4px rgba(31, 111, 235, 0.18);
+  border-color: var(--accent);
+  box-shadow: var(--shadow-hover);
 }
 a.stat-link:active { transform: translateY(1px); }
 a.stat-link:focus-visible {
-  outline: 2px solid #1f6feb;
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 /* PR-103 — triage card. Red-tinted to read as "act now" without
    being alarming when empty (the whole card hides in that case). */
 .triage {
-  border: 1px solid #f1c0c0;
-  background: #fff7f7;
-  border-radius: 6px;
+  border: 1px solid var(--danger);
+  background: var(--danger-bg);
+  color: var(--text);
+  border-radius: var(--radius-md);
   padding: 0.9rem 1rem;
   margin: 0 0 1rem;
 }
-.triage h2 { margin: 0 0 0.3rem; font-size: 1.1rem; color: #7a1818; }
+.triage h2 { margin: 0 0 0.3rem; font-size: 1.1rem; color: var(--danger); }
 .triage .triage-list { margin: 0.5rem 0 0; padding-left: 1.2rem; }
 .triage .triage-item { margin: 0.35rem 0; }
 .triage .triage-priority {
@@ -137,15 +159,49 @@ a.stat-link:focus-visible {
   font-size: 0.7rem;
   font-weight: 600;
   padding: 0.1rem 0.4rem;
-  border-radius: 3px;
-  background: #7a1818;
-  color: #fff;
+  border-radius: var(--radius-sm);
+  background: var(--danger);
+  color: var(--text-inverted);
   margin-right: 0.4rem;
   vertical-align: middle;
 }
-.triage .triage-item a { color: #1f3a5f; text-decoration: none; }
+.triage .triage-item a { color: var(--accent); text-decoration: none; }
 .triage .triage-item a:hover { text-decoration: underline; }
-.triage .triage-where { color: #57606a; font-size: 0.85rem; }
+.triage .triage-where { color: var(--text-muted); font-size: 0.85rem; }
+
+/* PR-138e — LLM pipeline health bars. Token-themed: real LLM is
+   success-green, fallback to stub is warn-yellow. */
+.llm-health-row {
+  margin: var(--sp-2) 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.llm-health-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 0.9rem;
+  margin-bottom: var(--sp-1);
+}
+.llm-health-bar {
+  display: flex;
+  height: 6px;
+  width: 100%;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--surface-alt);
+}
+.llm-health-bar .llm-health-ok { background: var(--success); }
+.llm-health-bar .llm-health-fb { background: var(--warn); }
+.llm-health-reasons {
+  margin-top: var(--sp-1);
+  font-size: 0.75rem;
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
 </style>
 
 <script>
@@ -397,11 +453,98 @@ async function loadActivity() {
   } catch (_) {}
 }
 
+// PR-138e — per-project LLM pipeline health. Renders the
+// /llm_fallback_breakdown payload as ok-vs-fallback bars so an
+// operator sees "is the LLM pipeline actually working" at a glance.
+async function loadLlmHealth() {
+  let projects = [];
+  try {
+    const pr = await fetch("/api/v1/projects");
+    if (pr.ok) projects = await pr.json();
+  } catch (_) {}
+  if (!projects.length) return;  // section stays hidden on empty orgs
+  const section = document.getElementById("llm-health-section");
+  const box = document.getElementById("llm-health-box");
+  if (!section || !box) return;
+  // Limit to the first 8 projects to keep render bounded — the
+  // executive report page covers per-project deep-dives.
+  const slice = projects.slice(0, 8);
+  const rows = [];
+  for (const p of slice) {
+    try {
+      // PR-138g — ``?days=7`` so the dashboard shows the recent
+      // rolling window, not all-time. A burst of stub fallbacks
+      // 3 months ago shouldn't dominate today's health bar.
+      const r = await fetch(
+        `/api/v1/projects/${p.id}/llm_fallback_breakdown?days=7`
+      );
+      if (!r.ok) continue;
+      const body = await r.json();
+      if (body.total === 0) continue;
+      rows.push({ name: p.name, ...body });
+    } catch (_) {}
+  }
+  if (!rows.length) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  const html = rows.map((r) => {
+    const okPct = r.total
+      ? Math.round((100 * r.ok) / r.total) : 0;
+    const fbPct = 100 - okPct;
+    const fbList = Object.entries(r.fallbacks)
+      .sort((a, b) => b[1] - a[1])
+      .map(([reason, n]) => `<code class="muted">${escapeHtml(reason)}=${n}</code>`)
+      .join(" ");
+    return `<div class="llm-health-row">
+      <div class="llm-health-head">
+        <strong>${escapeHtml(r.name)}</strong>
+        <span class="muted">${r.ok}/${r.total} on LLM</span>
+      </div>
+      <div class="llm-health-bar" role="img"
+           aria-label="${okPct}% real LLM, ${fbPct}% fallback">
+        <span class="llm-health-ok" style="width:${okPct}%"></span>
+        <span class="llm-health-fb" style="width:${fbPct}%"></span>
+      </div>
+      ${fbList ? `<div class="llm-health-reasons">${fbList}</div>` : ""}
+    </div>`;
+  }).join("");
+  box.innerHTML = html;
+  MnemosUI.applyI18n(box);
+
+  // PR-138g — fallback-spike alert. When ≥1 project has crossed the
+  // SPIKE_THRESHOLD fallback rate (default 30%) in the rolling 7d
+  // window, surface a one-time toast. Operators don't have to be
+  // staring at the dashboard to know the pipeline degraded —
+  // refresh raises it, and once shown for a (project, day) we don't
+  // re-alert until the next session (localStorage gate).
+  const SPIKE_THRESHOLD = 0.30;
+  const today = new Date().toISOString().slice(0, 10);
+  for (const r of rows) {
+    if (r.fallback_rate < SPIKE_THRESHOLD) continue;
+    const ackKey = `mnemos_llm_spike_ack:${r.name}:${today}`;
+    if (localStorage.getItem(ackKey)) continue;
+    try {
+      MnemosUI.showToast(
+        MnemosUI.t(
+          'LLM fallback spike on "$1": $2% of recent summaries hit the stub path.',
+          { name: r.name, pct: Math.round(100 * r.fallback_rate) },
+        ),
+        "warn",
+        12000,
+      );
+      localStorage.setItem(ackKey, "1");
+    } catch (_) {}
+  }
+}
+
 loadReady();
 loadSummary();
 loadMetricsSummary();
 loadActivity();
 loadTriage();
+loadLlmHealth();
 
 // PR-57 — first-run guided tour. Fires once per browser; the
 // operator can re-trigger it from the Profile page.

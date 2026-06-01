@@ -43,9 +43,20 @@ async function doExport(ev) {
   ev.preventDefault();
   const uid = new FormData(ev.target).get("user_id").trim();
   const r = await fetch(`/api/v1/gdpr/users/${uid}/export`);
-  const body = await r.text();
-  document.getElementById("export-result").textContent =
-    `HTTP ${r.status}\n\n` + (r.ok ? JSON.stringify(JSON.parse(body), null, 2) : body);
+  const out = document.getElementById("export-result");
+  if (!r.ok) {
+    out.textContent = "";
+    await MnemosUI.showError(MnemosUI.t("Export failed"), r);
+    return false;
+  }
+  // PR-137 — only pretty-print on success; let MnemosUI.showError
+  // own the failure path so the operator sees a structured toast
+  // instead of raw HTTP text.
+  try {
+    out.textContent = JSON.stringify(await r.json(), null, 2);
+  } catch (_) {
+    out.textContent = await r.text();
+  }
   return false;
 }
 
@@ -54,7 +65,13 @@ async function doErase(ev) {
   const uid = new FormData(ev.target).get("user_id").trim();
   if (!confirm(`Erase user ${uid}? This cannot be undone.`)) return false;
   const r = await fetch(`/api/v1/gdpr/users/${uid}`, {method: "DELETE"});
-  document.getElementById("erase-result").textContent = `HTTP ${r.status}\n${await r.text()}`;
+  if (!r.ok) {
+    await MnemosUI.showError(MnemosUI.t("Erase failed"), r);
+    return false;
+  }
+  document.getElementById("erase-result").textContent =
+    MnemosUI.t("User erased.");
+  MnemosUI.showToast(MnemosUI.t("User erased."), "success");
   return false;
 }
 </script>

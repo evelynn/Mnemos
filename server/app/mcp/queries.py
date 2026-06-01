@@ -121,49 +121,61 @@ async def search_symbols(
 
     by_id = {r.id: (s, r) for s, r in scored}
     if terms and is_enabled():
+        # PR-138 — embedding-fallback visibility. Pre-fix every silent
+        # failure (API timeout, pgvector missing, alembic 0022 not run)
+        # degraded to BM25-only with zero operator signal. Each path
+        # now ticks ``mnemos_embedding_silent_fallback_total{reason}``
+        # so the ops dashboard finally sees it.
+        from app.obs.metrics import embedding_silent_fallback_total
         try:
             qvec = await embed_query(query)
         except Exception:  # noqa: BLE001
             qvec = None
-        if qvec is not None and len(qvec) == EMBEDDING_DIM:
+        if qvec is None:
+            embedding_silent_fallback_total.labels(reason="api_call_failed").inc()
+        elif len(qvec) != EMBEDDING_DIM:
+            embedding_silent_fallback_total.labels(reason="dim_mismatch").inc()
+        else:
             # Defer the import: pgvector is optional and only imported
             # when the operator has installed the [search] extra.
             try:
                 from pgvector.sqlalchemy import Vector  # noqa: F401
-
-                vec_rows = (
-                    await session.execute(
-                        sa.text(
-                            "SELECT id FROM nodes "
-                            "WHERE project_id = :pid AND valid_to IS NULL "
-                            "  AND embedding IS NOT NULL "
-                            "ORDER BY embedding <=> (:q)::vector "
-                            "LIMIT :k"
-                        ),
-                        {
-                            "pid": str(project_id),
-                            "q": "[" + ",".join(str(x) for x in qvec) + "]",
-                            "k": top_k * 4,
-                        },
-                    )
-                ).all()
-                vector_ranked = [row[0] for row in vec_rows]
-                lexical_ranked = [r.id for _, r in scored]
-                fused = rrf_fuse(lexical_ranked, vector_ranked)
-                # Re-order using the fused score, keeping only entries
-                # we have a Node for (lexical candidate set).
-                rebuilt: list[tuple[float, Node]] = []
-                for sid, fscore in fused:
-                    if sid in by_id:
-                        _, node = by_id[sid]
-                        rebuilt.append((fscore, node))
-                if rebuilt:
-                    scored = rebuilt
-            except Exception:  # noqa: BLE001
-                # pgvector missing or column absent — fall back to
-                # pure-lexical silently; an operator who set the env
-                # without running the migration just gets PR-80.
-                pass
+            except ImportError:
+                embedding_silent_fallback_total.labels(reason="pgvector_missing").inc()
+            else:
+                try:
+                    vec_rows = (
+                        await session.execute(
+                            sa.text(
+                                "SELECT id FROM nodes "
+                                "WHERE project_id = :pid AND valid_to IS NULL "
+                                "  AND embedding IS NOT NULL "
+                                "ORDER BY embedding <=> (:q)::vector "
+                                "LIMIT :k"
+                            ),
+                            {
+                                "pid": str(project_id),
+                                "q": "[" + ",".join(str(x) for x in qvec) + "]",
+                                "k": top_k * 4,
+                            },
+                        )
+                    ).all()
+                    vector_ranked = [row[0] for row in vec_rows]
+                    lexical_ranked = [r.id for _, r in scored]
+                    fused = rrf_fuse(lexical_ranked, vector_ranked)
+                    # Re-order using the fused score, keeping only entries
+                    # we have a Node for (lexical candidate set).
+                    rebuilt: list[tuple[float, Node]] = []
+                    for sid, fscore in fused:
+                        if sid in by_id:
+                            _, node = by_id[sid]
+                            rebuilt.append((fscore, node))
+                    if rebuilt:
+                        scored = rebuilt
+                except Exception:  # noqa: BLE001
+                    embedding_silent_fallback_total.labels(
+                        reason="vector_query_failed"
+                    ).inc()
 
     return [
         {

@@ -348,5 +348,11 @@ async function rebuild() {
   // graph / report tabs, which auto-render on ?project=.
   if (project) loadFindings(new Event("submit"));
 })();
+
+// PR-137 — upgrade the UUID input into a project picker. The picker
+// preserves id/name so loadFindings()'s ``getElementById("pid")``
+// still works. With autoSubmit=true a ``?project=<id>`` deep-link
+// submits the form once the dropdown options have rendered.
+MnemosUI.mountProjectPicker("#pid", { autoSubmit: true });
 </script>
 {% endblock %}

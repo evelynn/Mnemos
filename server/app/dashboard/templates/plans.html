@@ -3,13 +3,62 @@
 {% block content %}
 <header class="page-head"><h1 data-i18n="Plans (Gate A)">Plans (Gate A)</h1></header>
 
+<section class="lifecycle-section">
+  <details>
+    <summary data-i18n="Plan lifecycle">Plan lifecycle</summary>
+    <p class="muted" data-i18n="The state machine each plan moves through. Reject feedback loops back to draft so the author can revise. Regenerate re-opens the plan for the analyser to redraft from scratch.">
+      The state machine each plan moves through. Reject feedback loops
+      back to draft so the author can revise. Regenerate re-opens the
+      plan for the analyser to redraft from scratch.
+    </p>
+    <div id="plan-lifecycle" class="lifecycle-diagram"
+         aria-label="plan state machine"></div>
+  </details>
+</section>
+
 <form onsubmit="return load(event)">
   <label><span data-i18n="Project ID">Project ID</span><input type="text" id="pid" required placeholder="uuid" /></label>
   <button class="primary" type="submit" data-i18n="Load">Load</button>
 </form>
 <div id="out"></div>
 
+<style>
+.lifecycle-section { margin: var(--sp-2) 0 var(--sp-3); }
+.lifecycle-section summary { cursor: pointer; font-weight: 600; }
+.lifecycle-diagram {
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3);
+  margin-top: var(--sp-2);
+  overflow-x: auto;
+}
+.lifecycle-diagram svg { max-width: 100%; height: auto; }
+</style>
+
 <script>
+// PR-136c — Plan lifecycle as a Mermaid state diagram. Renders on
+// first ``details`` open so the heavy bundle stays lazy.
+function renderPlanLifecycle() {
+  const host = document.getElementById("plan-lifecycle");
+  if (!host || host.dataset.rendered) return;
+  host.dataset.rendered = "1";
+  const code = [
+    "stateDiagram-v2",
+    "  [*] --> pending_approval: draft",
+    "  pending_approval --> approved: operator approve",
+    "  pending_approval --> rejected: operator reject",
+    "  pending_approval --> pending_approval: regenerate",
+    "  approved --> [*]: diff submission opens Gate B",
+    "  rejected --> [*]",
+  ].join("\n");
+  MnemosUI.renderMermaid(host, code).catch(() => {});
+}
+document.querySelector(".lifecycle-section details")
+  .addEventListener("toggle", function (ev) {
+    if (ev.target.open) renderPlanLifecycle();
+  });
+
 async function load(ev) {
   ev.preventDefault();
   const pid = document.getElementById("pid").value.trim();
@@ -72,5 +121,10 @@ async function decide(id, s) {
   if (!r.ok) { await MnemosUI.showError("Decision failed", r); return; }
   MnemosUI.showToast("Plan decision recorded.", "success");
 }
+
+// PR-137 — project picker upgrade. Preserves id="pid" so the form's
+// load() still works; autoSubmit fires once a ``?project=<id>``
+// deep-link populates the dropdown.
+MnemosUI.mountProjectPicker("#pid", { autoSubmit: true });
 </script>
 {% endblock %}

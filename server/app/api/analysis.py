@@ -708,3 +708,74 @@ async def project_llm_cost(
         "rate_usd_per_mtok": rate,
         "estimated_usd": est_usd,
     }
+
+
+@router.get(
+    "/projects/{project_id}/llm_fallback_breakdown",
+    dependencies=[Depends(require_project_org())],
+)
+async def project_llm_fallback_breakdown(
+    project_id: uuid.UUID,
+    _: CurrentUser,
+    days: int | None = None,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """PR-138b — per-project breakdown of "why this summary missed the
+    LLM". Pre-138 every fallback collapsed into ``model_used="stub"``.
+    PR-138 stamped the reason into ``model_used`` and PR-138b adds the
+    structured ``Summary.fallback_reason`` column. This endpoint
+    aggregates those so the dashboard "Operational health" card can
+    surface (a) how many summaries used the real LLM vs stub, and
+    (b) WHY each fallback happened, without parsing model_used strings.
+
+    Returns ``{ok: int, fallbacks: {reason: count}, total: int,
+    fallback_rate: float, window_days: int | null}`` — the operator's
+    "is the pipeline actually working?" answer at a glance.
+
+    PR-138g — ``?days=N`` filters to the rolling window so an alert
+    rule can ask "fallbacks in the last 7 days" instead of all-time
+    (otherwise old burst events keep dominating the rate forever).
+    Bounded 1–365; absent means all-time (back-compat).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.models.findings import Summary
+
+    where_clauses = [
+        Summary.project_id == project_id,
+        Summary.superseded_by.is_(None),
+    ]
+    window_days: int | None = None
+    if days is not None:
+        window_days = max(1, min(int(days), 365))
+        since = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
+        where_clauses.append(Summary.generated_at >= since)
+
+    rows = (
+        await db.execute(
+            select(
+                Summary.fallback_reason,
+                func.count().label("n"),
+            )
+            .where(*where_clauses)
+            .group_by(Summary.fallback_reason)
+        )
+    ).all()
+    ok = 0
+    fallbacks: dict[str, int] = {}
+    for reason, n in rows:
+        n = int(n)
+        if not reason:
+            ok += n
+        else:
+            fallbacks[reason] = fallbacks.get(reason, 0) + n
+    total = ok + sum(fallbacks.values())
+    return {
+        "ok": ok,
+        "fallbacks": fallbacks,
+        "total": total,
+        "fallback_rate": (
+            round(sum(fallbacks.values()) / total, 3) if total else 0.0
+        ),
+        "window_days": window_days,
+    }

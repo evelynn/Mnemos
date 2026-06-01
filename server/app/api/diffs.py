@@ -314,7 +314,17 @@ async def list_submissions_filtered(
         .limit(max(1, min(limit, 500)))
     )
     if verdict in {"clean", "warn", "blocked"}:
-        stmt = stmt.where(DiffSubmission.verdict == verdict)
+        # PR-137 — ``DiffSubmission`` has no ``verdict`` scalar column;
+        # the ultrareview verdict lives inside ``auto_review_findings``
+        # JSONB. Filter via the JSON-text path so PG and the SQLite
+        # polyglot layer (PR-118) both match — the latter falls back to
+        # ``json_extract`` semantics, both surface ``"blocked"`` as the
+        # raw string.
+        from sqlalchemy import String, cast
+        stmt = stmt.where(
+            cast(DiffSubmission.auto_review_findings["verdict"], String)
+            == f'"{verdict}"'
+        )
     rows = (await db.execute(stmt)).scalars().all()
     return [_out(r) for r in rows]
 

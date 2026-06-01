@@ -42,6 +42,10 @@
   <h3 data-i18n="System-level narrative (L3)">System-level narrative (L3)</h3>
   <div id="rp-l3" class="report-narrative"></div>
 
+  <h3 data-i18n="Finding lifecycle">Finding lifecycle</h3>
+  <div id="rp-lifecycle" class="report-diagram"
+       aria-label="finding state machine"></div>
+
   <h3 data-i18n="Analysis cost">Analysis cost</h3>
   <div id="rp-cost" class="muted"></div>
 
@@ -99,6 +103,15 @@
 }
 .report-narrative .l3-item h4 { margin: 0 0 var(--sp-1); font-size: 0.9rem; }
 .report-footer { margin-top: var(--sp-6); font-size: 0.8rem; text-align: center; }
+.report-diagram {
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3);
+  margin: var(--sp-2) 0;
+  overflow-x: auto;
+}
+.report-diagram svg { max-width: 100%; height: auto; }
 .trend-chart { width: 100%; max-width: 560px; height: auto; }
 .trend-chart .trend-new { stroke: var(--danger-button); stroke-width: 2; }
 .trend-chart .trend-resolved { stroke: var(--success); stroke-width: 2; }
@@ -189,6 +202,12 @@ async function buildReport(ev) {
   // Finding trend — twin-line SVG (new vs resolved per bucket).
   renderTrendChart(trend);
 
+  // Finding lifecycle — Mermaid state diagram. Always informative
+  // (the same six states an operator moves a finding through), so it
+  // helps a fresh PM/lead understand the workflow at a glance even
+  // when the project has zero closed findings yet.
+  renderLifecycleDiagram();
+
   // L3 narrative.
   document.getElementById("rp-l3").innerHTML = l3.length
     ? l3.map(item => `<div class="l3-item">
@@ -274,6 +293,28 @@ function renderTrendChart(trend) {
   MnemosUI.applyI18n(host);
 }
 
+// PR-136 — render the six-state finding lifecycle via Mermaid.
+// State labels and transitions match app/models/finding.py + the
+// status filter on findings.html (new → triaged → in_progress →
+// resolved → closed; suppressed is a side branch).
+function renderLifecycleDiagram() {
+  const host = document.getElementById("rp-lifecycle");
+  if (!host) return;
+  const code = [
+    "stateDiagram-v2",
+    "  [*] --> new",
+    "  new --> triaged: assign + classify",
+    "  triaged --> in_progress: start work",
+    "  triaged --> suppressed: false positive",
+    "  in_progress --> resolved: fix merged",
+    "  resolved --> closed: verify in prod",
+    "  resolved --> new: regression",
+    "  suppressed --> new: reopen",
+    "  closed --> [*]",
+  ].join("\n");
+  MnemosUI.renderMermaid(host, code).catch(() => { /* helper renders error */ });
+}
+
 (function () {
   const p = new URLSearchParams(window.location.search).get("project");
   if (p) {
@@ -281,5 +322,9 @@ function renderTrendChart(trend) {
     buildReport(null);
   }
 })();
+
+// PR-137 — project picker; auto-submit off because the deep-link
+// branch above already fires buildReport().
+MnemosUI.mountProjectPicker("#rpid", { autoSubmit: false });
 </script>
 {% endblock %}

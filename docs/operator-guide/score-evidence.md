@@ -99,9 +99,55 @@
 
 - 자율 라운드 신규 테스트: PR-114 (7) + PR-115 (10) + PR-116 (7) +
   PR-117 (9) + PR-118 (8) + PR-119 (11) + PR-120 (6) + PR-121 (13) +
-  PR-122 (6) + PR-123 (7) = **84개, 전부 REAL execution 또는 mock 으로 real code path 호출**
-- 전체 테스트: 1093 → 1177 (+84)
-- 분석기: 5종 → 6종 (Python 추가)
-- 실측 floor pass 분석기: 0 → 2 (TS, Python)
-- 발견된 진짜 버그: 2개 (모두 fix 됨)
-- branch head: 자율 라운드 최종 PR commit
+  PR-122 (6) + PR-123 (7) = **84개**.
+- **PR-137 정직 보정** — 위 84 중 53 은 진짜 REAL execution (subprocess
+  + 실 DB/HTTP), 31 은 mock-for-real-path (외부 boundary 만 patch,
+  앱 코드는 진짜 실행). 한편 **전체 1,391 테스트 중 약 77%(≈1,070)는
+  source-text grep** ("코드가 쓰여있다" 검사) 임을 명시함. 자율 라운드
+  84 묶음은 평균보다 진짜 실행 비중이 높지만 "전부 REAL"
+  라벨링은 부정확했음.
+- 전체 테스트: 1093 → 1391 (+298, PR-130/134/135/136/137 포함)
+- 분석기: 5종 → 6종 (Python 추가). **PR-137** 에서 ggoss-py 가
+  contracts/data_access 두 verb 까지 구현해 contract 완전.
+- 실측 floor pass 분석기: 0 → 4 (TS, Python, C#, binary-dotnet).
+- 발견된 진짜 버그: **4개** (PR-114 ts arrow, PR-115 py receiver,
+  **PR-137 `/diff_submissions?verdict=` 누락 컬럼**, **PR-137
+  ggoss-py 누락 verb**) — 모두 fix.
+- branch head: PR-137 자율 결함 수정 commit
+
+## PR-137 — 6 영역 cold-audit 후속 수정
+
+자율적으로 6 영역 (Backend / Analyzers / UX / MCP+LLM / Security+Ops /
+Tests reality) 병렬 감사를 돌린 결과, 자칭 90.7 vs 실측 ~70 의
+괴리가 잡혔다. 그 중 진짜 결함 5건을 같은 라운드에서 fix:
+
+1. ``/api/v1/diff_submissions?verdict=`` 즉시 500 (DiffSubmission.
+   verdict 컬럼 부재). JSONB key-path 쿼리로 교체. → 대시보드
+   "Break-glass active: N" 정상화.
+2. ggoss-py 가 `contracts` + `data_access` verb 미구현 → FastAPI/Flask
+   decorator + raw SQL + ORM 패턴 AST 검출 추가.
+3. dashboard.html `<style>` 의 hardcoded hex 13건 → CSS token. dark
+   mode 가 정상 invert.
+4. `MnemosUI.mountProjectPicker` 신규 + 6 page (findings/plans/data/
+   analysis/graph/report) 에 wire. UUID copy-paste 제거.
+5. 5 template 의 raw HTTP body dump (`textContent = "HTTP X\nbody"`)
+   → `MnemosUI.showError` (toast + 구조화 detail) 로 일괄 교체.
+
+부가 검증 (이번 라운드 audit 가 결함이라 주장했으나 실제로는 이미
+구현되어 있던 것):
+- `/api/v1/projects/{id}/graph/component_map`, `certainty_breakdown`
+  endpoints — analysis.py:268/481 에 존재.
+- `app/orchestrator/cron_jobs.py` — 370줄, 3 cron 작업 (break_glass
+  expiry, probe recheck, retention purge) + advisory-lock single-
+  leader 구현 완비.
+- `scripts/backup.sh`, `scripts/restore.sh` — 각 72/55줄, pg_dump +
+  pg_restore + FERNET_KEY 보존 wrapper 완비.
+- LLM \$ tracking — `findings.py:446` + `analysis.py:703` 에서
+  `MNEMOS_LLM_USD_PER_MTOK` env 기반 환산.
+
+남아있는 honest 격차 (이 PR 범위 외):
+- alembic downgrade 회귀 테스트 0건
+- LLM extractor agent-sdk timeout 시 stub fallback 가 silent — model_
+  used 외에 외부 증거 무
+- embedding provider 설정 + pgvector 미설치 시 silent BM25 강등
+- Org-scope retrofit Phase C-1b (auth/org_scope.py:10-14 TODO)

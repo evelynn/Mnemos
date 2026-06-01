@@ -71,6 +71,14 @@ class Summary(Base):
     open_questions: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
     model_used: Mapped[str] = mapped_column(String, nullable=False)
     tokens_used: Mapped[Optional[int]] = mapped_column(nullable=True)
+    # PR-138b — when the extractor fell through to the stub path, this
+    # field carries the reason ("agent_sdk_timeout" / "budget_exceeded"
+    # / "anthropic_http_error" / …). Null on the happy path. Lets the
+    # dashboard "Why did this miss the LLM?" panel render structured
+    # data instead of parsing the model_used string.
+    fallback_reason: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True
+    )
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

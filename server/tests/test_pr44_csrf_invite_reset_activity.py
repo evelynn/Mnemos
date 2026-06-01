@@ -180,9 +180,11 @@ def test_invite_token_stored_as_hash_only():
 def test_invite_consume_rejects_expired_and_used():
     body = _read(_APP / "api" / "onboarding.py")
     assert "invite_invalid_or_expired" in body
-    # Three guards.
+    # Three guards. PR-138h introduced a local ``expires_at`` (coerced
+    # from ``invite.expires_at`` to UTC-aware) so the comparison reads
+    # ``expires_at < now`` rather than ``invite.expires_at < now``.
     assert "invite.consumed_at is not None" in body
-    assert "invite.expires_at < now" in body
+    assert "expires_at < now" in body
 
 
 def test_invite_audit_actions():

@@ -172,8 +172,10 @@ async def test_real_path_falls_back_on_invalid_json(monkeypatch):
     ext._api_key = "sk-ant-fake"
     with patch.dict("sys.modules", {"anthropic": MagicMock(AsyncAnthropic=FakeClient)}):
         out = await ext.summarize(level=1, target_id="sym:x", evidence=[])
-    # Fell back to stub (agent_sdk disabled via env).
-    assert out.model_used == "stub"
+    # Fell back to stub (agent_sdk disabled via env). PR-138 encodes
+    # the reason into model_used (``stub:anthropic_json_decode`` here)
+    # so the operator can debug why; accept either plain or labelled.
+    assert out.model_used.startswith("stub")
     assert "sym:x" in out.summary
 
 
@@ -198,7 +200,9 @@ async def test_real_path_falls_back_on_missing_sdk(monkeypatch):
 
     with patch.object(builtins, "__import__", fake_import):
         out = await ext.summarize(level=1, target_id="sym:x", evidence=[])
-    assert out.model_used == "stub"
+    # PR-138 — fallback reason may be encoded into ``model_used``
+    # (``stub:anthropic_import_error``); accept either.
+    assert out.model_used.startswith("stub")
 
 
 # ─── system-shape proofs ───────────────────────────────────────────
@@ -254,9 +258,11 @@ def test_no_api_key_no_sdk_attempt():
 
     import asyncio
     with patch.object(builtins, "__import__", tracking_import):
-        asyncio.get_event_loop().run_until_complete(
-            ext.summarize(level=1, target_id="t", evidence=[])
-        )
+        # ``asyncio.run`` rather than ``get_event_loop().run_until_complete``:
+        # pytest-asyncio closes the per-test loop on teardown so the second
+        # form raises ``no current event loop`` when this sync test runs
+        # after any async test in the same module.
+        asyncio.run(ext.summarize(level=1, target_id="t", evidence=[]))
     assert "anthropic" not in import_attempts, (
         "stub mode tried to import anthropic — wastes startup"
     )
