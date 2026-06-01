@@ -45,7 +45,16 @@ AGENT_LANGUAGE_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "php": (".php",),
     "swift": (".swift",),
     "scala": (".scala",),
+    # DB schema provided as SQL/DDL files (the "sql 로 제공" form). Any
+    # dialect — Claude Code reads Postgres/MySQL/SQLite/T-SQL/PL-SQL alike,
+    # so DB knowledge is no longer locked to the mssql/oracle live-schema
+    # analyzers. Tables become DataEntity nodes; FKs become edges.
+    "sql": (".sql", ".ddl"),
 }
+
+# Languages whose extraction yields DB DataEntity nodes (tables/columns)
+# rather than code Symbol nodes. Drives the prompt + envelope shape.
+AGENT_DB_LANGUAGES = frozenset({"sql"})
 
 # Directories that never hold first-party source — skip to spend the
 # (bounded) LLM budget on code that matters.
@@ -62,6 +71,16 @@ _EXTRACT_SYSTEM = (
     "(functions, methods, classes, structs, namespaces, enums) actually "
     "DEFINED in this file, and the call/containment edges you can see with "
     "high confidence. Do not invent symbols that aren't in the file."
+)
+
+_DB_EXTRACT_SYSTEM = (
+    "You are a precise database-schema extractor for a code-knowledge graph. "
+    "You receive ONE SQL/DDL file (any dialect — Postgres, MySQL, SQLite, "
+    "T-SQL, PL/SQL) and return ONLY a JSON object — no prose, no markdown "
+    "fences. Extract the tables/views actually DEFINED in this file with "
+    "their columns, and the foreign-key relationships between them. Flag a "
+    "column or table sensitive when it plausibly holds PII (email, name, "
+    "ssn, phone, address, password, card). Do not invent tables not present."
 )
 
 
@@ -125,6 +144,35 @@ def _build_extract_prompt(language: str, file_rel: str, code: str) -> str:
     )
 
 
+def _build_db_extract_prompt(file_rel: str, code: str) -> str:
+    return (
+        f"SQL/DDL file: {file_rel}\n\n"
+        "Return a JSON object with this exact shape:\n"
+        "{\n"
+        '  "entities": [\n'
+        '    {"id": "data:<schema.table>", "name": "<table>", '
+        '"kind": "table|view", '
+        '"columns": [{"name": "<col>", "type": "<sql type>", '
+        '"pk": true|false, "nullable": true|false, "sensitive": true|false}], '
+        '"is_sensitive": true|false, '
+        '"summary": "<=160 chars on what the table holds"}\n'
+        "  ],\n"
+        '  "edges": [\n'
+        '    {"source_id": "data:<schema.table>", '
+        '"target_id": "data:<schema.referenced_table>", "kind": "REFERENCES"}\n'
+        "  ]\n"
+        "}\n\n"
+        'Use ids of the form "data:<schema>.<table>" (omit schema if none) so '
+        "FK edges can reference tables. Only include edges whose endpoints are "
+        "tables you listed. If the file defines no tables, return "
+        '{"entities": [], "edges": []}.\n\n'
+        "SQL:\n"
+        "````\n"
+        f"{code}\n"
+        "````\n"
+    )
+
+
 async def extract_file_via_agent_sdk(
     *,
     language: str,
@@ -150,12 +198,17 @@ async def extract_file_via_agent_sdk(
     except ImportError:
         return None
 
+    is_db = language in AGENT_DB_LANGUAGES
     snippet = code if len(code) <= max_code_chars else code[:max_code_chars]
-    prompt = _build_extract_prompt(language, file_rel, snippet)
+    prompt = (
+        _build_db_extract_prompt(file_rel, snippet)
+        if is_db
+        else _build_extract_prompt(language, file_rel, snippet)
+    )
     opts = ClaudeAgentOptions(
         allowed_tools=[],
         disallowed_tools=["Bash", "Edit", "Write", "Read", "Task"],
-        system_prompt=_EXTRACT_SYSTEM,
+        system_prompt=_DB_EXTRACT_SYSTEM if is_db else _EXTRACT_SYSTEM,
         max_turns=1,
         permission_mode="default",
         cwd=os.environ.get("MNEMOS_AGENT_SDK_CWD", "/tmp"),
@@ -190,12 +243,14 @@ async def extract_file_via_agent_sdk(
     parsed = _parse_json_response("\n".join(collected))
     if parsed is None:
         return None
-    # Normalise shape so the caller can trust it.
-    symbols = parsed.get("symbols") or []
+    # Normalise shape so the caller can trust it. DB extraction returns
+    # "entities" (tables); code extraction returns "symbols".
+    items_key = "entities" if is_db else "symbols"
+    items = parsed.get(items_key) or []
     edges = parsed.get("edges") or []
-    if not isinstance(symbols, list) or not isinstance(edges, list):
+    if not isinstance(items, list) or not isinstance(edges, list):
         return None
-    return {"symbols": symbols, "edges": edges}
+    return {items_key: items, "edges": edges}
 
 
 def to_envelopes(
@@ -206,31 +261,60 @@ def to_envelopes(
     nodes/edges are stamped ``certainty="inferred"`` — LLM-derived."""
     envelopes: list[dict[str, Any]] = []
     valid_ids: set[str] = set()
-    for sym in extracted.get("symbols", []):
-        if not isinstance(sym, dict):
-            continue
-        sid = sym.get("id")
-        if not sid or not isinstance(sid, str):
-            continue
-        valid_ids.add(sid)
-        envelopes.append(
-            {
-                "record_type": "symbol",
-                "source_name": file_rel,
-                "data": {
-                    "id": sid,
-                    "name": sym.get("name", sid.rsplit("::", 1)[-1]),
-                    "kind": sym.get("kind", "function"),
-                    "language": language,
-                    "file": file_rel,
-                    "line": sym.get("line"),
-                    "signature": sym.get("signature"),
-                    "summary": sym.get("summary"),
-                    "certainty": "inferred",
-                    "extractor": "claude_code",
-                },
-            }
-        )
+
+    if language in AGENT_DB_LANGUAGES:
+        # DB schema → DataEntity nodes (tables) carrying their columns +
+        # PII flags, so the data-lookup / masking layer (spec §8) sees them.
+        for ent in extracted.get("entities", []):
+            if not isinstance(ent, dict):
+                continue
+            eid = ent.get("id")
+            if not eid or not isinstance(eid, str):
+                continue
+            valid_ids.add(eid)
+            envelopes.append(
+                {
+                    "record_type": "data_entity",
+                    "source_name": file_rel,
+                    "data": {
+                        "id": eid,
+                        "name": ent.get("name", eid.split(":", 1)[-1]),
+                        "kind": ent.get("kind", "table"),
+                        "columns": ent.get("columns"),
+                        "is_sensitive": bool(ent.get("is_sensitive")),
+                        "file": file_rel,
+                        "summary": ent.get("summary"),
+                        "certainty": "inferred",
+                        "extractor": "claude_code",
+                    },
+                }
+            )
+    else:
+        for sym in extracted.get("symbols", []):
+            if not isinstance(sym, dict):
+                continue
+            sid = sym.get("id")
+            if not sid or not isinstance(sid, str):
+                continue
+            valid_ids.add(sid)
+            envelopes.append(
+                {
+                    "record_type": "symbol",
+                    "source_name": file_rel,
+                    "data": {
+                        "id": sid,
+                        "name": sym.get("name", sid.rsplit("::", 1)[-1]),
+                        "kind": sym.get("kind", "function"),
+                        "language": language,
+                        "file": file_rel,
+                        "line": sym.get("line"),
+                        "signature": sym.get("signature"),
+                        "summary": sym.get("summary"),
+                        "certainty": "inferred",
+                        "extractor": "claude_code",
+                    },
+                }
+            )
     for edge in extracted.get("edges", []):
         if not isinstance(edge, dict):
             continue

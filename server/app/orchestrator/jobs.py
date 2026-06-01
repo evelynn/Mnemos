@@ -259,7 +259,9 @@ async def _run_agent_extraction_stage(
             stage.set_stats({"skipped": True, "reason": "no_source_files"})
         return
 
-    accept = {"symbol", "edge"}
+    # Code extraction emits symbols; SQL/DB extraction emits data_entity
+    # nodes (tables). Accept both plus edges so either path ingests fully.
+    accept = {"symbol", "data_entity", "edge"}
     files_done = 0
     files_failed = 0
     async with StageTracker(
