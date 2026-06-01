@@ -1,0 +1,2 @@
+{"round":"PR-138x","weighted_avg":null,"note":"build-test fixes: missing SQLite tables, /sample route shadow, ProgressBus real-Redis dial + .env.example budget vars","fixes":4,"commit":"b14b461","ts":"2026-06-01"}
+{"round":"PR-139","weighted_avg":null,"areas":{"C_deploy":8.3,"K_hygiene":7.8},"gates":{"ruff":0,"pytest_pass":1450,"pytest_fail":6,"mypy":69,"boot":"ok"},"fixes":3,"note":"docker-free regression guards (Fix A/B/C) + ruff 0 + mypy 71->69","commit":"pending","ts":"2026-06-01"}
