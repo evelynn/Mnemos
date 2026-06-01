@@ -67,47 +67,6 @@ async def list_data_entities(
     ]
 
 
-@router.get("/{entity_id:path}")
-async def get_data_entity(
-    project_id: uuid.UUID,
-    entity_id: str,
-    _: CurrentUser,
-    db: AsyncSession = Depends(get_session),
-) -> dict[str, Any]:
-    node = (
-        await db.execute(
-            select(Node).where(
-                Node.project_id == project_id,
-                Node.id == entity_id,
-                Node.kind == "DataEntity",
-                Node.valid_to.is_(None),
-            )
-        )
-    ).scalar_one_or_none()
-    if node is None:
-        raise HTTPException(status_code=404, detail="not_found")
-
-    latest_sample = (
-        await db.execute(
-            select(DataSample)
-            .where(
-                DataSample.project_id == project_id,
-                DataSample.data_entity_id == entity_id,
-            )
-            .order_by(DataSample.sampled_at.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-
-    return {
-        "id": node.id,
-        "data": node.data,
-        "certainty": node.certainty,
-        "sample_available": latest_sample is not None,
-        "is_sensitive": (node.data or {}).get("is_sensitive", False),
-    }
-
-
 class SampleIngest(BaseModel):
     columns: list[str]
     rows: list[list[Any]]
@@ -243,6 +202,52 @@ async def refresh_sample(
         "rows": len(masked_rows),
         "masking_applied": any_masked,
         "sampled_at": sample.sampled_at,
+    }
+
+
+# NB: the bare ``/{entity_id:path}`` detail route MUST be registered after
+# the ``/sample`` and ``/refresh_sample`` routes. The ``:path`` converter is
+# greedy (matches ``/``), so if this route came first it would swallow
+# ``…/<entity>/sample`` as ``entity_id="…/<entity>/sample"`` and shadow the
+# sample endpoint, making masked-sample viewing (spec §8) unreachable.
+@router.get("/{entity_id:path}")
+async def get_data_entity(
+    project_id: uuid.UUID,
+    entity_id: str,
+    _: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    node = (
+        await db.execute(
+            select(Node).where(
+                Node.project_id == project_id,
+                Node.id == entity_id,
+                Node.kind == "DataEntity",
+                Node.valid_to.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if node is None:
+        raise HTTPException(status_code=404, detail="not_found")
+
+    latest_sample = (
+        await db.execute(
+            select(DataSample)
+            .where(
+                DataSample.project_id == project_id,
+                DataSample.data_entity_id == entity_id,
+            )
+            .order_by(DataSample.sampled_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    return {
+        "id": node.id,
+        "data": node.data,
+        "certainty": node.certainty,
+        "sample_available": latest_sample is not None,
+        "is_sensitive": (node.data or {}).get("is_sensitive", False),
     }
 
 
