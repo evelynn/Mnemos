@@ -131,7 +131,7 @@ async def extract_file_via_agent_sdk(
     file_rel: str,
     code: str,
     model: str = "claude-sonnet-4-6",
-    timeout_s: int = 120,
+    timeout_s: int = 150,
     max_code_chars: int = 16_000,
 ) -> dict[str, Any] | None:
     """Extract ``{"symbols": [...], "edges": [...]}`` from one file via the

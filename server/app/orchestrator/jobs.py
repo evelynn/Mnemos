@@ -261,42 +261,55 @@ async def _run_agent_extraction_stage(
 
     accept = {"symbol", "edge"}
     files_done = 0
+    files_failed = 0
     async with StageTracker(
         bus, run_id, project_id, stage_name,
         language=language, position=position, time_budget_sec=3600,
     ) as stage:
-        async with SessionLocal() as session:
-            for fpath in files:
-                try:
-                    code = fpath.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    continue
-                file_rel = str(fpath.relative_to(path)) if str(fpath).startswith(
-                    str(path)
-                ) else fpath.name
-                extracted = await extract_file_via_agent_sdk(
-                    language=language, file_rel=file_rel, code=code
-                )
-                files_done += 1
-                if not extracted:
-                    continue
-                for env in to_envelopes(language, file_rel, extracted):
-                    before = sum(totals.values())
-                    await _record_payload(
-                        session,
-                        project_id=project_id,
-                        payload=env,
-                        accept_kinds=accept,
-                        totals=totals,
-                    )
-                    after = sum(totals.values())
-                    if after > before:
-                        await stage.increment(after - before)
-                # Commit per file so a later timeout still persists progress.
-                await session.commit()
+        for fpath in files:
+            try:
+                code = fpath.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            file_rel = str(fpath.relative_to(path)) if str(fpath).startswith(
+                str(path)
+            ) else fpath.name
+            extracted = await extract_file_via_agent_sdk(
+                language=language, file_rel=file_rel, code=code
+            )
+            files_done += 1
+            if not extracted:
+                continue
+            # Ingest + COMMIT this file's nodes in a short-lived session,
+            # then report progress. Committing before stage.increment()
+            # releases the SQLite write lock so the StageTracker's
+            # progress flush (a separate session) never contends — the
+            # PR-141 "database is locked" failure. A per-file DB error
+            # degrades that file, never the whole run.
+            added = 0
+            try:
+                async with SessionLocal() as session:
+                    for env in to_envelopes(language, file_rel, extracted):
+                        before = sum(totals.values())
+                        await _record_payload(
+                            session,
+                            project_id=project_id,
+                            payload=env,
+                            accept_kinds=accept,
+                            totals=totals,
+                        )
+                        added += sum(totals.values()) - before
+                    await session.commit()
+            except Exception:  # noqa: BLE001
+                log.exception("agent_extract: ingest failed for %s", file_rel)
+                files_failed += 1
+                continue
+            if added:
+                await stage.increment(added)
         stage.set_stats(
             {
                 "files_analyzed": files_done,
+                "files_failed": files_failed,
                 "symbols": totals.get("symbols", 0),
                 "edges": totals.get("edges", 0),
                 "extractor": "claude_code",
