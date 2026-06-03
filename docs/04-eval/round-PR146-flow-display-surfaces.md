@@ -33,9 +33,16 @@ API 로 제공하므로, 데이터는 있고 **표시만 누락**된 상태였�
 | ruff | **0** |
 | PR-146 단위 + 템플릿 렌더(pr129) | **80 passed** |
 | mypy | **69** (불변) |
-| pytest `not integration` (−pr114) | *(채움)* |
-| live MCP `list_flows` / Q&A 도구 | *(채움)* |
-| live GUI `/report` + `/summaries?level=4` | *(채움)* |
+| pytest `not integration` (−pr114) | **1463 passed / 6 failed / 32 skipped** (회귀 0) |
+| live MCP `list_flows` / Q&A | ✅ list_flows → 1 flow(6 steps·3 flags·2 data_touched); search_symbols/get_data_access 정상(ORM select level=4 → 1 실측) |
+| live GUI `/report` + `/summaries?level=4` | ✅ API 가 흐름 전체(summary/steps/flags) 반환; report 탭이 `?level=4` 렌더(템플릿 렌더 테스트 통과) |
+
+### 검증 중 관찰(제품 결함 아님)
+별도 단명 리더 프로세스가 **강제종료된 서버의 hot-WAL** sqlite 를 읽을 때 간헐적으로
+빈 결과를 봄. 같은 프로세스/실행 중 서버 API 는 정상(레벨-4 흐름 반환). 원인은
+unclean kill 이 남긴 hot WAL/-shm 의 교차프로세스 가시성 레이스 — 프로덕션(Postgres)
+무관, 정상 로컬모드(살아있는 writer + reader)에선 WAL 설계상 가시. local-mode 에서
+MCP(별도 프로세스)를 쓸 때의 엣지로 기록.
 
 ## 영역 점수 갱신
 | 영역 | before | after | 근거 |
