@@ -553,6 +553,44 @@ async def get_module_summary(
     }
 
 
+async def list_flows(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """List the cross-tier process flows (level-4 summaries from
+    ``trace_flow``) for the project, so an agent can discover which
+    processes have been traced before fetching one with
+    ``get_module_summary(target_id, level=4)``. Returns id + one-line
+    summary + the step/flag/data sections so a single call is enough to
+    *show* the process without a second round-trip."""
+    rows = (
+        await session.execute(
+            select(Summary)
+            .where(
+                Summary.project_id == project_id,
+                Summary.level == 4,
+                Summary.superseded_by.is_(None),
+            )
+            .order_by(Summary.generated_at.desc())
+            .limit(max(1, min(limit, 200)))
+        )
+    ).scalars().all()
+    return [
+        {
+            "target_id": r.target_id,
+            "summary": r.summary,
+            "detailed": r.detailed,
+            "sections": r.claims or [],
+            "open_questions": r.open_questions or [],
+            "generated_at": r.generated_at.isoformat() if r.generated_at else None,
+        }
+        for r in rows
+    ]
+
+
+
 _TIME_WINDOW_SUFFIXES = {"h": 3600, "d": 86400, "w": 7 * 86400}
 
 

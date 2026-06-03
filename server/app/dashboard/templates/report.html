@@ -42,6 +42,9 @@
   <h3 data-i18n="System-level narrative (L3)">System-level narrative (L3)</h3>
   <div id="rp-l3" class="report-narrative"></div>
 
+  <h3 data-i18n="Cross-tier processes (flows)">Cross-tier processes (flows)</h3>
+  <div id="rp-flows" class="report-narrative"></div>
+
   <h3 data-i18n="Finding lifecycle">Finding lifecycle</h3>
   <div id="rp-lifecycle" class="report-diagram"
        aria-label="finding state machine"></div>
@@ -141,10 +144,11 @@ async function buildReport(ev) {
   document.getElementById("rp-empty").hidden = true;
   const body = document.getElementById("report-body");
 
-  // Parallel fetch — health summary + L3 narrative + cost + trend + ROI.
-  const [sumRes, l3Res, costRes, trendRes, roiRes] = await Promise.all([
+  // Parallel fetch — health summary + L3 narrative + L4 flows + cost + trend + ROI.
+  const [sumRes, l3Res, flowRes, costRes, trendRes, roiRes] = await Promise.all([
     fetch(`/api/v1/projects/${pid}/findings/summary`),
     fetch(`/api/v1/projects/${pid}/summaries?level=3`),
+    fetch(`/api/v1/projects/${pid}/summaries?level=4`),
     fetch(`/api/v1/projects/${pid}/llm_cost`),
     fetch(`/api/v1/projects/${pid}/findings/trend?days=90&bucket_days=7`),
     fetch(`/api/v1/projects/${pid}/findings/roi`),
@@ -155,6 +159,7 @@ async function buildReport(ev) {
   }
   const s = await sumRes.json();
   const l3 = l3Res.ok ? await l3Res.json() : [];
+  const flows = flowRes.ok ? await flowRes.json() : [];
   const cost = costRes.ok ? await costRes.json() : null;
   const trend = trendRes.ok ? await trendRes.json() : null;
   const roi = roiRes.ok ? await roiRes.json() : null;
@@ -219,6 +224,34 @@ async function buildReport(ev) {
           : ""}
       </div>`).join("")
     : '<p class="muted" data-i18n="No L3 summary yet — run a full analysis to generate the system-level narrative.">No L3 summary yet — run a full analysis to generate the system-level narrative.</p>';
+
+  // Cross-tier process flows (level-4, from trace_flow). Each flow's
+  // claims carry sections: steps, flags, data_touched.
+  document.getElementById("rp-flows").innerHTML = flows.length
+    ? flows.map(f => {
+        const sections = {};
+        (f.claims || []).forEach(c => { if (c && c.section) sections[c.section] = c.data || []; });
+        const steps = sections.steps || [];
+        const flags = sections.flags || [];
+        const stepsHtml = steps.length
+          ? "<ol class=\"flow-steps\">" + steps.map(st =>
+              `<li><strong>[${escapeHtml(st.tier || "?")}]</strong> ${escapeHtml(st.component || "")} — ${escapeHtml(st.action || "")}`
+              + (st.signal && st.signal.name ? ` <span class=\"muted\">(${escapeHtml(st.signal.kind || "")}: ${escapeHtml(st.signal.name)})</span>` : "")
+              + "</li>").join("") + "</ol>"
+          : "";
+        const flagsHtml = flags.length
+          ? "<p class=\"muted\"><strong>" + escapeHtml(MnemosUI.t("Flags:")) + "</strong></p><ul class=\"flow-flags\">"
+            + flags.map(fl => `<li>${escapeHtml(fl.name || "")}: `
+                + (fl.values || []).map(v => `<code>${escapeHtml(String(v.value))}</code>=${escapeHtml(v.meaning || "")}`).join(", ")
+                + "</li>").join("") + "</ul>"
+          : "";
+        return `<div class="l3-item">
+          <h4>${escapeHtml((f.target_id || "flow").replace(/^flow:/, ""))}</h4>
+          <p>${escapeHtml(f.summary || "")}</p>
+          ${stepsHtml}${flagsHtml}
+        </div>`;
+      }).join("")
+    : '<p class="muted" data-i18n="No process flows yet — run trace_flow on a frontend/backend/DB slice to see the end-to-end process here.">No process flows yet — run trace_flow on a frontend/backend/DB slice to see the end-to-end process here.</p>';
 
   // Cost.
   document.getElementById("rp-cost").innerHTML = cost

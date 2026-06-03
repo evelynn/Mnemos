@@ -40,6 +40,7 @@ from app.mcp.queries import (
     get_symbol,
     impact_analysis,
     list_findings,
+    list_flows,
     search_symbols,
 )
 
@@ -335,6 +336,27 @@ _TOOLS = [
         },
     ),
     Tool(
+        name="list_flows",
+        description=(
+            "List the cross-tier process flows traced for this project "
+            "(level-4 summaries from trace_flow). Each entry carries the "
+            "one-line summary plus the step / flag / data sections, so this "
+            "single call is enough to SHOW a traced process end-to-end "
+            "(frontend → backend → database, the signals crossing each "
+            "boundary, every flag value and its meaning, the rows touched).\n\n"
+            "Use when: \"walk me through the <X> process\" or \"what flows "
+            "have been analysed?\". For a specific one, follow up with "
+            "get_module_summary(target_id, level=4)."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "limit": {"type": "integer", "default": 50},
+            },
+        },
+    ),
+    Tool(
         name="find_runtime_path",
         description=(
             "BFS over exercised CALLS edges starting at a contract. Returns "
@@ -571,6 +593,12 @@ def build_server(project_id: uuid.UUID) -> Server:
                 )
                 if result is None:
                     result = {"error": "not_found"}
+            elif name == "list_flows":
+                result = await list_flows(
+                    db,
+                    project_id=project_id,
+                    limit=int(arguments.get("limit", 50)),
+                )
             elif name == "find_runtime_path":
                 result = await find_runtime_path(
                     db,
