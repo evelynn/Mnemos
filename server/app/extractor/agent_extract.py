@@ -138,12 +138,18 @@ def _build_extract_prompt(language: str, file_rel: str, code: str) -> str:
         '  "edges": [\n'
         '    {"source_id": "<symbol id>", "target_id": "<symbol id>", '
         '"kind": "CALLS|CONTAINS"}\n'
+        "  ],\n"
+        '  "data_access": [\n'
+        '    {"symbol_id": "<symbol id>", "table": "<db table name>", '
+        '"access": "READS|WRITES"}\n'
         "  ]\n"
         "}\n\n"
         f'Use ids of the form "{id_prefix}<QualifiedName>" so edges can '
         "reference symbols. Only include edges whose endpoints are symbols "
-        "you listed. If the file defines nothing, return "
-        '{"symbols": [], "edges": []}.\n\n'
+        "you listed. In data_access, record every DB table the symbol reads "
+        "from or writes to — infer from SQL strings (SELECT/INSERT/UPDATE/"
+        "DELETE), ORM calls, or query builders. If the file defines nothing, "
+        'return {"symbols": [], "edges": [], "data_access": []}.\n\n'
         "Source:\n"
         "````\n"
         f"{code}\n"
@@ -257,7 +263,13 @@ async def extract_file_via_agent_sdk(
     edges = parsed.get("edges") or []
     if not isinstance(items, list) or not isinstance(edges, list):
         return None
-    return {items_key: items, "edges": edges}
+    out = {items_key: items, "edges": edges}
+    if not is_db:
+        # Function → DB-table READS/WRITES so get_data_access can answer
+        # "what does this touch in the DB" for agent-extracted code (PR-145).
+        da = parsed.get("data_access")
+        out["data_access"] = da if isinstance(da, list) else []
+    return out
 
 
 def to_envelopes(
@@ -322,6 +334,35 @@ def to_envelopes(
                     },
                 }
             )
+        # Function → DB-table READS/WRITES edges (PR-145). Target is a
+        # DataEntity (often created by the SQL stage), so it isn't a local
+        # symbol — emit directly without the symbol dangling-filter. This is
+        # what lets get_data_access answer "what DB does this touch".
+        for da in extracted.get("data_access", []):
+            if not isinstance(da, dict):
+                continue
+            sid = da.get("symbol_id")
+            table = da.get("table")
+            if not sid or sid not in valid_ids or not table:
+                continue
+            access = str(da.get("access", "READS")).upper()
+            if access not in ("READS", "WRITES"):
+                access = "READS"
+            entity_id = table if str(table).startswith("data:") else f"data:{str(table).strip().lower()}"
+            envelopes.append(
+                {
+                    "record_type": "edge",
+                    "source_name": file_rel,
+                    "data": {
+                        "source_id": sid,
+                        "target_id": entity_id,
+                        "kind": access,
+                        "certainty": "inferred",
+                        "metadata": {"extractor": "claude_code", "access_site": file_rel},
+                    },
+                }
+            )
+
     for edge in extracted.get("edges", []):
         if not isinstance(edge, dict):
             continue
