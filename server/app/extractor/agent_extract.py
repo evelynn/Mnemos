@@ -37,6 +37,13 @@ log = logging.getLogger(__name__)
 # gets skipped by the agent-extraction stage (recorded, not crashed).
 AGENT_LANGUAGE_EXTENSIONS: dict[str, tuple[str, ...]] = {
     "cpp": (".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hxx", ".hh", ".h", ".c"),
+    # Languages that also have a deterministic ggoss analyzer — listed here
+    # so the Claude-Code fallback can still find their files when the
+    # analyzer binary isn't installed (docker-free, PR-144).
+    "python": (".py",),
+    "csharp": (".cs",),
+    "typescript": (".ts", ".tsx"),
+    "javascript": (".js", ".jsx", ".mjs", ".cjs"),
     "go": (".go",),
     "rust": (".rs",),
     "java": (".java",),

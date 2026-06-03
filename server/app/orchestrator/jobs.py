@@ -18,7 +18,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.analyzers.registry import binary_for, runner_for
+from app.analyzers.registry import analyzer_available, runner_for
 from app.audit.logger import record as audit_record
 from app.config import get_settings
 from app.db import SessionLocal
@@ -491,15 +491,17 @@ async def run_ingest(
                         bus, project_id, run_id, language, verb, path, position, totals
                     )
 
-            # Stage L0-Agent: for any project language with no deterministic
-            # ggoss analyzer, delegate extraction to the operator's Claude
-            # Code subscription (spec principle #4) so the platform is never
-            # blind to a language just because no analyzer binary ships for
-            # it. Bounded by ``agent_extract_limit`` files per language.
+            # Stage L0-Agent: delegate extraction to the operator's Claude
+            # Code subscription (spec principle #4) for any language the
+            # deterministic analyzers can't handle — either no ggoss analyzer
+            # is registered (C++) OR one is registered but its binary isn't
+            # installed (the docker-free case, PR-144). Without the latter,
+            # a docker-free Python/C#/TS project extracted nothing and Q&A
+            # had an empty graph. Bounded by ``agent_extract_limit``.
             agent_limit = int(opts.get("agent_extract_limit", 12))
             if agent_limit > 0:
                 for language in project.languages:
-                    if binary_for(language) is None:
+                    if not analyzer_available(language):
                         position += 1
                         await _run_agent_extraction_stage(
                             bus, project_id, run_id, language, path,

@@ -1,5 +1,7 @@
 """Which analyzers apply to which project languages."""
 
+import shutil
+
 from app.analyzers.runner import AnalyzerRunner
 
 # The binary may be shadowed by a docker-run wrapper in production; the
@@ -26,3 +28,14 @@ def binary_for(language: str) -> str | None:
 def runner_for(language: str) -> AnalyzerRunner | None:
     binary = binary_for(language)
     return AnalyzerRunner(binary) if binary else None
+
+
+def analyzer_available(language: str) -> bool:
+    """True only when a deterministic analyzer is BOTH registered for the
+    language AND its binary is on PATH. False means the platform cannot
+    extract this language deterministically — e.g. an unregistered language
+    (C++), or a registered one whose image isn't installed (the docker-free
+    case, PR-144). Callers fall back to Claude-Code agent extraction so the
+    graph is never left empty just because a binary is missing."""
+    binary = binary_for(language)
+    return binary is not None and shutil.which(binary) is not None
