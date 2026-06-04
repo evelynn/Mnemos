@@ -21,8 +21,8 @@
 | ruff | **0** |
 | PR-147 단위 | **2 passed** (FE+BE 이름매칭 + DB 엣지수집 + 무관 제외 실측) |
 | mypy | **69** (불변) |
-| pytest `not integration` (−pr114) | *(채움)* |
-| live `/trace_flow/auto` | *(채움 — 진입점만으로 FE/BE/DB 자동수집 + 흐름)* |
+| pytest `not integration` (−pr114) | **1465 passed / 6 failed / 32 skipped** (회귀 0) |
+| live `/trace_flow/auto` | ✅ 입력=`entry`+`source_root`만 → 그래프가 **3-tier 자동수집** `[frontend/checkout.js, backend/orders_handler.py, db/schema.sql]` → 7 steps·4 flags·2 data_touched, level-4 영속 |
 
 ## 영역 점수 갱신
 | 영역 | before | after | 근거 |
