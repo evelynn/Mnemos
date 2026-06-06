@@ -224,7 +224,7 @@ _KNOWN_ROUTES = {
     "/findings", "/audit", "/settings", "/profile", "/users",
     "/organizations", "/sso", "/gdpr", "/graph", "/report",
     "/health", "/docs", "/login", "/logout", "/forgot", "/reset",
-    "/invite",
+    "/invite", "/ask",
 }
 
 
@@ -264,9 +264,10 @@ def test_innerhtml_usage_known_safe_patterns():
     #   report.html    — chart bars, escapeHtml on labels
     #   forgot.html    — token via encodeURIComponent + literal HTML
     #   docs.html      — markdown renderer (XSS audited PR-113)
+    #   ask.html       — answer card, escapeHtml on every server value (PR-150)
     audited_safe = {
         "dashboard.html", "diffs.html", "graph.html", "report.html",
-        "forgot.html", "docs.html",
+        "forgot.html", "docs.html", "ask.html",
     }
     actual = set()
     for tpl_name in _LEAF_TEMPLATES:
