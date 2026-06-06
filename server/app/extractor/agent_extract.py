@@ -122,6 +122,59 @@ def discover_source_files(
     return [p for _size, p in candidates[:limit]]
 
 
+# All extensions across the agent-eligible languages (for content search).
+_ALL_AGENT_EXTS = {e for exts in AGENT_LANGUAGE_EXTENSIONS.values() for e in exts}
+
+
+def find_candidate_files(
+    root: str,
+    terms: list[str],
+    *,
+    limit: int = 3,
+    max_scan_bytes: int = 60_000,
+    max_files_scanned: int = 4000,
+) -> list[tuple[Path, str]]:
+    """Rank source files most likely to *answer* a question, for the
+    gap-driven deepen path (PR-149): when the graph can't answer, find the
+    files whose path or content best match the question terms, extract those,
+    then retry. Score = path-term hits (×5, cheap & strong) + content-term
+    hits (×1, first ``max_scan_bytes``). Returns ``[(path, language), …]``
+    highest score first, score>0 only. Bounded so a huge repo stays cheap."""
+    terms = [t for t in terms if len(t) >= 3]
+    if not terms:
+        return []
+    root_path = Path(root)
+    if not root_path.exists():
+        return []
+    ext_to_lang = {
+        e: lang for lang, exts in AGENT_LANGUAGE_EXTENSIONS.items() for e in exts
+    }
+    scored: list[tuple[int, int, Path, str]] = []
+    scanned = 0
+    for p in root_path.rglob("*"):
+        if scanned >= max_files_scanned:
+            break
+        if not p.is_file() or any(part in _SKIP_DIRS for part in p.parts):
+            continue
+        ext = p.suffix.lower()
+        if ext not in _ALL_AGENT_EXTS:
+            continue
+        scanned += 1
+        rel = str(p.relative_to(root_path)).lower()
+        score = sum(5 for t in terms if t in rel)
+        try:
+            if p.stat().st_size <= max_scan_bytes:
+                body = p.read_text(encoding="utf-8", errors="replace").lower()
+                score += sum(body.count(t) for t in terms)
+        except OSError:
+            continue
+        if score > 0:
+            # prefer implementation files over headers on ties (smaller ext rank)
+            scored.append((score, -len(rel), p, ext_to_lang[ext]))
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return [(p, lang) for _s, _r, p, lang in scored[:limit]]
+
+
 def _build_extract_prompt(language: str, file_rel: str, code: str) -> str:
     id_prefix = f"{language}:{file_rel}::"
     return (
