@@ -104,7 +104,19 @@ async def db_session() -> AsyncIterator:
 
     async with engine.connect() as connection:
         trans = await connection.begin()
-        async_session = AsyncSession(bind=connection, expire_on_commit=False)
+        # join_transaction_mode="create_savepoint": the session runs inside
+        # a SAVEPOINT that is automatically *restarted* after every
+        # commit()/rollback() the test or the request handler issues. The
+        # default ("conditional_savepoint") does not restart, so the first
+        # commit() ends the savepoint and later reads on asyncpg silently
+        # miss rows the test seeded (the webhook push test's project lookup
+        # returned None even though the row was committed). The outer
+        # ``trans.rollback()`` still discards everything at teardown.
+        async_session = AsyncSession(
+            bind=connection,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             yield async_session
         finally:

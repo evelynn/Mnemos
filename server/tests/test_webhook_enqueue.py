@@ -61,28 +61,25 @@ def test_queue_name_serializes_per_branch():
 
 
 @pytest.mark.integration
-async def test_push_event_enqueues_and_audits(http_client, db_session, monkeypatch):
+async def test_push_event_enqueues_and_audits(http_client, db_session):
     """A push webhook produces an AnalysisRun row plus an audit record."""
     import json
 
     from sqlalchemy import select
 
     from app.models.audit import AuditLog
+    from app.models.auth import PlatformSetting
     from app.models.graph import AnalysisRun
     from app.models.projects import Project
 
-    # The receiver is fail-closed (no secret -> 503). Secret *resolution*
-    # is covered by test_pr96/test_pr82; here we only care about the
-    # enqueue + audit behaviour, so stub _secret to a known value and
-    # present the matching token. (Seeding the secret row and relying on
-    # the request handler reading it back through the shared test session
-    # proved flaky on the asyncpg savepoint path.)
-    import app.api.webhooks as _wh
-
-    async def _fake_secret(_db):
-        return _WEBHOOK_SECRET
-
-    monkeypatch.setattr(_wh, "_secret", _fake_secret)
+    # The receiver is fail-closed: a webhook secret MUST be configured or
+    # it 503s. Seed the legacy PlatformSetting secret and present the
+    # matching token.
+    db_session.add(
+        PlatformSetting(
+            key="gitlab_webhook_secret", value={"secret": _WEBHOOK_SECRET}
+        )
+    )
 
     project = Project(
         name=f"hook-{uuid.uuid4().hex[:6]}",
@@ -137,7 +134,7 @@ async def test_push_event_enqueues_and_audits(http_client, db_session, monkeypat
 
 
 @pytest.mark.integration
-async def test_merge_request_event_does_not_enqueue(http_client, db_session, monkeypatch):
+async def test_merge_request_event_does_not_enqueue(http_client, db_session):
     """MR open/merge events are eventually represented as push events on the
     target branch; we deliberately do not run a preview analysis from MR
     webhooks in Phase 1."""
@@ -145,16 +142,15 @@ async def test_merge_request_event_does_not_enqueue(http_client, db_session, mon
 
     from sqlalchemy import select
 
+    from app.models.auth import PlatformSetting
     from app.models.graph import AnalysisRun
     from app.models.projects import Project
 
-    # See the push test: stub secret resolution, exercise enqueue behaviour.
-    import app.api.webhooks as _wh
-
-    async def _fake_secret(_db):
-        return _WEBHOOK_SECRET
-
-    monkeypatch.setattr(_wh, "_secret", _fake_secret)
+    db_session.add(
+        PlatformSetting(
+            key="gitlab_webhook_secret", value={"secret": _WEBHOOK_SECRET}
+        )
+    )
 
     project = Project(
         name=f"hook-mr-{uuid.uuid4().hex[:6]}",
