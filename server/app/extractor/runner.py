@@ -208,6 +208,66 @@ async def _priority_symbols(
     return combined[:limit]
 
 
+async def _priority_data_entities(
+    session: AsyncSession, project_id: uuid.UUID, limit: int
+) -> list[Node]:
+    """Rank DataEntity (table/view) nodes for L1 summarisation by how many
+    things touch them (incoming READS / WRITES / REFERENCES edges) — the
+    busiest tables matter most — then top up with any remaining entities."""
+    if limit <= 0:
+        return []
+    deg_stmt = (
+        select(Edge.target_id)
+        .where(
+            Edge.project_id == project_id,
+            Edge.kind.in_(("READS", "WRITES", "REFERENCES")),
+            Edge.valid_to.is_(None),
+        )
+        .group_by(Edge.target_id)
+        .order_by(func.count().desc())
+        .limit(limit * 3)
+    )
+    top_ids = [r[0] for r in (await session.execute(deg_stmt)).all()]
+    fetched = (
+        await session.execute(
+            select(Node).where(
+                Node.project_id == project_id,
+                Node.kind == "DataEntity",
+                Node.valid_to.is_(None),
+                Node.id.in_(top_ids),
+            )
+        )
+    ).scalars().all() if top_ids else []
+    # ``IN`` does not preserve the degree ordering — re-sort by the rank
+    # position in ``top_ids`` so the busiest table comes first.
+    order = {nid: i for i, nid in enumerate(top_ids)}
+    ranked = sorted(fetched, key=lambda n: order.get(n.id, len(order)))
+
+    if len(ranked) >= limit:
+        return ranked[:limit]
+
+    filler = (
+        await session.execute(
+            select(Node)
+            .where(
+                Node.project_id == project_id,
+                Node.kind == "DataEntity",
+                Node.valid_to.is_(None),
+            )
+            .limit(limit)
+        )
+    ).scalars().all()
+    seen = {n.id for n in ranked}
+    out = [*ranked]
+    for n in filler:
+        if n.id in seen:
+            continue
+        out.append(n)
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
 async def summarise_l1(
     session: AsyncSession,
     extractor: Extractor,
@@ -217,9 +277,16 @@ async def summarise_l1(
     progress_cb=None,
 ) -> int:
     symbols = await _priority_symbols(session, project_id, limit)
+    # PR-152 — also summarise the most-referenced data entities (tables) so
+    # "what does table X hold / who touches it?" gets an LLM narrative, not
+    # just the raw column list. Bounded to a fraction of the symbol budget.
+    entities = await _priority_data_entities(
+        session, project_id, max(1, limit // 5)
+    )
+    nodes = [*symbols, *entities]
 
     count = 0
-    for sym in symbols:
+    for sym in nodes:
         neighbours_out = (
             await session.execute(
                 select(Edge)
