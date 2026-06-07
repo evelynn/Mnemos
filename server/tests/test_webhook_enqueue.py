@@ -11,6 +11,8 @@ import uuid
 
 import pytest
 
+_WEBHOOK_SECRET = "test-webhook-secret-1234"
+
 
 def test_job_id_includes_before_so_force_push_isnt_swallowed():
     """A force-push that reuses an old `after` SHA must still requeue."""
@@ -65,8 +67,18 @@ async def test_push_event_enqueues_and_audits(http_client, db_session):
     from sqlalchemy import select
 
     from app.models.audit import AuditLog
+    from app.models.auth import PlatformSetting
     from app.models.graph import AnalysisRun
     from app.models.projects import Project
+
+    # The receiver is fail-closed: a webhook secret MUST be configured or
+    # it returns 403. Seed the legacy PlatformSetting secret and present
+    # the matching token.
+    db_session.add(
+        PlatformSetting(
+            key="gitlab_webhook_secret", value={"secret": _WEBHOOK_SECRET}
+        )
+    )
 
     project = Project(
         name=f"hook-{uuid.uuid4().hex[:6]}",
@@ -92,7 +104,11 @@ async def test_push_event_enqueues_and_audits(http_client, db_session):
     r = await http_client.post(
         "/webhooks/gitlab",
         content=json.dumps(payload),
-        headers={"content-type": "application/json", "x-gitlab-event": "Push Hook"},
+        headers={
+            "content-type": "application/json",
+            "x-gitlab-event": "Push Hook",
+            "x-gitlab-token": _WEBHOOK_SECRET,
+        },
     )
     assert r.status_code == 200
     body = r.json()
@@ -124,8 +140,15 @@ async def test_merge_request_event_does_not_enqueue(http_client, db_session):
     import json
     from sqlalchemy import select
 
+    from app.models.auth import PlatformSetting
     from app.models.graph import AnalysisRun
     from app.models.projects import Project
+
+    db_session.add(
+        PlatformSetting(
+            key="gitlab_webhook_secret", value={"secret": _WEBHOOK_SECRET}
+        )
+    )
 
     project = Project(
         name=f"hook-mr-{uuid.uuid4().hex[:6]}",
@@ -147,7 +170,10 @@ async def test_merge_request_event_does_not_enqueue(http_client, db_session):
                 "object_attributes": {"action": "open"},
             }
         ),
-        headers={"content-type": "application/json"},
+        headers={
+            "content-type": "application/json",
+            "x-gitlab-token": _WEBHOOK_SECRET,
+        },
     )
     assert r.status_code == 200
     assert r.json()["enqueued"] is False

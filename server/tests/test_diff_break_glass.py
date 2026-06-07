@@ -95,7 +95,15 @@ async def _make_submission(db_session, *, verdict: str):
     from app.models.projects import Project
 
     org = await _make_org(db_session, f"bgorg-{uuid.uuid4().hex[:6]}")
-    project = Project(name=f"bgproj-{uuid.uuid4().hex[:6]}", organization_id=org.id)
+    project = Project(
+        name=f"bgproj-{uuid.uuid4().hex[:6]}",
+        # gitlab_project_id / gitlab_url / languages are NOT NULL on the
+        # projects table (migration 0002); the fixture must supply them.
+        gitlab_project_id=uuid.uuid4().int % 1_000_000_000,
+        gitlab_url="http://gitlab/bgproj",
+        languages=["python"],
+        organization_id=org.id,
+    )
     db_session.add(project)
     await db_session.flush()
     plan = Plan(

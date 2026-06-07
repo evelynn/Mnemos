@@ -86,16 +86,37 @@ async def db_session() -> AsyncIterator:
 
 
 @pytest_asyncio.fixture
-async def http_client():
-    """Provide an ``httpx.AsyncClient`` bound to the FastAPI app."""
+async def http_client(db_session):
+    """Provide an ``httpx.AsyncClient`` bound to the FastAPI app.
+
+    The app's ``get_session`` dependency is overridden to hand request
+    handlers the *same* savepoint-wrapped session the test uses. Without
+    this, a handler opened its own pool connection via ``SessionLocal``
+    and could not see a row the test had created+committed inside its
+    savepoint — under SQLAlchemy 2.0 the test's ``session.commit()`` only
+    releases the savepoint, so the outer transaction never reaches other
+    connections. That cross-connection gap is what made the auth /
+    org-boundary / webhook integration tests 401/403 even though the
+    fixtures had clearly inserted the user/project. Sharing one
+    connection makes the end-to-end HTTP flow see the seeded rows, and
+    the outer ``trans.rollback()`` still isolates the test.
+    """
     from httpx import ASGITransport, AsyncClient
 
+    from app.db import get_session
     from app.main import app
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://testserver"
-    ) as client:
-        yield client
+    async def _use_test_session() -> AsyncIterator:
+        yield db_session
+
+    app.dependency_overrides[get_session] = _use_test_session
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            yield client
+    finally:
+        app.dependency_overrides.pop(get_session, None)
 
 
 @pytest_asyncio.fixture

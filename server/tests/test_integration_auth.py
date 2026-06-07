@@ -43,11 +43,11 @@ async def test_viewer_blocked_from_admin_endpoint(
 
     username = f"viewer-{uuid.uuid4().hex[:8]}"
     db_session.add(
-        User(username=username, password_hash=hash_password("pw-viewer-abcdef"), role="viewer")
+        User(username=username, password_hash=hash_password("pw-viewer-abcd12"), role="viewer")
     )
     await db_session.commit()
 
-    r = await _login(http_client, username, "pw-viewer-abcdef")
+    r = await _login(http_client, username, "pw-viewer-abcd12")
     assert r.status_code == 200
     # list secrets is open to any authed user, creating is admin-only.
     r = await http_client.post(

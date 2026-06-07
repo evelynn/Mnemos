@@ -146,7 +146,9 @@ def test_metrics_summary_queries_postgres_not_prometheus():
     assert "FROM project_dbs" in body
     assert "FROM diff_break_glass_grants" in body
     assert "FROM analysis_runs" in body
-    assert "FROM audit_logs" in body
+    # table is audit_log (singular) — see migration 0003. The endpoint
+    # previously referenced a nonexistent audit_logs table and 503'd.
+    assert "FROM audit_log " in body
     # Must not be pulling from prometheus_client globals.
     assert "prometheus_client" not in body
 
