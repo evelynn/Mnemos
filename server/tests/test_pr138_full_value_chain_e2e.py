@@ -29,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid as _uuid
-from pathlib import Path
 
 import pytest
 

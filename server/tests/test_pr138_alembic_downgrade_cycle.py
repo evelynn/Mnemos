@@ -27,7 +27,6 @@ import ast
 import re
 from pathlib import Path
 
-import pytest
 
 _SERVER_ROOT = Path(__file__).resolve().parents[1]
 _VDIR = _SERVER_ROOT / "alembic" / "versions"
