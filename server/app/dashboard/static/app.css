@@ -1145,3 +1145,11 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
            border-radius: 50%; animation: ask-spin 0.7s linear infinite; }
 @keyframes ask-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+/* PR-151 — Ask tab: process trace trigger + flow render. */
+.ask-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.ask-flow-summary { font-weight: 600; margin: 0.5rem 0; }
+.flow-steps { margin: 0.5rem 0 0.5rem 1.25rem; line-height: 1.5; }
+.flow-steps li { margin: 0.2rem 0; }
+.flow-flags { margin: 0.25rem 0 0.5rem 1.25rem; }
+.flow-flags li { margin: 0.2rem 0; }

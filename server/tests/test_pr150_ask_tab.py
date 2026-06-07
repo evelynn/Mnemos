@@ -41,6 +41,16 @@ def test_ask_template_wires_endpoint_and_picker():
     assert "Writes" in html
 
 
+def test_ask_tab_can_trigger_process_trace():
+    # PR-151 — the Ask tab also triggers trace_flow/auto and renders the flow
+    # (steps + flag meanings), so the cross-tier process feature is usable
+    # from the GUI, not only via REST.
+    html = (_TPL / "ask.html").read_text(encoding="utf-8")
+    assert "traceProcess" in html
+    assert "trace_flow/auto" in html
+    assert "flow-steps" in html and "flow-flags" in html
+
+
 def test_ask_template_renders_without_jinja_error():
     # Mirror PR-129's render guard for the new template specifically.
     from jinja2 import Environment, FileSystemLoader, select_autoescape
