@@ -28,7 +28,7 @@ from app.merge.contract_id import http_contract_id
 from app.merge.findings import run_all as rebuild_findings
 from app.merge.runtime import reconcile_observations
 from app.merge.writer import upsert_edge, upsert_node
-from app.models.graph import AnalysisRun
+from app.models.graph import AnalysisRun, Node
 from app.models.projects import Project
 from app.orchestrator.progress import ProgressBus
 from app.orchestrator.stages import StageTracker
@@ -319,6 +319,85 @@ async def _run_agent_extraction_stage(
         )
 
 
+async def _run_call_linking_stage(
+    bus: ProgressBus,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    position: int,
+    totals: dict[str, int],
+) -> None:
+    """PR-154 — resolve agent-extracted cross-file calls into CALLS edges.
+
+    Each agent-extracted Symbol carries ``data.calls_out`` (bare callee
+    names, possibly defined in another file). Match each name to a Symbol
+    elsewhere in the project; create a CALLS edge only when the match is
+    unambiguous (exactly one non-self symbol of that name) to keep
+    precision. This is what makes find_callers/callees work across files
+    for Claude-extracted code, not just within a single file."""
+    async with StageTracker(
+        bus, run_id, project_id, "link_calls", position=position, time_budget_sec=120
+    ) as stage:
+        async with SessionLocal() as session:
+            linked = await link_inferred_calls(session, project_id, totals)
+            await session.commit()
+        for _ in range(linked):
+            await stage.increment()
+        stage.set_stats({"links_created": linked})
+
+
+async def link_inferred_calls(
+    session: AsyncSession, project_id: uuid.UUID, totals: dict[str, int]
+) -> int:
+    """Resolve agent-extracted ``data.calls_out`` callee names into CALLS
+    edges, unambiguous matches only. Returns the number of edges created.
+    Pure-DB (no bus/stage) so it is directly testable."""
+    symbols = (
+        await session.execute(
+            select(Node).where(
+                Node.project_id == project_id,
+                Node.kind == "Symbol",
+                Node.valid_to.is_(None),
+            )
+        )
+    ).scalars().all()
+    by_name: dict[str, list[str]] = {}
+    callers: list[Node] = []
+    for n in symbols:
+        nm = (n.data or {}).get("name")
+        if nm:
+            by_name.setdefault(nm, []).append(n.id)
+        if (n.data or {}).get("calls_out"):
+            callers.append(n)
+
+    linked = 0
+    for n in callers:
+        for callee in (n.data or {}).get("calls_out") or []:
+            targets = [i for i in by_name.get(callee, []) if i != n.id]
+            if len(targets) != 1:
+                continue  # unresolved or ambiguous — skip for precision
+            before = sum(totals.values())
+            await _record_payload(
+                session,
+                project_id=project_id,
+                payload={
+                    "record_type": "edge",
+                    "source_name": "link_calls",
+                    "data": {
+                        "source_id": n.id,
+                        "target_id": targets[0],
+                        "kind": "CALLS",
+                        "certainty": "inferred",
+                        "metadata": {"extractor": "claude_code", "resolved": "cross_file"},
+                    },
+                },
+                accept_kinds={"edge"},
+                totals=totals,
+            )
+            if sum(totals.values()) > before:
+                linked += 1
+    return linked
+
+
 async def _run_db_live_schema_stages(
     bus: ProgressBus,
     project_id: uuid.UUID,
@@ -500,6 +579,7 @@ async def run_ingest(
             # had an empty graph. Bounded by ``agent_extract_limit``.
             agent_limit = int(opts.get("agent_extract_limit", 12))
             if agent_limit > 0:
+                ran_agent = False
                 for language in project.languages:
                     if not analyzer_available(language):
                         position += 1
@@ -507,6 +587,15 @@ async def run_ingest(
                             bus, project_id, run_id, language, path,
                             position, totals, agent_limit,
                         )
+                        ran_agent = True
+                # Stage L0-Link: resolve agent-extracted cross-file CALLS
+                # (each symbol's data.calls_out → a unique Symbol by name)
+                # so find_callers/callees work across files, not just within.
+                if ran_agent:
+                    position += 1
+                    await _run_call_linking_stage(
+                        bus, project_id, run_id, position, totals
+                    )
 
             # Stage L0-DB: live database schema for every registered
             # ProjectDB. Skipped silently when no DBs are bound to the

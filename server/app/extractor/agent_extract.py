@@ -186,6 +186,7 @@ def _build_extract_prompt(language: str, file_rel: str, code: str) -> str:
         '    {"id": "<stable id>", "name": "<symbol name>", '
         '"kind": "function|method|class|struct|namespace|enum", '
         '"line": <int>, "signature": "<one-line signature>", '
+        '"calls": ["<name of a function/method this symbol invokes>"], '
         '"summary": "<=160 chars on what it does"}\n'
         "  ],\n"
         '  "edges": [\n'
@@ -199,7 +200,10 @@ def _build_extract_prompt(language: str, file_rel: str, code: str) -> str:
         "}\n\n"
         f'Use ids of the form "{id_prefix}<QualifiedName>" so edges can '
         "reference symbols. Only include edges whose endpoints are symbols "
-        "you listed. In data_access, record every DB table the symbol reads "
+        "you listed. In each symbol's `calls`, list the bare names of the "
+        "functions/methods it invokes — INCLUDING ones defined in other "
+        "files (the platform resolves those across the project). In "
+        "data_access, record every DB table the symbol reads "
         "from or writes to — infer from SQL strings (SELECT/INSERT/UPDATE/"
         "DELETE), ORM calls, or query builders. If the file defines nothing, "
         'return {"symbols": [], "edges": [], "data_access": []}.\n\n'
@@ -382,6 +386,11 @@ def to_envelopes(
                         "line": sym.get("line"),
                         "signature": sym.get("signature"),
                         "summary": sym.get("summary"),
+                        # PR-154 — callee names (possibly cross-file); a
+                        # post-extraction pass resolves them to CALLS edges.
+                        "calls_out": [
+                            c for c in (sym.get("calls") or []) if isinstance(c, str)
+                        ],
                         "certainty": "inferred",
                         "extractor": "claude_code",
                     },
