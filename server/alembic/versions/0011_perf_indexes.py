@@ -27,17 +27,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 # Each entry: (index_name, DDL). Kept as tuples so downgrade() can mirror.
 _INDEXES: tuple[tuple[str, str], ...] = (
-    # /audit listing filters by project_id + time descending.
-    (
-        "idx_audit_project_time",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_project_time "
-        "ON audit_logs (project_id, created_at DESC)",
-    ),
+    # NB: idx_audit_project_time is created by 0003_audit_log (it owns the
+    # audit_log indexes); re-declaring it here duplicated the name and broke
+    # the downgrade cycle (0011 dropped it, then 0003's drop_index failed).
     # /audit also groups by actor for the abuse-detection query.
     (
         "idx_audit_actor",
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_actor "
-        "ON audit_logs (actor, created_at DESC)",
+        "ON audit_log (actor, created_at DESC)",
     ),
     # data_query_log: operator "recent queries by project" view.
     (

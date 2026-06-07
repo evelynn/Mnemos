@@ -19,7 +19,6 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.db import SessionLocal
 from app.orchestrator.redis_pool import get_redis
 
 router = APIRouter(tags=["health"])
@@ -97,6 +96,11 @@ def _check_analyzers() -> tuple[bool, str]:
 
 
 async def _check_db() -> tuple[bool, str]:
+    # Import at call time, not module load: serve_local / e2e test fixtures
+    # rebind app.db.engine (importlib.reload), and a module-level reference
+    # would keep pointing at a disposed engine — the pr138d full-suite flake.
+    from app.db import SessionLocal
+
     try:
         async with SessionLocal() as db:
             await asyncio.wait_for(db.execute(text("SELECT 1")), timeout=2.0)
@@ -133,6 +137,8 @@ async def metrics_summary() -> JSONResponse:
       * webhook_events_24h — pushes the platform ingested.
     """
     from datetime import datetime, timedelta, timezone
+
+    from app.db import SessionLocal  # call-time import (see _check_db note)
 
     out: dict[str, int | str] = {
         "project_dbs_disabled": 0,
