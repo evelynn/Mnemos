@@ -88,6 +88,12 @@ not one-shot analysis. The three request types are co-equal:
   plan submission, and worktree editing to IDE agents.
 - **Plan / diff / MR flow** — AI-driven changes land as plans, run through a
   multi-pass ultrareview, and open GitLab MRs when approved.
+- **Voice commands** — ask the analysed system by *speaking* on the Ask
+  tab. The browser captures a short clip; a **local** faster-whisper model
+  (optional `[voice]` extra — multilingual incl. Korean, CPU-friendly INT8,
+  fully offline) transcribes it into the question box for review. No audio
+  ever leaves the deployment, and the mic auto-hides when the extra isn't
+  installed. See [`docs/voice-commands.md`](docs/voice-commands.md).
 - **RBAC** — local login with `admin` / `operator` / `viewer` roles,
   organisation-scoped multi-tenancy, optional OIDC SSO with JWKS signature
   verification.

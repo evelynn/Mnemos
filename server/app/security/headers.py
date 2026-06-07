@@ -12,8 +12,11 @@ HTTPS deployment expects:
 * ``Referrer-Policy: same-origin`` — keep finding-ids and share
   URLs out of third-party access logs.
 * ``Permissions-Policy: …=()`` — explicit deny for browser APIs
-  the dashboard doesn't need (camera, microphone, geolocation,
-  payment, USB).
+  the dashboard doesn't need (camera, geolocation, payment, USB).
+  ``microphone=(self)`` is the one allow: the Ask tab's voice-command
+  feature (PR-155) needs ``getUserMedia({audio})`` on this origin.
+  Recognition still runs server-side/local — only the *capture* happens
+  in the browser, so this grants nothing to a third party.
 * ``Content-Security-Policy`` — tight default. Lets the dashboard
   load its own CSS / JS and the htmx CDN; blocks everything else.
   Operators can override via ``MNEMOS_CSP`` if they self-host
@@ -45,8 +48,10 @@ _DEFAULT_CSP = (
     "form-action 'self';"
 )
 
+# microphone is self-allowed for the Ask tab voice-command capture
+# (PR-155); everything else stays hard-denied.
 _PERMISSIONS_POLICY = (
-    "camera=(), microphone=(), geolocation=(), "
+    "camera=(), microphone=(self), geolocation=(), "
     "payment=(), usb=(), interest-cohort=()"
 )
 

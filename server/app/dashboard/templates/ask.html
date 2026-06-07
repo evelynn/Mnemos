@@ -18,8 +18,25 @@
       <input id="aq-pid" name="project_id" required placeholder="uuid" />
     </label>
     <label class="ask-question"><span data-i18n="Question">Question</span>
-      <textarea id="aq-q" rows="2" required
-        placeholder="e.g. Where is the order creation handler and which tables does it write?"></textarea>
+      <div class="ask-q-row">
+        <textarea id="aq-q" rows="2" required
+          placeholder="e.g. Where is the order creation handler and which tables does it write?"></textarea>
+        <!-- Voice command (PR-155). Hidden until the client confirms the
+             browser supports capture AND the server has an STT engine
+             installed (mountVoiceInput probes /api/v1/voice/status). -->
+        <button type="button" id="aq-mic" class="mic-btn" hidden
+                aria-label="Start voice input" aria-pressed="false"
+                data-required-role="operator"
+                title="Speak your question">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"
+               viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.7" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round"
+                  d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"/>
+          </svg>
+          <span class="sr-only" data-i18n="Voice input">Voice input</span>
+        </button>
+      </div>
     </label>
     <details class="ask-advanced">
       <summary data-i18n="Deepen options">Deepen options</summary>
@@ -203,5 +220,14 @@ function renderFlow(d) {
 }
 
 MnemosUI.mountProjectPicker("#aq-pid", { autoSubmit: false });
+
+// Voice command (PR-155): speak the question instead of typing it.
+// Recognition runs on a local server-side model; the recognised text
+// lands in the question box for the operator to review before asking.
+MnemosUI.mountVoiceInput({
+  button: "#aq-mic",
+  target: "#aq-q",
+  projectInput: "#aq-pid",
+});
 </script>
 {% endblock %}

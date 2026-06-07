@@ -25,6 +25,7 @@ from app.api import project_dbs as project_dbs_api
 from app.api import projects as projects_api
 from app.api import secrets as secrets_api
 from app.api import users as users_api
+from app.api import voice as voice_api
 from app.api import webhooks as webhooks_api
 from app.audit.middleware import AuditMiddleware
 from app.security.csrf import CSRFMiddleware
@@ -118,6 +119,7 @@ def create_app() -> FastAPI:
     app.include_router(findings_api.router)
     app.include_router(flow_api.router)
     app.include_router(ask_api.router)
+    app.include_router(voice_api.router)
     app.include_router(plans_api.router)
     app.include_router(diffs_api.router)
     app.include_router(break_glass_api.router)
