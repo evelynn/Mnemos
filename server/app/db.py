@@ -6,11 +6,24 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
 
 _settings = get_settings()
-engine = create_async_engine(_settings.database_url, pool_pre_ping=True, future=True)
+# Test runs drive the app from pytest-asyncio, which (with asyncio_mode=auto
+# and function-scoped loops) hands many tests their own event loop. A pooled
+# async connection binds to the loop that first opened it, so the *next*
+# test reusing this module-level engine hits
+# "<...> is bound to a different event loop" the moment it touches the pool.
+# NullPool opens a fresh connection per checkout and discards it on release,
+# so every test (and the app code it drives) connects on its own live loop.
+# Only the test env pays the per-connect cost; real deployments keep the
+# pre-ping pool.
+_engine_kwargs: dict = {"pool_pre_ping": True, "future": True}
+if (_settings.mnemos_env or "").lower() == "test":
+    _engine_kwargs = {"poolclass": NullPool, "future": True}
+engine = create_async_engine(_settings.database_url, **_engine_kwargs)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 

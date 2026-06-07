@@ -22,6 +22,15 @@ from collections.abc import AsyncIterator
 import pytest
 import pytest_asyncio
 
+# The CI DATABASE_URL (Postgres) as it was BEFORE any test module ran.
+# Several local-mode test modules (test_pr135 / test_pr138_full_value_chain
+# / test_pr138d) point ``DATABASE_URL`` at a throwaway SQLite file and
+# ``importlib.reload(app.db)`` without restoring it, so every
+# alphabetically-later integration test would otherwise inherit a leaked
+# SQLite engine. db_session restores this so the real integration tier
+# always runs against the configured (Postgres) database.
+_ORIGINAL_DATABASE_URL = os.environ.get("DATABASE_URL")
+
 # PR-97 — the test suite isn't production. config.get_settings refuses
 # to boot when SECRET_KEY is a placeholder AND MNEMOS_ENV=production.
 # Mark the test env explicitly before any app module imports.
@@ -52,12 +61,92 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip_marker)
 
 
+@pytest.fixture(autouse=True)
+def _reset_async_singletons():
+    """Drop cached async-redis singletons so each test rebinds them to
+    its own event loop.
+
+    A handful of test modules set ``MNEMOS_LOCAL_MODE=1`` at import time;
+    because pytest imports every module at collection, the *whole*
+    session runs in local mode and ``get_redis()`` / ``sessions._redis``
+    hand out a process-global fakeredis whose internal Queue binds to the
+    loop that first touched it. pytest-asyncio hands many async tests a
+    fresh loop, so a singleton built in an earlier test then raises
+    ``<Queue ...> is bound to a different event loop``. Clearing the
+    caches before and after every test makes each one lazily rebuild its
+    client on its own loop. Cheap no-op for the unit tier (it never
+    touches redis); the objects are in-memory so no close() is needed.
+    """
+    import app.auth.sessions as _sessions
+    import app.local_mode as _local_mode
+    import app.orchestrator.redis_pool as _redis_pool
+
+    def _clear() -> None:
+        _redis_pool._client = None
+        _sessions._redis = None
+        _local_mode._fake_server = None
+
+    _clear()
+    yield
+    _clear()
+
+
 @pytest.fixture(scope="session")
 def event_loop():
     """Session-scoped loop so async fixtures can share resources."""
     loop = asyncio.new_event_loop()
     yield loop
     loop.close()
+
+
+async def _ensure_configured_engine() -> None:
+    """Restore ``app.db`` to the originally-configured database.
+
+    A reloader module (test_pr135 / test_pr138*) may have rebound
+    ``app.db.engine`` to a throwaway SQLite file and left it that way.
+    If the integration tier (which needs the real Postgres) runs after
+    one of those, the leaked SQLite engine would carry over — wrong
+    backend, polluted/locked state. When the live engine no longer
+    matches the original DATABASE_URL, dispose it and reload app.db so
+    this test connects to the configured database again.
+    """
+    if not _ORIGINAL_DATABASE_URL or "sqlite" in _ORIGINAL_DATABASE_URL:
+        return
+    import app.db as _db
+
+    # The only leak in practice is a reloader binding the engine to SQLite
+    # while the configured database is Postgres. Comparing full URLs is
+    # unreliable (str(url) masks the password), so key off the backend.
+    if _db.engine.url.get_backend_name() != "sqlite":
+        return
+
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+    from sqlalchemy.pool import NullPool
+
+    os.environ["DATABASE_URL"] = _ORIGINAL_DATABASE_URL
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        await _db.engine.dispose()
+    except Exception:  # noqa: BLE001
+        pass
+    # Rebind the module attributes in place rather than importlib.reload:
+    # reloading would create a NEW get_session object, but app.main.app's
+    # routes still reference the original, so the http_client override
+    # (keyed on the function object) would silently stop applying. get_session
+    # looks up SessionLocal from module globals at call time, so swapping
+    # these is enough and keeps its identity stable.
+    _db.engine = create_async_engine(
+        _ORIGINAL_DATABASE_URL, poolclass=NullPool, future=True
+    )
+    _db.SessionLocal = async_sessionmaker(
+        _db.engine, expire_on_commit=False, class_=AsyncSession
+    )
 
 
 @pytest_asyncio.fixture
@@ -70,11 +159,25 @@ async def db_session() -> AsyncIterator:
     """
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    await _ensure_configured_engine()
+
     from app.db import SessionLocal, engine
 
     async with engine.connect() as connection:
         trans = await connection.begin()
-        async_session = AsyncSession(bind=connection, expire_on_commit=False)
+        # join_transaction_mode="create_savepoint": the session runs inside
+        # a SAVEPOINT that is automatically *restarted* after every
+        # commit()/rollback() the test or the request handler issues. The
+        # default ("conditional_savepoint") does not restart, so the first
+        # commit() ends the savepoint and later reads on asyncpg silently
+        # miss rows the test seeded (the webhook push test's project lookup
+        # returned None even though the row was committed). The outer
+        # ``trans.rollback()`` still discards everything at teardown.
+        async_session = AsyncSession(
+            bind=connection,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         try:
             yield async_session
         finally:
@@ -86,16 +189,46 @@ async def db_session() -> AsyncIterator:
 
 
 @pytest_asyncio.fixture
-async def http_client():
-    """Provide an ``httpx.AsyncClient`` bound to the FastAPI app."""
+async def http_client(db_session):
+    """Provide an ``httpx.AsyncClient`` bound to the FastAPI app.
+
+    The app's ``get_session`` dependency is overridden to hand request
+    handlers the *same* savepoint-wrapped session the test uses. Without
+    this, a handler opened its own pool connection via ``SessionLocal``
+    and could not see a row the test had created+committed inside its
+    savepoint — under SQLAlchemy 2.0 the test's ``session.commit()`` only
+    releases the savepoint, so the outer transaction never reaches other
+    connections. That cross-connection gap is what made the auth /
+    org-boundary / webhook integration tests 401/403 even though the
+    fixtures had clearly inserted the user/project. Sharing one
+    connection makes the end-to-end HTTP flow see the seeded rows, and
+    the outer ``trans.rollback()`` still isolates the test.
+    """
     from httpx import ASGITransport, AsyncClient
 
+    from app.db import get_session
     from app.main import app
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://testserver"
-    ) as client:
-        yield client
+    async def _use_test_session() -> AsyncIterator:
+        yield db_session
+
+    app.dependency_overrides[get_session] = _use_test_session
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            # Simulate a browser that already holds the double-submit CSRF
+            # cookie: set the cookie + matching X-CSRF-Token header so
+            # state-changing POSTs from authed tests pass the CSRF gate
+            # (CSRFMiddleware compares cookie == header). Endpoints that
+            # are CSRF-exempt ignore the extra header. The dedicated
+            # csrf-rejection test uses its own client, not this fixture.
+            _csrf = "test-csrf-token"
+            client.cookies.set("mnemos_csrf", _csrf)
+            client.headers["x-csrf-token"] = _csrf
+            yield client
+    finally:
+        app.dependency_overrides.pop(get_session, None)
 
 
 @pytest_asyncio.fixture

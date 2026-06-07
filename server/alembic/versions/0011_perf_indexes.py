@@ -26,19 +26,19 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 # Each entry: (index_name, DDL). Kept as tuples so downgrade() can mirror.
+#
+# Only genuinely-new indexes live here. Three candidates from the original
+# load-test checklist were dropped because earlier migrations already cover
+# them and re-declaring them was either wrong or pure duplication:
+#   * audit_log: 0003 already creates idx_audit_actor_time on
+#     (actor, occurred_at DESC). The column is occurred_at, NOT created_at,
+#     so the old idx_audit_actor DDL failed at CREATE time with
+#     "column created_at does not exist" and aborted the whole migration.
+#   * data_samples: 0005 already creates idx_samples_entity on
+#     (project_id, data_entity_id, sampled_at DESC).
+#   * analysis_runs: 0004 already creates idx_analysis_runs_project_time on
+#     (project_id, created_at DESC).
 _INDEXES: tuple[tuple[str, str], ...] = (
-    # /audit listing filters by project_id + time descending.
-    (
-        "idx_audit_project_time",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_project_time "
-        "ON audit_logs (project_id, created_at DESC)",
-    ),
-    # /audit also groups by actor for the abuse-detection query.
-    (
-        "idx_audit_actor",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_actor "
-        "ON audit_logs (actor, created_at DESC)",
-    ),
     # data_query_log: operator "recent queries by project" view.
     (
         "idx_data_query_log_project_time",
@@ -50,18 +50,6 @@ _INDEXES: tuple[tuple[str, str], ...] = (
         "idx_findings_project_status",
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_findings_project_status "
         "ON findings (project_id, status, severity)",
-    ),
-    # Sample lookup "latest sample for entity".
-    (
-        "idx_samples_entity_time",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_samples_entity_time "
-        "ON data_samples (project_id, data_entity_id, sampled_at DESC)",
-    ),
-    # analysis_runs dashboard sort.
-    (
-        "idx_runs_project_created",
-        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_runs_project_created "
-        "ON analysis_runs (project_id, created_at DESC)",
     ),
 )
 

@@ -43,11 +43,13 @@ def test_csrf_safe_methods_exempt():
 
 def test_csrf_exempt_prefixes_documented():
     body = _read(_APP / "security" / "csrf.py")
-    # Login + OIDC callback + webhook + OTLP must bypass.
+    # Login + OIDC callback + webhook + OTLP must bypass. The webhook
+    # router is mounted at /webhooks (not /api/v1/webhooks), so the
+    # exemption prefix must match that real path.
     for path in (
         "/api/v1/auth/login",
         "/api/v1/auth/oidc/",
-        "/api/v1/webhooks/",
+        "/webhooks/",
         "/otlp/",
     ):
         assert f'"{path}"' in body
