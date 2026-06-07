@@ -53,7 +53,10 @@ _EXEMPT_PREFIXES = (
     "/api/v1/auth/reset/",        # anonymous reset flow (token is the auth)
     "/api/v1/invites/accept",     # anonymous invite acceptance
     "/api/v1/auth/oidc/",         # OIDC redirect / callback (state-guarded)
-    "/api/v1/webhooks/",          # GitLab HMAC-signed
+    "/webhooks/",                 # GitLab HMAC-signed (router prefix is
+                                  # /webhooks, NOT /api/v1/webhooks — the
+                                  # old prefix never matched, so real
+                                  # GitLab deliveries 403'd on CSRF).
     "/otlp/",                     # OTLP receiver
     "/metrics",                   # Prometheus scrape
     "/api/v1/health",             # liveness probe

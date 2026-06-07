@@ -52,6 +52,36 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip_marker)
 
 
+@pytest.fixture(autouse=True)
+def _reset_async_singletons():
+    """Drop cached async-redis singletons so each test rebinds them to
+    its own event loop.
+
+    A handful of test modules set ``MNEMOS_LOCAL_MODE=1`` at import time;
+    because pytest imports every module at collection, the *whole*
+    session runs in local mode and ``get_redis()`` / ``sessions._redis``
+    hand out a process-global fakeredis whose internal Queue binds to the
+    loop that first touched it. pytest-asyncio hands many async tests a
+    fresh loop, so a singleton built in an earlier test then raises
+    ``<Queue ...> is bound to a different event loop``. Clearing the
+    caches before and after every test makes each one lazily rebuild its
+    client on its own loop. Cheap no-op for the unit tier (it never
+    touches redis); the objects are in-memory so no close() is needed.
+    """
+    import app.auth.sessions as _sessions
+    import app.local_mode as _local_mode
+    import app.orchestrator.redis_pool as _redis_pool
+
+    def _clear() -> None:
+        _redis_pool._client = None
+        _sessions._redis = None
+        _local_mode._fake_server = None
+
+    _clear()
+    yield
+    _clear()
+
+
 @pytest.fixture(scope="session")
 def event_loop():
     """Session-scoped loop so async fixtures can share resources."""
@@ -114,6 +144,15 @@ async def http_client(db_session):
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://testserver"
         ) as client:
+            # Simulate a browser that already holds the double-submit CSRF
+            # cookie: set the cookie + matching X-CSRF-Token header so
+            # state-changing POSTs from authed tests pass the CSRF gate
+            # (CSRFMiddleware compares cookie == header). Endpoints that
+            # are CSRF-exempt ignore the extra header. The dedicated
+            # csrf-rejection test uses its own client, not this fixture.
+            _csrf = "test-csrf-token"
+            client.cookies.set("mnemos_csrf", _csrf)
+            client.headers["x-csrf-token"] = _csrf
             yield client
     finally:
         app.dependency_overrides.pop(get_session, None)
