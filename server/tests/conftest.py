@@ -22,6 +22,15 @@ from collections.abc import AsyncIterator
 import pytest
 import pytest_asyncio
 
+# The CI DATABASE_URL (Postgres) as it was BEFORE any test module ran.
+# Several local-mode test modules (test_pr135 / test_pr138_full_value_chain
+# / test_pr138d) point ``DATABASE_URL`` at a throwaway SQLite file and
+# ``importlib.reload(app.db)`` without restoring it, so every
+# alphabetically-later integration test would otherwise inherit a leaked
+# SQLite engine. db_session restores this so the real integration tier
+# always runs against the configured (Postgres) database.
+_ORIGINAL_DATABASE_URL = os.environ.get("DATABASE_URL")
+
 # PR-97 — the test suite isn't production. config.get_settings refuses
 # to boot when SECRET_KEY is a placeholder AND MNEMOS_ENV=production.
 # Mark the test env explicitly before any app module imports.
@@ -90,6 +99,56 @@ def event_loop():
     loop.close()
 
 
+async def _ensure_configured_engine() -> None:
+    """Restore ``app.db`` to the originally-configured database.
+
+    A reloader module (test_pr135 / test_pr138*) may have rebound
+    ``app.db.engine`` to a throwaway SQLite file and left it that way.
+    If the integration tier (which needs the real Postgres) runs after
+    one of those, the leaked SQLite engine would carry over — wrong
+    backend, polluted/locked state. When the live engine no longer
+    matches the original DATABASE_URL, dispose it and reload app.db so
+    this test connects to the configured database again.
+    """
+    if not _ORIGINAL_DATABASE_URL or "sqlite" in _ORIGINAL_DATABASE_URL:
+        return
+    import app.db as _db
+
+    # The only leak in practice is a reloader binding the engine to SQLite
+    # while the configured database is Postgres. Comparing full URLs is
+    # unreliable (str(url) masks the password), so key off the backend.
+    if _db.engine.url.get_backend_name() != "sqlite":
+        return
+
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
+    from sqlalchemy.pool import NullPool
+
+    os.environ["DATABASE_URL"] = _ORIGINAL_DATABASE_URL
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        await _db.engine.dispose()
+    except Exception:  # noqa: BLE001
+        pass
+    # Rebind the module attributes in place rather than importlib.reload:
+    # reloading would create a NEW get_session object, but app.main.app's
+    # routes still reference the original, so the http_client override
+    # (keyed on the function object) would silently stop applying. get_session
+    # looks up SessionLocal from module globals at call time, so swapping
+    # these is enough and keeps its identity stable.
+    _db.engine = create_async_engine(
+        _ORIGINAL_DATABASE_URL, poolclass=NullPool, future=True
+    )
+    _db.SessionLocal = async_sessionmaker(
+        _db.engine, expire_on_commit=False, class_=AsyncSession
+    )
+
+
 @pytest_asyncio.fixture
 async def db_session() -> AsyncIterator:
     """Open a SAVEPOINT-wrapped session and roll it back on teardown.
@@ -99,6 +158,8 @@ async def db_session() -> AsyncIterator:
     wrapper keeps tests isolated.
     """
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    await _ensure_configured_engine()
 
     from app.db import SessionLocal, engine
 
