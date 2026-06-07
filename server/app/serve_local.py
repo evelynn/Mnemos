@@ -26,6 +26,10 @@ def _bootstrap_env(db_path: str) -> None:
     still override any of them (e.g. point at a different SQLite file
     or supply their own SECRET_KEY)."""
     os.environ.setdefault("MNEMOS_LOCAL_MODE", "1")
+    # PR-153 — run the pure-stdlib in-repo analyzers (ggoss-py) without
+    # Docker, so Python projects get verified deterministic extraction in
+    # the basic config instead of the inferred Claude-Code fallback.
+    os.environ.setdefault("MNEMOS_INREPO_ANALYZERS", "1")
     # Local dev/eval is not production; this also keeps the PR-97
     # placeholder-SECRET_KEY guard from firing on a generated key.
     os.environ.setdefault("MNEMOS_ENV", "local")

@@ -12,11 +12,36 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+# PR-153 — run the pure-stdlib in-repo analyzers without Docker. The basic
+# (non-Docker) configuration ships the analyzer source under ``analyzers/``;
+# ggoss-py needs only Python's ``ast`` so it runs directly from source. When
+# the binary isn't installed on PATH and ``MNEMOS_INREPO_ANALYZERS`` is set
+# (serve_local does this), invoke ``python <script> <verb> <path>`` so a
+# docker-free deployment gets *verified* deterministic Python extraction
+# instead of falling through to the inferred Claude-Code path.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_INREPO_PYTHON_ANALYZERS: dict[str, Path] = {
+    "ggoss-py": _REPO_ROOT / "analyzers" / "ggoss-py" / "src" / "ggoss_py.py",
+}
+
+
+def inrepo_script(binary: str) -> Path | None:
+    """In-repo Python entrypoint for ``binary`` when docker-free in-repo
+    analyzers are enabled and the script is present; else None."""
+    if os.environ.get("MNEMOS_INREPO_ANALYZERS") not in ("1", "true", "True"):
+        return None
+    p = _INREPO_PYTHON_ANALYZERS.get(binary)
+    return p if (p is not None and p.exists()) else None
+
 
 
 # Subset of the platform's own env that an analyzer subprocess is
@@ -89,7 +114,17 @@ class AnalyzerRunner:
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
     ) -> AsyncIterator[RunRecord]:
-        args = [self.binary, verb, str(path)]
+        # Prefer the installed binary (production / docker). Fall back to the
+        # in-repo Python source when it isn't on PATH (PR-153, docker-free).
+        if shutil.which(self.binary) is not None:
+            args = [self.binary, verb, str(path)]
+        else:
+            script = inrepo_script(self.binary)
+            args = (
+                [sys.executable, str(script), verb, str(path)]
+                if script is not None
+                else [self.binary, verb, str(path)]
+            )
         if extra_args:
             args.extend(extra_args)
 

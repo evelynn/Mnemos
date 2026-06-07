@@ -2,7 +2,7 @@
 
 import shutil
 
-from app.analyzers.runner import AnalyzerRunner
+from app.analyzers.runner import AnalyzerRunner, inrepo_script
 
 # The binary may be shadowed by a docker-run wrapper in production; the
 # platform only talks to it via the CLI contract in docs/analyzer-contract.md.
@@ -38,4 +38,8 @@ def analyzer_available(language: str) -> bool:
     case, PR-144). Callers fall back to Claude-Code agent extraction so the
     graph is never left empty just because a binary is missing."""
     binary = binary_for(language)
-    return binary is not None and shutil.which(binary) is not None
+    if binary is None:
+        return False
+    # Available if installed on PATH (docker/prod) or runnable from the
+    # in-repo source (docker-free basic config, PR-153).
+    return shutil.which(binary) is not None or inrepo_script(binary) is not None
