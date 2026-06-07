@@ -93,7 +93,9 @@ def test_config_from_env_defaults_and_overrides(monkeypatch):
     ):
         monkeypatch.delenv(k, raising=False)
     cfg = STTConfig.from_env()
-    assert cfg.engine == "faster-whisper"
+    # PR-156 — default engine is now Moonshine (lightest + best Korean);
+    # faster-whisper remains a selectable multilingual alternative.
+    assert cfg.engine == "moonshine"
     assert cfg.model == DEFAULT_MODEL
     assert cfg.device == "cpu"
     assert cfg.compute_type == "int8"

@@ -1588,6 +1588,12 @@
       "마이크 접근이 차단되었습니다. 음성 입력을 사용하려면 브라우저에서 허용하세요.",
     "Voice recognition isn't enabled on this server.":
       "이 서버에서는 음성 인식이 활성화되어 있지 않습니다.",
+    // Voice output / TTS (PR-156)
+    "Listen": "듣기",
+    "Read the answer aloud": "답변을 음성으로 읽기",
+    "Speech failed": "음성 출력 실패",
+    "Voice output isn't enabled on this server.":
+      "이 서버에서는 음성 출력이 활성화되어 있지 않습니다.",
     "Live analysis stream disconnected after 6 retries. Click the Monitor button to start a fresh stream, or reload the page to start over.":
       "분석 스트림 연결이 6회 재시도 후 끊어졌습니다. Monitor 버튼을 다시 누르거나 페이지를 새로고침하세요.",
     // Onboarding card
@@ -2220,6 +2226,66 @@
     return btn;
   }
 
+  // ─── Voice status + output (PR-155 / PR-156) ─────────────────────
+  //
+  // ``MnemosUI.voiceStatus()`` caches one probe of /api/v1/voice/status so
+  // both the mic (STT) and listen (TTS) buttons can decide whether to show
+  // without each re-hitting the endpoint. Shape:
+  //   { available, engine, model,           // STT, flat (back-compat)
+  //     stt: {available, engine, model, language},
+  //     tts: {available, engine, voice, lang_code} }
+  var _voiceStatusPromise = null;
+  function voiceStatus() {
+    if (!_voiceStatusPromise) {
+      _voiceStatusPromise = fetch("/api/v1/voice/status",
+        { headers: { "accept": "application/json" } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .catch(function () { return null; });
+    }
+    return _voiceStatusPromise;
+  }
+
+  // ``MnemosUI.speak(text, opts)`` reads text aloud via the local TTS
+  // engine (Kokoro). Synthesis runs on the server; the returned audio/wav
+  // Blob is played through an <audio> element (a blob: URL — allowed by the
+  // CSP ``media-src 'self' blob:``). Returns a promise resolving to whether
+  // playback started.
+  var _ttsAudio = null;
+  function speak(text, opts) {
+    opts = opts || {};
+    text = (text || "").trim();
+    if (!text) return Promise.resolve(false);
+    var body = { text: text };
+    if (opts.voice) body.voice = opts.voice;
+    return fetch("/api/v1/voice/speak", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (r) {
+      if (!r.ok) {
+        if (r.status === 503) {
+          showToast(t("Voice output isn't enabled on this server."), "error");
+        } else {
+          showError("Speech failed", r);
+        }
+        return false;
+      }
+      return r.blob().then(function (blob) {
+        try {
+          if (_ttsAudio) { try { _ttsAudio.pause(); } catch (_) {} }
+          var url = URL.createObjectURL(blob);
+          _ttsAudio = new Audio(url);
+          _ttsAudio.addEventListener("ended", function () {
+            URL.revokeObjectURL(url);
+          });
+          var p = _ttsAudio.play();
+          if (p && p.catch) p.catch(function () {});
+        } catch (_) { return false; }
+        return true;
+      });
+    });
+  }
+
   // ─── Voice command input (PR-155) ────────────────────────────────
   //
   // ``MnemosUI.mountVoiceInput({ button, target, projectInput })`` turns
@@ -2262,17 +2328,15 @@
       && typeof window.MediaRecorder !== "undefined");
     if (!supported) { hide(); return; }
 
-    // Confirm the server actually has an engine before offering the mic.
-    fetch("/api/v1/voice/status", { headers: { "accept": "application/json" } })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (s) {
-        if (!s || !s.available) { hide(); return; }
-        btn.hidden = false;
-        btn.removeAttribute("aria-hidden");
-        btn.title = t("Speak your question (local recognition: $1)",
-          { m: s.model || s.engine });
-      })
-      .catch(function () { hide(); });
+    // Confirm the server actually has an STT engine before offering the mic.
+    voiceStatus().then(function (s) {
+      var stt = s && (s.stt || s);
+      if (!stt || !stt.available) { hide(); return; }
+      btn.hidden = false;
+      btn.removeAttribute("aria-hidden");
+      btn.title = t("Speak your question (local recognition: $1)",
+        { m: stt.model || stt.engine });
+    });
 
     var rec = null, chunks = [], recording = false, stream = null;
 
@@ -2413,6 +2477,8 @@
     renderMermaid: renderMermaid,
     mountProjectPicker: mountProjectPicker,
     mountVoiceInput: mountVoiceInput,
+    voiceStatus: voiceStatus,
+    speak: speak,
     currentProjectFromUrl: currentProjectFromUrl,
     notify: notify,
     readNotifications: readNotifications,

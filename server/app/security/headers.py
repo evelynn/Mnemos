@@ -42,6 +42,9 @@ _DEFAULT_CSP = (
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: https:; "
     "font-src 'self' data:; "
+    # media-src blob: lets the Ask tab play synthesized TTS audio (PR-156),
+    # which arrives as a Blob and is played via a blob: URL.
+    "media-src 'self' blob:; "
     "connect-src 'self'; "
     "frame-ancestors 'none'; "
     "base-uri 'self'; "

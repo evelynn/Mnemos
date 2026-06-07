@@ -26,8 +26,9 @@ from __future__ import annotations
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel, Field
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
@@ -39,6 +40,13 @@ from app.voice.engine import (
     is_stt_available,
     max_upload_bytes,
 )
+from app.voice.tts import (
+    TTSConfig,
+    TTSUnavailable,
+    get_tts_engine,
+    is_tts_available,
+    max_tts_chars,
+)
 
 log = logging.getLogger(__name__)
 
@@ -47,15 +55,31 @@ router = APIRouter(prefix="/api/v1/voice", tags=["voice"])
 
 @router.get("/status")
 async def status(user: CurrentUser) -> dict:
-    """Report whether voice transcription is available and which engine /
-    model is configured. The Ask tab uses this to show or hide the mic
-    button instead of letting the operator click into a 503."""
-    cfg = STTConfig.from_env()
+    """Report whether voice input (STT) and output (TTS) are available and
+    which engine/model/voice is configured. The Ask tab uses this to show
+    or hide the mic + listen buttons instead of clicking into a 503.
+
+    The flat ``available``/``engine``/``model`` keys describe STT and are
+    kept for backward compatibility; ``stt``/``tts`` carry the full pair."""
+    stt = STTConfig.from_env()
+    tts = TTSConfig.from_env()
     return {
         "available": is_stt_available(),
-        "engine": cfg.engine,
-        "model": cfg.model,
-        "language": cfg.language,
+        "engine": stt.engine,
+        "model": stt.model,
+        "language": stt.language,
+        "stt": {
+            "available": is_stt_available(),
+            "engine": stt.engine,
+            "model": stt.model,
+            "language": stt.language,
+        },
+        "tts": {
+            "available": is_tts_available(),
+            "engine": tts.engine,
+            "voice": tts.voice,
+            "lang_code": tts.lang_code,
+        },
     }
 
 
@@ -132,3 +156,60 @@ async def transcribe(
         "engine": result.engine,
         "model": result.model,
     }
+
+
+class SpeakRequest(BaseModel):
+    # Hard upper bound stops an abusive payload at the schema; the engine
+    # then truncates to max_tts_chars() (default 2000) for what it reads.
+    text: str = Field(min_length=1, max_length=8000)
+    voice: str | None = Field(default=None, max_length=64)
+
+
+@router.post("/speak")
+async def speak(user: CurrentUser, body: SpeakRequest) -> Response:
+    """Synthesise speech for ``text`` and return audio/wav. Any signed-in
+    user may have an answer read aloud — it's a read-only transform of text
+    they can already see, so no operator gate. 503 when no TTS engine is
+    installed; the listen button hides accordingly."""
+    if not is_tts_available():
+        raise HTTPException(status_code=503, detail="tts_unavailable")
+
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="empty_text")
+    cap = max_tts_chars()
+    truncated = len(text) > cap
+    if truncated:
+        text = text[:cap]
+
+    voice = (body.voice or "").strip() or None
+    try:
+        engine = get_tts_engine()
+        result = await run_in_threadpool(engine.synthesize, text, voice=voice)
+    except TTSUnavailable:
+        raise HTTPException(status_code=503, detail="tts_unavailable")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("voice.speak failed: %s: %s", exc.__class__.__name__, exc)
+        raise HTTPException(status_code=422, detail="synthesis_failed")
+
+    await audit_record(
+        actor=f"user:{user.id}",
+        action="voice.speak",
+        target=text[:120],
+        details={
+            "engine": result.engine,
+            "voice": result.voice,
+            "chars": len(text),
+            "truncated": truncated,
+            "bytes": len(result.audio_wav),
+        },
+    )
+    return Response(
+        content=result.audio_wav,
+        media_type="audio/wav",
+        headers={
+            "X-TTS-Engine": result.engine,
+            "X-TTS-Voice": result.voice,
+            "Cache-Control": "no-store",
+        },
+    )

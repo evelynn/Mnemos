@@ -28,12 +28,28 @@ from app.voice.engine import (
     is_stt_available,
     max_upload_bytes,
 )
+from app.voice.tts import (
+    SynthesisResult,
+    TTSConfig,
+    TTSUnavailable,
+    get_tts_engine,
+    is_tts_available,
+    max_tts_chars,
+)
 
 __all__ = [
+    # STT (speech -> text, PR-155)
     "STTConfig",
     "STTUnavailable",
     "TranscriptionResult",
     "get_engine",
     "is_stt_available",
     "max_upload_bytes",
+    # TTS (text -> speech, PR-156)
+    "SynthesisResult",
+    "TTSConfig",
+    "TTSUnavailable",
+    "get_tts_engine",
+    "is_tts_available",
+    "max_tts_chars",
 ]

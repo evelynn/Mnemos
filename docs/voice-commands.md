@@ -1,107 +1,130 @@
-# Voice commands (Ask tab)
+# Voice on the Ask tab — speak questions, hear answers
 
-Speak a question/command instead of typing it. On the **Ask** tab a mic
-button records a short clip in the browser; the platform converts speech to
-text with a **local** model and drops the recognised text into the question
-box for the operator to review before asking.
+A full voice loop on the **Ask** tab:
 
-> **Why server-side / local, not the browser's `SpeechRecognition`?**
-> The browser API streams microphone audio to a cloud vendor (Google, in
-> Chrome). Mnemos analyses customers' private production systems, so that is
-> unacceptable. Recognition runs on *your* deployment — no audio leaves the
-> box. This also keeps the feature usable on an air-gapped host.
+1. **Speak the question** — a mic button records a short clip; the platform
+   transcribes it (STT) into the question box for review.
+2. **Hear the answer** — a 🔊 listen button reads the answer aloud (TTS).
 
-## Engine choice — the research
+Everything runs **locally** on your deployment — no audio or text leaves
+the box (unlike the browser's `SpeechRecognition`, which streams to a cloud
+vendor). All engines are free, open-source, optional dependencies; absent,
+the buttons simply hide and the endpoints return `503`.
 
-The brief was: the lightest, latest, free open-source engine with a good
-recognition rate, run locally. The **binding constraint** is that Mnemos's
-operators are Korean (the UI ships an EN/한국어 switcher), so a spoken
-command is as likely to be Korean as English. The 2026 landscape:
+---
 
-| Engine | Size / weight | Korean | Verdict |
-|--------|---------------|--------|---------|
-| **Moonshine** | smallest (27–60 MB, ONNX) | ✗ no released non-English ONNX | English-only — out |
-| **Vosk** | tiny, Kaldi, CPU | △ small KO model, weaker accuracy | great for embedded English, trails on free-form KO |
-| **SenseVoice** | medium | ✓ excellent CJK | pulls in the heavy FunASR stack — too much for an optional extra |
-| **NVIDIA Parakeet** | large, GPU-leaning | ✗ English-first | not a light CPU fit |
-| **faster-whisper** | `tiny` ≈ 75 MB, `base` ≈ 145 MB, CPU INT8 | ✓ strong KO + EN (99 langs) | **chosen** |
+## Speech-to-text (voice input)
 
-**[faster-whisper](https://github.com/SYSTRAN/faster-whisper)** (Whisper
-re-implemented on CTranslate2) wins the balance the brief asks for:
+### Engine choice — the research
 
-- multilingual incl. strong **Korean and English** in one model;
-- light + fast on CPU — INT8 quantization, ~2× faster and lower memory than
-  `openai-whisper` for the same accuracy;
-- small models, downloadable once then **fully offline**;
-- trivially installable, actively maintained in 2026.
+The brief: the lightest, latest, free open-source engine with good
+recognition, run locally. The **binding constraint** is that the operators
+are Korean, so a command is as likely to be Korean as English.
 
-The engine is **pluggable** (`MNEMOS_STT_ENGINE`) so a future deployment can
-swap in Vosk/Moonshine for an ultra-light English-only host without touching
-the API or the UI.
+| Engine | Weight | Korean | Verdict |
+|--------|--------|--------|---------|
+| **Moonshine tiny-ko** | ~26M params, ONNX, no torch | ✓ purpose-trained, beats Whisper-tiny | **default** |
+| faster-whisper | tiny ~75MB / base ~145MB, CPU INT8 | ✓ multilingual (KO+EN, one model) | alternative |
+| Vosk | tiny | △ weaker KO | not used |
+| Moonshine (English) | smallest (27MB) | ✗ | not used |
+
+**Default: [Moonshine](https://github.com/moonshine-ai/moonshine) "Flavors
+of Moonshine"** (`moonshine-voice`, MIT). The Korean `tiny-ko` flavor is
+~26M params with ~6.46% WER, runs on ONNX/ORT (**no PyTorch**), is
+purpose-trained for Korean, and **outperforms Whisper-tiny** — the lightest
+strong-Korean option, which is exactly the brief. Each "flavor" is one
+language, so the flavor is chosen at config time (`MNEMOS_STT_LANGUAGE`,
+default `ko`) and the per-request hint is ignored.
+
+**Alternative: [faster-whisper](https://github.com/SYSTRAN/faster-whisper)**
+(CTranslate2 Whisper). Heavier, but **multilingual + auto-detecting** — use
+it when commands mix Korean and English in one utterance:
+`MNEMOS_STT_ENGINE=faster-whisper` + the `[voice-whisper]` extra.
+
+> Browser audio (webm/opus) is decoded to the 16 kHz mono PCM Moonshine
+> wants via **PyAV** (ffmpeg), pulled in by the `[voice]` extra.
 
 Sources:
-[Gladia — best open-source STT 2026](https://www.gladia.io/blog/best-open-source-speech-to-text-models),
-[Northflank STT benchmarks 2026](https://northflank.com/blog/best-open-source-speech-to-text-stt-model-in-2026-benchmarks),
-[faster-whisper](https://github.com/SYSTRAN/faster-whisper),
-[Moonshine](https://github.com/moonshine-ai/moonshine).
+[Moonshine](https://github.com/moonshine-ai/moonshine) ·
+[moonshine-tiny-ko](https://huggingface.co/UsefulSensors/moonshine-tiny-ko) ·
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) ·
+[Northflank STT 2026](https://northflank.com/blog/best-open-source-speech-to-text-stt-model-in-2026-benchmarks).
 
-## Install
-
-Voice is an **optional extra** — a base install stays slim and the platform
-boots fine without it (the mic simply hides):
+### Install
 
 ```bash
-pip install 'mnemos-platform[voice]'
+pip install 'mnemos-platform[voice]'              # Moonshine tiny-ko (default)
+pip install 'mnemos-platform[voice-whisper]'      # + multilingual faster-whisper
 ```
 
-The first transcription downloads the model (default `base` ≈ 145 MB) from
-Hugging Face and caches it. **Air-gapped hosts**: pre-bake the model into the
-image, or set `HF_HOME` to a pre-populated cache, so the first request
-doesn't reach for the network. If the model can't load, the endpoint returns
-`503` and the mic hides — exactly the "not installed" experience.
+The first transcription downloads the model (Moonshine: from
+`download.moonshine.ai`; faster-whisper: from Hugging Face) and caches it.
+**Air-gapped hosts**: pre-bake the model into the image / a pre-populated
+cache. If it can't load, the endpoint returns `503` and the mic hides.
 
-## Configuration
-
-All optional, with sensible defaults (see `.env.example`):
+### Configuration
 
 | Env | Default | Notes |
 |-----|---------|-------|
-| `MNEMOS_DISABLE_STT` | _(off)_ | `1` = hard-off even if installed (air-gapped opt-out) |
-| `MNEMOS_STT_ENGINE` | `faster-whisper` | backend selector |
-| `MNEMOS_STT_MODEL` | `base` | `tiny` (lightest) → `small`/`medium`/`large-v3` (better KO) |
-| `MNEMOS_STT_DEVICE` | `cpu` | or `cuda` |
-| `MNEMOS_STT_COMPUTE` | `int8` | lightest; `int8_float16` / `float16` for GPU |
-| `MNEMOS_STT_LANGUAGE` | _(auto)_ | force `ko`/`en`; empty = auto-detect |
-| `MNEMOS_STT_BEAM_SIZE` | `5` | best recognition; `1` = fastest |
-| `MNEMOS_STT_MAX_UPLOAD_BYTES` | `26214400` (25 MB) | reject larger clips |
+| `MNEMOS_DISABLE_STT` | _(off)_ | `1` = hard-off (air-gapped opt-out) |
+| `MNEMOS_STT_ENGINE` | `moonshine` | or `faster-whisper` |
+| `MNEMOS_STT_MODEL` | `tiny` | Moonshine arch / Whisper size (`tiny`/`base`/`small`…) |
+| `MNEMOS_STT_LANGUAGE` | `ko` (Moonshine) | Moonshine flavor; faster-whisper: force lang, empty=auto |
+| `MNEMOS_STT_DEVICE` / `_COMPUTE` / `_BEAM_SIZE` | `cpu` / `int8` / `5` | faster-whisper knobs |
+| `MNEMOS_STT_MAX_UPLOAD_BYTES` | 25 MB | reject larger clips |
 
-The UI sends the operator's chosen locale (EN/한국어) as a recognition
-hint, so a Korean operator's command is recognised as Korean, not guessed.
+---
+
+## Text-to-speech (voice output)
+
+**Engine: [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M)**
+(`kokoro`, **Apache-2.0**) — 82M params, multilingual incl. **Korean**,
+punches above its weight on TTS leaderboards while staying light.
+
+A Kokoro voice id encodes its language in the first letter (`a`=US English,
+`k`=Korean, `j`=Japanese, `z`=Chinese …); the lang is derived from the
+chosen voice. The default `af_heart` is English and works out of the box;
+Korean narration is an opt-in (`MNEMOS_TTS_VOICE=kf_*` + the `misaki[ko]`
+G2P). Kokoro uses PyTorch; an operator avoiding torch can wire the ONNX
+build ([kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx)) via
+`MNEMOS_TTS_ENGINE` — the API and UI don't change.
+
+```bash
+pip install 'mnemos-platform[tts]'   # also needs the espeak-ng system package
+```
+
+| Env | Default | Notes |
+|-----|---------|-------|
+| `MNEMOS_DISABLE_TTS` | _(off)_ | `1` = hard-off |
+| `MNEMOS_TTS_ENGINE` | `kokoro` | backend selector |
+| `MNEMOS_TTS_VOICE` | `af_heart` | a `kf_*` voice ⇒ Korean |
+| `MNEMOS_TTS_LANG` | _(from voice)_ | override the derived lang_code |
+| `MNEMOS_TTS_SPEED` | `1.0` | clamped 0.5–2.0 |
+| `MNEMOS_TTS_MAX_CHARS` | `2000` | longer text is truncated |
+
+---
 
 ## How it works
 
 ```
-Ask tab mic ──getUserMedia/MediaRecorder──▶ webm/opus clip
-   │  POST /api/v1/voice/transcribe (multipart, CSRF-protected)
-   ▼
-faster-whisper (local, CPU INT8, lazy-loaded + cached)
-   │  text
-   ▼
-question box (operator reviews, then "Ask")
+mic ─getUserMedia/MediaRecorder─▶ webm/opus ─POST /voice/transcribe─▶ STT (local) ─▶ question box
+                                                                          │ answer
+listen 🔊 ◀─ <audio> blob ◀─ audio/wav ◀─ POST /voice/speak ◀─ TTS (local) ◀──┘
 ```
 
-- **API:** `GET /api/v1/voice/status` (is it available + which engine/model)
-  and `POST /api/v1/voice/transcribe` (multipart `audio`, optional
-  `language` + `project_id`).
-- **Auth:** operator role — voice is a command surface, same bar as
-  `POST /ask`. A viewer sees the mic disabled.
-- **Audited:** every transcription is logged as `voice.transcribe` with the
-  recognised text (truncated) + engine/model/duration.
-- **Permissions-Policy:** `microphone=(self)` lets the dashboard capture on
-  its own origin; camera/geolocation/etc stay denied.
+- **API:** `GET /voice/status` (STT + TTS availability), `POST
+  /voice/transcribe` (multipart `audio`), `POST /voice/speak` (`{text,
+  voice?}` → audio/wav).
+- **Auth:** transcribe needs the **operator** role (it's a command surface,
+  same bar as `POST /ask`); speak needs only a signed-in user (it just reads
+  text aloud).
+- **Audited:** `voice.transcribe` / `voice.speak`, each with engine + model
+  + truncated text.
+- **Permissions-Policy:** `microphone=(self)` for capture; CSP `media-src
+  'self' blob:` so the synthesized audio can play. Camera/geolocation/etc
+  stay denied.
 
 ## Recognition isn't perfect
 
 The recognised text lands in the box for the operator to **review and edit**
 before asking — by design. A misheard command never auto-fires a query.
-Speak a second time to append rather than overwrite.

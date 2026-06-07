@@ -1,46 +1,38 @@
-"""PR-155 — pluggable local speech-to-text (STT) engine.
+"""PR-155/156 — pluggable local speech-to-text (STT) engine.
 
-Why faster-whisper is the default
-─────────────────────────────────
-The brief: research the lightest, latest, free open-source engine with a
-good recognition rate, run it *locally*. The binding constraint for this
-platform is that its operators are Korean (the whole UI ships an EN/한국어
-switcher), so a spoken command is as likely to be Korean as English. That
-rules out the very-lightest engines that are English-first:
+Two backends, both local + offline + free + open-source, selected via
+``MNEMOS_STT_ENGINE``:
 
-* **Moonshine** (27-60 MB, ONNX) — the smallest, but its non-English
-  models have no released ONNX exports yet; Korean isn't covered.
-* **Vosk** — mature and tiny, but its small Korean model trails Whisper
-  on accuracy for free-form commands.
-* **SenseVoice** — excellent CJK accuracy, but pulls in the heavy FunASR
-  stack — too much for an optional extra.
+1. **moonshine** *(default)* — Moonshine "Flavors of Moonshine" tiny models
+   (``moonshine-voice``, MIT). Purpose-built for the edge: the Korean tiny
+   model is ~26M params with ~6.46% WER and **outperforms Whisper-tiny**,
+   runs on ONNX/ORT (no torch), and is the *lightest* option with strong
+   Korean — which is the binding constraint here (the operators are Korean).
+   The catch: each "flavor" is one language, so the engine's language is
+   fixed at config time (default ``ko`` → the ``tiny-ko`` model). Pick the
+   language with ``MNEMOS_STT_LANGUAGE`` (``ko``/``en``/``ja``/``zh``/…).
 
-**faster-whisper** (Whisper re-implemented on CTranslate2) wins the
-balance the brief asks for:
+2. **faster-whisper** — Whisper on CTranslate2 (multilingual, CPU INT8).
+   Heavier than Moonshine but handles mixed Korean+English in one model and
+   auto-detects language. Use it when commands aren't single-language:
+   ``MNEMOS_STT_ENGINE=faster-whisper`` (install the ``voice-whisper`` extra).
 
-* multilingual incl. strong Korean *and* English (99 languages, one model);
-* light + fast on CPU — INT8 quantization, ~2× faster and lower memory
-  than ``openai-whisper`` for the same accuracy;
-* small models — ``tiny`` ≈ 75 MB, ``base`` ≈ 145 MB — downloadable once
-  and then fully offline (bake them into the image for an air-gapped host);
-* trivially installable (``pip install faster-whisper``) and actively
-  maintained in 2026.
-
-The engine is intentionally pluggable (``MNEMOS_STT_ENGINE``) so a future
-PR can add Vosk/Moonshine for ultra-light English-only deployments without
-touching the API or the UI.
+Both are *optional* dependencies (slim base, air-gappable). When the chosen
+engine isn't installed the transcribe endpoint returns ``503`` and the Ask
+tab hides the mic — the same graceful-degradation pattern as the Claude
+Agent SDK (``is_agent_sdk_available`` → 503).
 
 Tuning (all optional env, sensible defaults):
-* ``MNEMOS_STT_MODEL``   — ``tiny``|``base``|``small``|… (default ``base``;
-  drop to ``tiny`` for the absolute lightest, raise to ``small`` for better
-  Korean at ~2× the footprint).
-* ``MNEMOS_STT_DEVICE``  — ``cpu`` (default) | ``cuda``.
-* ``MNEMOS_STT_COMPUTE`` — ``int8`` (default, lightest) | ``int8_float16`` | ``float16``.
-* ``MNEMOS_STT_LANGUAGE``— force a language (``ko``/``en``); empty = auto-detect.
-* ``MNEMOS_STT_BEAM_SIZE``— decoding beam (default 5 = Whisper's own default,
-  best recognition; set 1 for greedy/fastest).
-* ``MNEMOS_DISABLE_STT=1``— hard off, even if the package is installed
-  (air-gapped opt-out, mirrors ``MNEMOS_DISABLE_AGENT_SDK``).
+* ``MNEMOS_STT_ENGINE``  — ``moonshine`` (default) | ``faster-whisper``.
+* ``MNEMOS_STT_MODEL``   — ``tiny`` (default) | ``base`` | (whisper also
+  ``small``/…). For Moonshine this maps to the model arch; for whisper to
+  the model size. ``tiny`` is the lightest.
+* ``MNEMOS_STT_LANGUAGE``— Moonshine: selects the flavor (default ``ko``).
+  faster-whisper: force a language, empty = auto-detect.
+* ``MNEMOS_STT_DEVICE``  — ``cpu`` (default) | ``cuda`` (faster-whisper).
+* ``MNEMOS_STT_COMPUTE`` — ``int8`` (default) | … (faster-whisper).
+* ``MNEMOS_STT_BEAM_SIZE``— faster-whisper decoding beam (default 5).
+* ``MNEMOS_DISABLE_STT=1``— hard off even if installed (air-gapped opt-out).
 """
 
 from __future__ import annotations
@@ -53,15 +45,20 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    pass
+    import numpy as np
 
 log = logging.getLogger(__name__)
 
-DEFAULT_ENGINE = "faster-whisper"
-DEFAULT_MODEL = "base"
+DEFAULT_ENGINE = "moonshine"
+DEFAULT_MODEL = "tiny"
 DEFAULT_DEVICE = "cpu"
 DEFAULT_COMPUTE = "int8"
 DEFAULT_BEAM_SIZE = 5
+# Moonshine flavors are per-language; default to Korean since the operators
+# are Korean (and the user asked for the tiny-ko model specifically).
+DEFAULT_MOONSHINE_LANGUAGE = "ko"
+# Moonshine consumes 16 kHz mono float PCM.
+MOONSHINE_SAMPLE_RATE = 16000
 
 # Hard cap on accepted upload size. A spoken command is a few seconds of
 # Opus — well under a megabyte — so 25 MB is generous head-room while
@@ -69,21 +66,19 @@ DEFAULT_BEAM_SIZE = 5
 # ``MNEMOS_STT_MAX_UPLOAD_BYTES``.
 DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
-# Engine aliases that map to the faster-whisper backend.
 _FASTER_WHISPER_ALIASES = frozenset({"faster-whisper", "faster_whisper", "whisper"})
+_MOONSHINE_ALIASES = frozenset({"moonshine", "moonshine-voice", "moonshine_voice"})
 
 
 class STTUnavailable(RuntimeError):
-    """No engine can run (opted out, package missing, or unknown engine).
-
-    Callers gate on :func:`is_stt_available` and translate this into a
-    ``503 stt_unavailable`` rather than a 500.
-    """
+    """No engine can run (opted out, package missing, model can't load, or
+    unknown engine). Callers gate on :func:`is_stt_available` and translate
+    this into a ``503 stt_unavailable`` rather than a 500."""
 
 
 @dataclass(frozen=True)
 class STTConfig:
-    """Resolved engine configuration. Built from env so the always-loaded
+    """Resolved engine configuration, built from env so the always-loaded
     ``app.config.Settings`` stays free of optional-feature knobs (same
     convention as ``security/headers.py`` and ``extractor/agent_sdk.py``)."""
 
@@ -91,7 +86,7 @@ class STTConfig:
     model: str = DEFAULT_MODEL
     device: str = DEFAULT_DEVICE
     compute_type: str = DEFAULT_COMPUTE
-    language: str | None = None  # None = auto-detect
+    language: str | None = None  # None = auto (whisper) / default flavor (moonshine)
     beam_size: int = DEFAULT_BEAM_SIZE
 
     @classmethod
@@ -139,17 +134,27 @@ def max_upload_bytes() -> int:
     return v if v > 0 else DEFAULT_MAX_UPLOAD_BYTES
 
 
-def _faster_whisper_importable() -> bool:
-    """True iff faster-whisper can actually be imported. Catches more than
-    ImportError on purpose — a broken CTranslate2/cuDNN shared library
-    surfaces as ``OSError``/``RuntimeError`` at import, which must read as
-    "unavailable", not crash availability probing."""
+def _importable(module: str) -> bool:
+    """True iff ``module`` imports. Catches more than ImportError on purpose
+    — a broken C-extension / shared library surfaces as ``OSError`` /
+    ``RuntimeError`` at import, which must read as "unavailable", not crash
+    availability probing."""
     try:
-        import faster_whisper  # noqa: F401
+        __import__(module)
         return True
     except Exception as exc:  # noqa: BLE001
-        log.debug("faster-whisper not importable: %s: %s", exc.__class__.__name__, exc)
+        log.debug("%s not importable: %s: %s", module, exc.__class__.__name__, exc)
         return False
+
+
+def _faster_whisper_importable() -> bool:
+    return _importable("faster_whisper")
+
+
+def _moonshine_importable() -> bool:
+    # Moonshine needs its own package *and* PyAV to decode the browser's
+    # webm/opus clip down to the 16 kHz mono PCM it expects.
+    return _importable("moonshine_voice") and _importable("av")
 
 
 def is_stt_available() -> bool:
@@ -159,17 +164,58 @@ def is_stt_available() -> bool:
     if os.environ.get("MNEMOS_DISABLE_STT") == "1":
         return False
     cfg = STTConfig.from_env()
+    if cfg.engine in _MOONSHINE_ALIASES:
+        return _moonshine_importable()
     if cfg.engine in _FASTER_WHISPER_ALIASES:
         return _faster_whisper_importable()
     return False
 
 
+def _decode_pcm_16k_mono(raw: bytes) -> "np.ndarray":
+    """Decode an arbitrary browser audio blob (webm/opus, mp4, ogg…) to a
+    16 kHz mono float32 signal via PyAV (ffmpeg). A missing PyAV is a
+    readiness problem (STTUnavailable → 503); an undecodable blob is the
+    operator's input (ValueError → 422)."""
+    import numpy as np
+
+    try:
+        import av
+    except ImportError as exc:  # pragma: no cover - guarded by availability gate
+        raise STTUnavailable("pyav_not_installed") from exc
+
+    try:
+        # mode="r" selects the InputContainer overload (it has .decode()).
+        container = av.open(io.BytesIO(raw), mode="r")
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"undecodable_audio:{exc.__class__.__name__}") from exc
+
+    resampler = av.audio.resampler.AudioResampler(
+        format="flt", layout="mono", rate=MOONSHINE_SAMPLE_RATE
+    )
+    chunks: list[np.ndarray] = []
+    try:
+        for frame in container.decode(audio=0):
+            for rframe in resampler.resample(frame):
+                chunks.append(rframe.to_ndarray().reshape(-1))
+        # Flush any samples buffered in the resampler.
+        for rframe in resampler.resample(None):
+            chunks.append(rframe.to_ndarray().reshape(-1))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"decode_failed:{exc.__class__.__name__}") from exc
+    finally:
+        container.close()
+
+    if not chunks:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(chunks).astype(np.float32)
+
+
 class FasterWhisperEngine:
-    """faster-whisper (CTranslate2) backend.
+    """faster-whisper (CTranslate2) backend — multilingual, auto-detecting.
 
     The model is *lazy-loaded* on first transcribe and cached for the
-    process lifetime — loading weights is the expensive step, so the
-    first request after boot pays it once and every later request is warm.
+    process lifetime — loading weights is the expensive step, so the first
+    request after boot pays it once and every later request is warm.
     """
 
     name = "faster-whisper"
@@ -230,6 +276,66 @@ class FasterWhisperEngine:
         )
 
 
+class MoonshineEngine:
+    """Moonshine "Flavors of Moonshine" backend via ``moonshine-voice``.
+
+    A flavor is one language, so the model is chosen from
+    ``cfg.language`` (default ``ko`` → ``tiny-ko``) and the per-request
+    language hint is ignored. The Transcriber is lazy-loaded + cached."""
+
+    name = "moonshine"
+
+    def __init__(self, cfg: STTConfig) -> None:
+        self._cfg = cfg
+        self._lang = (cfg.language or DEFAULT_MOONSHINE_LANGUAGE).lower()
+        self._tr = None  # loaded on first use
+
+    def _ensure_model(self):
+        if self._tr is None:
+            from moonshine_voice import (
+                Transcriber,
+                get_model_for_language,
+                string_to_model_arch,
+            )
+
+            try:
+                arch = string_to_model_arch(self._cfg.model)
+            except Exception:  # noqa: BLE001 - unknown size string → let the lib default
+                arch = None
+            log.info("loading Moonshine flavor lang=%s arch=%s", self._lang, self._cfg.model)
+            # Resolves + downloads (from download.moonshine.ai) the flavor.
+            model_path, model_arch = get_model_for_language(self._lang, arch)
+            self._tr = Transcriber(model_path, model_arch)
+        return self._tr
+
+    def transcribe(self, audio: bytes, *, language: str | None = None) -> TranscriptionResult:
+        try:
+            tr = self._ensure_model()
+        except STTUnavailable:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "Moonshine model load failed (lang=%s): %s: %s",
+                self._lang, exc.__class__.__name__, exc,
+            )
+            raise STTUnavailable(f"model_load_failed:{exc.__class__.__name__}") from exc
+
+        samples = _decode_pcm_16k_mono(audio)  # raises ValueError on bad input -> 422
+        transcript = tr.transcribe_without_streaming(
+            samples.tolist(), sample_rate=MOONSHINE_SAMPLE_RATE
+        )
+        text = " ".join(
+            (line.text or "").strip() for line in transcript.lines
+        ).strip()
+        return TranscriptionResult(
+            text=text,
+            language=self._lang,
+            duration_s=round(len(samples) / MOONSHINE_SAMPLE_RATE, 2),
+            engine=self.name,
+            model=f"{self._cfg.model}-{self._lang}",
+        )
+
+
 @lru_cache(maxsize=1)
 def get_engine() -> STTEngine:
     """Return the configured STT engine (cached so the loaded model stays
@@ -239,6 +345,12 @@ def get_engine() -> STTEngine:
     if os.environ.get("MNEMOS_DISABLE_STT") == "1":
         raise STTUnavailable("stt_disabled")
     cfg = STTConfig.from_env()
+    if cfg.engine in _MOONSHINE_ALIASES:
+        if not _importable("moonshine_voice"):
+            raise STTUnavailable("moonshine_not_installed")
+        if not _importable("av"):
+            raise STTUnavailable("pyav_not_installed")
+        return MoonshineEngine(cfg)
     if cfg.engine in _FASTER_WHISPER_ALIASES:
         if not _faster_whisper_importable():
             raise STTUnavailable("faster_whisper_not_installed")

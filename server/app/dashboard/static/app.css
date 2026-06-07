@@ -1152,6 +1152,16 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
   50%      { box-shadow: 0 0 0 6px transparent; }
 }
 @media (prefers-reduced-motion: reduce) { .mic-btn.recording { animation: none; } }
+/* Listen / read-aloud button on the answer card (PR-156). */
+.listen-btn {
+  margin-left: 0.5rem; font-size: 0.8rem; font-weight: 600; vertical-align: middle;
+  display: inline-flex; align-items: center; gap: 0.25rem;
+  padding: 0.15rem 0.55rem; cursor: pointer;
+  color: var(--accent); background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-pill);
+}
+.listen-btn:hover { background: var(--accent-soft); border-color: var(--accent); }
+.listen-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ask-advanced { font-size: 0.9rem; }
 .ask-advanced label { display: block; margin-top: 0.4rem; }
 .ask-inline { display: flex; align-items: center; gap: 0.5rem; }

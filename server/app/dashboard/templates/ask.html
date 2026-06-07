@@ -138,13 +138,29 @@ function renderAnswer(d) {
     ans.innerHTML = `
       <div class="ask-card">
         <h3><code>${escapeHtml(a.name || a.symbol_id)}</code>
-          <span class="muted">(${escapeHtml(a.kind || "")})</span></h3>
+          <span class="muted">(${escapeHtml(a.kind || "")})</span>
+          <button type="button" id="aq-listen" class="listen-btn" hidden
+                  aria-label="${MnemosUI.t("Read the answer aloud")}"
+                  title="${MnemosUI.t("Read the answer aloud")}">🔊
+            <span data-i18n="Listen">Listen</span></button></h3>
         ${sig ? `<pre class="ask-sig">${escapeHtml(sig)}</pre>` : ""}
         ${summary ? `<p>${escapeHtml(summary)}</p>` : ""}
         <p class="muted"><code>${escapeHtml(a.symbol_id)}</code></p>
         ${writes ? `<p><strong data-i18n="Writes">Writes</strong>: ${writes}</p>` : ""}
         ${reads ? `<p><strong data-i18n="Reads">Reads</strong>: ${reads}</p>` : ""}
       </div>`;
+    // Voice output (PR-156): reveal the listen button when TTS is available
+    // and read the answer (name + summary) aloud on click.
+    const speakText = [a.name, summary].filter(Boolean).join(". ");
+    const listenBtn = document.getElementById("aq-listen");
+    if (listenBtn && speakText) {
+      MnemosUI.voiceStatus().then(function (s) {
+        if (s && s.tts && s.tts.available) {
+          listenBtn.hidden = false;
+          listenBtn.addEventListener("click", function () { MnemosUI.speak(speakText); });
+        }
+      });
+    }
   } else {
     ans.innerHTML = `<p class="muted" data-i18n="No matching symbol — try a different phrasing, or provide a source root so Mnemos can analyse on demand.">No matching symbol — try a different phrasing, or provide a source root so Mnemos can analyse on demand.</p>`;
   }

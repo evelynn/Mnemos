@@ -66,16 +66,34 @@ local = [
 search = [
     "pgvector>=0.3",
 ]
-# Voice commands on the Ask tab (PR-155). Local speech-to-text via
-# faster-whisper (CTranslate2 Whisper) — multilingual incl. Korean,
-# CPU-friendly INT8, fully offline once the model is cached. Optional so
-# a base install stays slim and air-gappable. Activate with
-# ``pip install 'mnemos-platform[voice]'``; the first transcription
-# downloads the model (default ``base`` ≈ 145 MB) — pre-bake it into the
-# image for an air-gapped host. Absent → the Ask tab hides the mic and
-# ``POST /api/v1/voice/transcribe`` returns ``503 stt_unavailable``.
+# Voice INPUT — speech-to-text on the Ask tab (PR-155/156). Default engine
+# is Moonshine "Flavors of Moonshine" (``moonshine-voice``, MIT): the Korean
+# ``tiny-ko`` flavor is ~26M params, ONNX (no torch), and beats Whisper-tiny
+# on Korean — the lightest strong-Korean option. ``av`` (PyAV) decodes the
+# browser's webm/opus clip to the 16 kHz PCM Moonshine wants. Optional so a
+# base install stays slim/air-gappable; absent → the mic hides and
+# ``POST /voice/transcribe`` returns ``503``. ``pip install
+# 'mnemos-platform[voice]'``.
 voice = [
+    "moonshine-voice>=0.0.62",
+    "av>=11",
+]
+# Alternative STT — faster-whisper (CTranslate2 Whisper): multilingual,
+# auto-detecting, handles mixed Korean+English in one model. Heavier than
+# Moonshine. Select with ``MNEMOS_STT_ENGINE=faster-whisper``.
+# ``pip install 'mnemos-platform[voice-whisper]'``.
+voice-whisper = [
     "faster-whisper>=1.0",
+]
+# Voice OUTPUT — text-to-speech (read answers aloud, PR-156) via Kokoro-82M
+# (``kokoro``, Apache-2.0): ~82M params, multilingual incl. Korean. Note it
+# pulls PyTorch; an operator avoiding torch can wire the ONNX build
+# (kokoro-onnx) via MNEMOS_TTS_ENGINE. Needs ``espeak-ng`` (system pkg) for
+# English G2P and ``misaki[ko]`` for Korean. Absent → the listen button
+# hides and ``POST /voice/speak`` returns ``503``. ``pip install
+# 'mnemos-platform[tts]'``.
+tts = [
+    "kokoro>=0.9.4",
 ]
 
 [tool.setuptools.packages.find]
@@ -96,11 +114,11 @@ python_version = "3.12"
 module = ["pgvector.*"]
 ignore_missing_imports = true
 
-# faster-whisper is the optional ``voice`` extra (PR-155) and ships no
-# type stubs / py.typed marker. A base install omits it entirely; when it
-# is present its import is already guarded by the optional-feature probe.
+# Optional voice extras (PR-155/156) ship no type stubs / py.typed marker.
+# A base install omits them; their imports are guarded by the availability
+# probes, so a missing stub is expected, not a type error.
 [[tool.mypy.overrides]]
-module = ["faster_whisper.*"]
+module = ["faster_whisper.*", "moonshine_voice.*", "av.*", "kokoro.*", "numpy.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
