@@ -176,8 +176,10 @@ async def metrics_summary() -> JSONResponse:
             out["webhook_events_24h"] = (
                 await db.execute(
                     text(
-                        "SELECT COUNT(*) FROM audit_logs "
-                        "WHERE action = 'webhook.received' AND created_at >= :cutoff"
+                        # table is audit_log (singular) and its timestamp
+                        # column is occurred_at — see migration 0003.
+                        "SELECT COUNT(*) FROM audit_log "
+                        "WHERE action = 'webhook.received' AND occurred_at >= :cutoff"
                     ),
                     {"cutoff": cutoff},
                 )
