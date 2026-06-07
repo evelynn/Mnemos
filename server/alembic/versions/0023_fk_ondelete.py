@@ -15,9 +15,14 @@ CASCADE (자식이 부모 없이 무의미):
 
 SET NULL (자식이 자립 가능, orphan 허용):
 - users.organization_id → organizations.id
-- secrets.user_id → users.id
 - projects.organization_id → organizations.id
 - project_dbs.secret_id → secrets.id
+
+NB: the original audit list also named ``secrets.user_id → users.id``,
+but ``secrets`` has no ``user_id`` column (it is org-scoped via
+``organization_id`` — see migration 0010 / the Secret model). That
+constraint never existed, so ``DROP CONSTRAINT secrets_user_id_fkey``
+aborted the whole upgrade. The phantom entry is removed below.
 
 migration 은 drop_constraint + create_foreign_key 로 ondelete
 정책만 갱신. 데이터 변경 0.
@@ -44,8 +49,6 @@ _FK_CHANGES = [
      "analysis_stages_run_id_fkey", "analysis_runs", "CASCADE"),
     ("users", "organization_id",
      "users_organization_id_fkey", "organizations", "SET NULL"),
-    ("secrets", "user_id",
-     "secrets_user_id_fkey", "users", "SET NULL"),
     ("projects", "organization_id",
      "projects_organization_id_fkey", "organizations", "SET NULL"),
     ("project_dbs", "secret_id",
