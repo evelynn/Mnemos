@@ -1,0 +1,450 @@
+"""PR-140 — Claude-Code-driven source extraction for languages that have
+no deterministic ggoss analyzer.
+
+Mnemos's design principle #4 is "delegate the conversation & coding loops
+to Claude Code". Until now that delegation only covered L1~L3
+*summarisation*, which reads nodes the deterministic analyzers already
+extracted. So a project written in a language with no ggoss analyzer
+(C++, Go, Rust, …) produced an *empty graph* and therefore zero
+summaries and zero findings — the platform was effectively blind to it.
+That is a fatal gap for a tool that bills itself as polyglot.
+
+This module closes it: for an uncovered language we hand each source
+file to the operator's **Claude Code subscription** (the Agent SDK,
+no API key required) and ask it to extract a structured symbol/edge
+list. The result flows into the same graph ingest path as the
+deterministic analyzers, so summaries, findings, MCP queries and the
+dashboard all light up.
+
+Honesty: LLM-derived structure is ``certainty="inferred"`` (spec §2
+principle #3) — never ``verified``. The deterministic analyzers, when
+present, remain the source of truth; this is the fallback that keeps
+the platform from going blind.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+from typing import Any
+
+from app.extractor.agent_sdk import _parse_json_response, is_agent_sdk_available
+
+log = logging.getLogger(__name__)
+
+# Languages we know how to find on disk. A language absent here simply
+# gets skipped by the agent-extraction stage (recorded, not crashed).
+AGENT_LANGUAGE_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    "cpp": (".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hxx", ".hh", ".h", ".c"),
+    # Languages that also have a deterministic ggoss analyzer — listed here
+    # so the Claude-Code fallback can still find their files when the
+    # analyzer binary isn't installed (docker-free, PR-144).
+    "python": (".py",),
+    "csharp": (".cs",),
+    "typescript": (".ts", ".tsx"),
+    "javascript": (".js", ".jsx", ".mjs", ".cjs"),
+    "go": (".go",),
+    "rust": (".rs",),
+    "java": (".java",),
+    "kotlin": (".kt", ".kts"),
+    "ruby": (".rb",),
+    "php": (".php",),
+    "swift": (".swift",),
+    "scala": (".scala",),
+    # DB schema provided as SQL/DDL files (the "sql 로 제공" form). Any
+    # dialect — Claude Code reads Postgres/MySQL/SQLite/T-SQL/PL-SQL alike,
+    # so DB knowledge is no longer locked to the mssql/oracle live-schema
+    # analyzers. Tables become DataEntity nodes; FKs become edges.
+    "sql": (".sql", ".ddl"),
+}
+
+# Languages whose extraction yields DB DataEntity nodes (tables/columns)
+# rather than code Symbol nodes. Drives the prompt + envelope shape.
+AGENT_DB_LANGUAGES = frozenset({"sql"})
+
+# Directories that never hold first-party source — skip to spend the
+# (bounded) LLM budget on code that matters.
+_SKIP_DIRS = {
+    ".git", "node_modules", "build", "dist", "out", "bin", "obj",
+    "third_party", "thirdparty", "external", "vendor", "deps",
+    "__pycache__", ".vs", ".vscode", "cmake-build-debug",
+}
+
+_EXTRACT_SYSTEM = (
+    "You are a precise source-code structure extractor for a code-knowledge "
+    "graph. You receive ONE source file and return ONLY a JSON object — no "
+    "prose, no markdown fences. Extract the top-level and member symbols "
+    "(functions, methods, classes, structs, namespaces, enums) actually "
+    "DEFINED in this file, and the call/containment edges you can see with "
+    "high confidence. Do not invent symbols that aren't in the file."
+)
+
+_DB_EXTRACT_SYSTEM = (
+    "You are a precise database-schema extractor for a code-knowledge graph. "
+    "You receive ONE SQL/DDL file (any dialect — Postgres, MySQL, SQLite, "
+    "T-SQL, PL/SQL) and return ONLY a JSON object — no prose, no markdown "
+    "fences. Extract the tables/views actually DEFINED in this file with "
+    "their columns, and the foreign-key relationships between them. Flag a "
+    "column or table sensitive when it plausibly holds PII (email, name, "
+    "ssn, phone, address, password, card). Do not invent tables not present."
+)
+
+
+def discover_source_files(
+    root: str, language: str, *, limit: int, max_bytes: int = 400_000
+) -> list[Path]:
+    """Return up to ``limit`` source files for ``language`` under ``root``,
+    largest first (biggest files carry the most structure). Skips vendor /
+    build dirs and absurdly large generated files."""
+    exts = AGENT_LANGUAGE_EXTENSIONS.get(language)
+    if not exts:
+        return []
+    root_path = Path(root)
+    if not root_path.exists():
+        return []
+    candidates: list[tuple[int, Path]] = []
+    for p in root_path.rglob("*"):
+        if not p.is_file():
+            continue
+        if any(part in _SKIP_DIRS for part in p.parts):
+            continue
+        if p.suffix.lower() not in exts:
+            continue
+        try:
+            size = p.stat().st_size
+        except OSError:
+            continue
+        if size == 0 or size > max_bytes:
+            continue
+        candidates.append((size, p))
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    return [p for _size, p in candidates[:limit]]
+
+
+# All extensions across the agent-eligible languages (for content search).
+_ALL_AGENT_EXTS = {e for exts in AGENT_LANGUAGE_EXTENSIONS.values() for e in exts}
+
+
+def find_candidate_files(
+    root: str,
+    terms: list[str],
+    *,
+    limit: int = 3,
+    max_scan_bytes: int = 60_000,
+    max_files_scanned: int = 4000,
+) -> list[tuple[Path, str]]:
+    """Rank source files most likely to *answer* a question, for the
+    gap-driven deepen path (PR-149): when the graph can't answer, find the
+    files whose path or content best match the question terms, extract those,
+    then retry. Score = path-term hits (×5, cheap & strong) + content-term
+    hits (×1, first ``max_scan_bytes``). Returns ``[(path, language), …]``
+    highest score first, score>0 only. Bounded so a huge repo stays cheap."""
+    terms = [t for t in terms if len(t) >= 3]
+    if not terms:
+        return []
+    root_path = Path(root)
+    if not root_path.exists():
+        return []
+    ext_to_lang = {
+        e: lang for lang, exts in AGENT_LANGUAGE_EXTENSIONS.items() for e in exts
+    }
+    scored: list[tuple[int, int, Path, str]] = []
+    scanned = 0
+    for p in root_path.rglob("*"):
+        if scanned >= max_files_scanned:
+            break
+        if not p.is_file() or any(part in _SKIP_DIRS for part in p.parts):
+            continue
+        ext = p.suffix.lower()
+        if ext not in _ALL_AGENT_EXTS:
+            continue
+        scanned += 1
+        rel = str(p.relative_to(root_path)).lower()
+        score = sum(5 for t in terms if t in rel)
+        try:
+            if p.stat().st_size <= max_scan_bytes:
+                body = p.read_text(encoding="utf-8", errors="replace").lower()
+                score += sum(body.count(t) for t in terms)
+        except OSError:
+            continue
+        if score > 0:
+            # prefer implementation files over headers on ties (smaller ext rank)
+            scored.append((score, -len(rel), p, ext_to_lang[ext]))
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return [(p, lang) for _s, _r, p, lang in scored[:limit]]
+
+
+def _build_extract_prompt(language: str, file_rel: str, code: str) -> str:
+    id_prefix = f"{language}:{file_rel}::"
+    return (
+        f"Language: {language}\n"
+        f"File: {file_rel}\n\n"
+        "Return a JSON object with this exact shape:\n"
+        "{\n"
+        '  "symbols": [\n'
+        '    {"id": "<stable id>", "name": "<symbol name>", '
+        '"kind": "function|method|class|struct|namespace|enum", '
+        '"line": <int>, "signature": "<one-line signature>", '
+        '"calls": ["<name of a function/method this symbol invokes>"], '
+        '"summary": "<=160 chars on what it does"}\n'
+        "  ],\n"
+        '  "edges": [\n'
+        '    {"source_id": "<symbol id>", "target_id": "<symbol id>", '
+        '"kind": "CALLS|CONTAINS"}\n'
+        "  ],\n"
+        '  "data_access": [\n'
+        '    {"symbol_id": "<symbol id>", "table": "<db table name>", '
+        '"access": "READS|WRITES"}\n'
+        "  ]\n"
+        "}\n\n"
+        f'Use ids of the form "{id_prefix}<QualifiedName>" so edges can '
+        "reference symbols. Only include edges whose endpoints are symbols "
+        "you listed. In each symbol's `calls`, list the bare names of the "
+        "functions/methods it invokes — INCLUDING ones defined in other "
+        "files (the platform resolves those across the project). In "
+        "data_access, record every DB table the symbol reads "
+        "from or writes to — infer from SQL strings (SELECT/INSERT/UPDATE/"
+        "DELETE), ORM calls, or query builders. If the file defines nothing, "
+        'return {"symbols": [], "edges": [], "data_access": []}.\n\n'
+        "Source:\n"
+        "````\n"
+        f"{code}\n"
+        "````\n"
+    )
+
+
+def _build_db_extract_prompt(file_rel: str, code: str) -> str:
+    return (
+        f"SQL/DDL file: {file_rel}\n\n"
+        "Return a JSON object with this exact shape:\n"
+        "{\n"
+        '  "entities": [\n'
+        '    {"id": "data:<schema.table>", "name": "<table>", '
+        '"kind": "table|view", '
+        '"columns": [{"name": "<col>", "type": "<sql type>", '
+        '"pk": true|false, "nullable": true|false, "sensitive": true|false}], '
+        '"is_sensitive": true|false, '
+        '"summary": "<=160 chars on what the table holds"}\n'
+        "  ],\n"
+        '  "edges": [\n'
+        '    {"source_id": "data:<schema.table>", '
+        '"target_id": "data:<schema.referenced_table>", "kind": "REFERENCES"}\n'
+        "  ]\n"
+        "}\n\n"
+        'Use ids of the form "data:<schema>.<table>" (omit schema if none) so '
+        "FK edges can reference tables. Only include edges whose endpoints are "
+        "tables you listed. If the file defines no tables, return "
+        '{"entities": [], "edges": []}.\n\n'
+        "SQL:\n"
+        "````\n"
+        f"{code}\n"
+        "````\n"
+    )
+
+
+async def extract_file_via_agent_sdk(
+    *,
+    language: str,
+    file_rel: str,
+    code: str,
+    model: str = "claude-sonnet-4-6",
+    timeout_s: int = 150,
+    max_code_chars: int = 16_000,
+) -> dict[str, Any] | None:
+    """Extract ``{"symbols": [...], "edges": [...]}`` from one file via the
+    Claude Code subscription. Returns None on any failure (never raises);
+    the caller treats None as "this file contributed nothing"."""
+    if not is_agent_sdk_available():
+        return None
+    try:
+        from claude_agent_sdk import (
+            AssistantMessage,
+            ClaudeAgentOptions,
+            ResultMessage,
+            TextBlock,
+            query,
+        )
+    except ImportError:
+        return None
+
+    is_db = language in AGENT_DB_LANGUAGES
+    snippet = code if len(code) <= max_code_chars else code[:max_code_chars]
+    prompt = (
+        _build_db_extract_prompt(file_rel, snippet)
+        if is_db
+        else _build_extract_prompt(language, file_rel, snippet)
+    )
+    opts = ClaudeAgentOptions(
+        allowed_tools=[],
+        disallowed_tools=["Bash", "Edit", "Write", "Read", "Task"],
+        system_prompt=_DB_EXTRACT_SYSTEM if is_db else _EXTRACT_SYSTEM,
+        max_turns=1,
+        permission_mode="default",
+        cwd=os.environ.get("MNEMOS_AGENT_SDK_CWD", "/tmp"),
+        model=model if model and "claude" in model else None,
+    )
+
+    collected: list[str] = []
+    is_error = False
+    try:
+        import asyncio
+
+        async def _drain() -> bool:
+            async for msg in query(prompt=prompt, options=opts):
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            collected.append(block.text)
+                elif isinstance(msg, ResultMessage):
+                    return msg.is_error
+            return False
+
+        is_error = await asyncio.wait_for(_drain(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        log.warning("agent_extract: %s timed out after %ds", file_rel, timeout_s)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("agent_extract: %s: %s: %s", file_rel, exc.__class__.__name__, exc)
+        return None
+
+    if is_error or not collected:
+        return None
+    parsed = _parse_json_response("\n".join(collected))
+    if parsed is None:
+        return None
+    # Normalise shape so the caller can trust it. DB extraction returns
+    # "entities" (tables); code extraction returns "symbols".
+    items_key = "entities" if is_db else "symbols"
+    items = parsed.get(items_key) or []
+    edges = parsed.get("edges") or []
+    if not isinstance(items, list) or not isinstance(edges, list):
+        return None
+    out = {items_key: items, "edges": edges}
+    if not is_db:
+        # Function → DB-table READS/WRITES so get_data_access can answer
+        # "what does this touch in the DB" for agent-extracted code (PR-145).
+        da = parsed.get("data_access")
+        out["data_access"] = da if isinstance(da, list) else []
+    return out
+
+
+def to_envelopes(
+    language: str, file_rel: str, extracted: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Convert the LLM extraction into analyzer-contract envelopes so the
+    standard graph ingest (``_record_payload``) can consume them. All
+    nodes/edges are stamped ``certainty="inferred"`` — LLM-derived."""
+    envelopes: list[dict[str, Any]] = []
+    valid_ids: set[str] = set()
+
+    if language in AGENT_DB_LANGUAGES:
+        # DB schema → DataEntity nodes (tables) carrying their columns +
+        # PII flags, so the data-lookup / masking layer (spec §8) sees them.
+        for ent in extracted.get("entities", []):
+            if not isinstance(ent, dict):
+                continue
+            eid = ent.get("id")
+            if not eid or not isinstance(eid, str):
+                continue
+            valid_ids.add(eid)
+            envelopes.append(
+                {
+                    "record_type": "data_entity",
+                    "source_name": file_rel,
+                    "data": {
+                        "id": eid,
+                        "name": ent.get("name", eid.split(":", 1)[-1]),
+                        "kind": ent.get("kind", "table"),
+                        "columns": ent.get("columns"),
+                        "is_sensitive": bool(ent.get("is_sensitive")),
+                        "file": file_rel,
+                        "summary": ent.get("summary"),
+                        "certainty": "inferred",
+                        "extractor": "claude_code",
+                    },
+                }
+            )
+    else:
+        for sym in extracted.get("symbols", []):
+            if not isinstance(sym, dict):
+                continue
+            sid = sym.get("id")
+            if not sid or not isinstance(sid, str):
+                continue
+            valid_ids.add(sid)
+            envelopes.append(
+                {
+                    "record_type": "symbol",
+                    "source_name": file_rel,
+                    "data": {
+                        "id": sid,
+                        "name": sym.get("name", sid.rsplit("::", 1)[-1]),
+                        "kind": sym.get("kind", "function"),
+                        "language": language,
+                        "file": file_rel,
+                        "line": sym.get("line"),
+                        "signature": sym.get("signature"),
+                        "summary": sym.get("summary"),
+                        # PR-154 — callee names (possibly cross-file); a
+                        # post-extraction pass resolves them to CALLS edges.
+                        "calls_out": [
+                            c for c in (sym.get("calls") or []) if isinstance(c, str)
+                        ],
+                        "certainty": "inferred",
+                        "extractor": "claude_code",
+                    },
+                }
+            )
+        # Function → DB-table READS/WRITES edges (PR-145). Target is a
+        # DataEntity (often created by the SQL stage), so it isn't a local
+        # symbol — emit directly without the symbol dangling-filter. This is
+        # what lets get_data_access answer "what DB does this touch".
+        for da in extracted.get("data_access", []):
+            if not isinstance(da, dict):
+                continue
+            sid = da.get("symbol_id")
+            table = da.get("table")
+            if not sid or sid not in valid_ids or not table:
+                continue
+            access = str(da.get("access", "READS")).upper()
+            if access not in ("READS", "WRITES"):
+                access = "READS"
+            entity_id = table if str(table).startswith("data:") else f"data:{str(table).strip().lower()}"
+            envelopes.append(
+                {
+                    "record_type": "edge",
+                    "source_name": file_rel,
+                    "data": {
+                        "source_id": sid,
+                        "target_id": entity_id,
+                        "kind": access,
+                        "certainty": "inferred",
+                        "metadata": {"extractor": "claude_code", "access_site": file_rel},
+                    },
+                }
+            )
+
+    for edge in extracted.get("edges", []):
+        if not isinstance(edge, dict):
+            continue
+        src = edge.get("source_id")
+        tgt = edge.get("target_id")
+        # Only keep edges whose endpoints we actually emitted as nodes —
+        # avoids dangling references the LLM may hallucinate.
+        if src not in valid_ids or tgt not in valid_ids:
+            continue
+        envelopes.append(
+            {
+                "record_type": "edge",
+                "source_name": file_rel,
+                "data": {
+                    "source_id": src,
+                    "target_id": tgt,
+                    "kind": edge.get("kind", "CALLS"),
+                    "certainty": "inferred",
+                    "metadata": {"extractor": "claude_code"},
+                },
+            }
+        )
+    return envelopes

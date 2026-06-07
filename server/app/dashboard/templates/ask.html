@@ -1,0 +1,207 @@
+{% extends "_layout.html" %}
+{% block title %}Ask — Mnemos{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1 data-i18n="Ask the system">Ask the system</h1>
+</header>
+
+<section>
+  <p class="muted" data-i18n="Ask a question about the analysed system in plain language — Mnemos answers from the knowledge graph (symbols, data access, summaries). If the graph can't answer yet, it analyses the most relevant source files on demand and answers anyway.">
+    Ask a question about the analysed system in plain language — Mnemos
+    answers from the knowledge graph (symbols, data access, summaries).
+    If the graph can't answer yet, it analyses the most relevant source
+    files on demand and answers anyway.
+  </p>
+
+  <form onsubmit="return askQuestion(event)" class="ask-form">
+    <label><span data-i18n="Project">Project</span>
+      <input id="aq-pid" name="project_id" required placeholder="uuid" />
+    </label>
+    <label class="ask-question"><span data-i18n="Question">Question</span>
+      <textarea id="aq-q" rows="2" required
+        placeholder="e.g. Where is the order creation handler and which tables does it write?"></textarea>
+    </label>
+    <details class="ask-advanced">
+      <summary data-i18n="Deepen options">Deepen options</summary>
+      <label class="ask-inline">
+        <input id="aq-deepen" type="checkbox" checked />
+        <span data-i18n="Analyse more on demand if the graph can't answer">Analyse more on demand if the graph can't answer</span>
+      </label>
+      <label><span data-i18n="Source root (enables deepening)">Source root (enables deepening)</span>
+        <input id="aq-root" type="text" placeholder="/abs/path/to/repo (worker-visible)" />
+      </label>
+    </details>
+    <div class="ask-actions">
+      <button class="primary" type="submit" data-i18n="Ask">Ask</button>
+      <button type="button" onclick="traceProcess()" data-i18n="Trace as a process (FE→BE→DB)">Trace as a process (FE→BE→DB)</button>
+    </div>
+  </form>
+</section>
+
+<section id="aq-pending" hidden aria-live="polite">
+  <p class="muted"><span class="spinner" aria-hidden="true"></span>
+    <span id="aq-pending-msg" data-i18n="Answering…">Answering…</span></p>
+</section>
+
+<section id="aq-result" hidden aria-labelledby="aq-result-title">
+  <h2 id="aq-result-title" class="sr-only" data-i18n="Answer">Answer</h2>
+  <div id="aq-badges" class="ask-badges"></div>
+  <div id="aq-answer" class="ask-answer"></div>
+  <details id="aq-matches-wrap" hidden>
+    <summary data-i18n="Other matches">Other matches</summary>
+    <ul id="aq-matches" class="ask-matches"></ul>
+  </details>
+</section>
+
+<section id="aq-flow" hidden aria-labelledby="aq-flow-title">
+  <h2 id="aq-flow-title" data-i18n="Process trace">Process trace</h2>
+  <div id="aq-flow-badges" class="ask-badges"></div>
+  <p id="aq-flow-summary" class="ask-flow-summary"></p>
+  <ol id="aq-flow-steps" class="flow-steps"></ol>
+  <div id="aq-flow-flags"></div>
+  <p id="aq-flow-data" class="muted"></p>
+</section>
+
+<script>
+const escapeHtml = MnemosUI.escapeHtml;
+
+async function askQuestion(ev) {
+  ev.preventDefault();
+  const pid = document.getElementById("aq-pid").value.trim();
+  const q = document.getElementById("aq-q").value.trim();
+  if (!pid || !q) return false;
+  const deepen = document.getElementById("aq-deepen").checked;
+  const root = document.getElementById("aq-root").value.trim();
+
+  const pending = document.getElementById("aq-pending");
+  const result = document.getElementById("aq-result");
+  result.hidden = true;
+  pending.hidden = false;
+  document.getElementById("aq-pending-msg").textContent =
+    (deepen && root)
+      ? MnemosUI.t("Answering… (may analyse source files on demand)")
+      : MnemosUI.t("Answering…");
+
+  try {
+    const r = await fetch(`/api/v1/projects/${pid}/ask`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ question: q, deepen: deepen, source_root: root || null }),
+    });
+    if (!r.ok) { await MnemosUI.showError("Ask failed", r); return false; }
+    renderAnswer(await r.json());
+  } finally {
+    pending.hidden = true;
+  }
+  return false;
+}
+
+function renderAnswer(d) {
+  const result = document.getElementById("aq-result");
+  // Badges: answered / deepened.
+  const badges = [];
+  badges.push(d.answered
+    ? `<span class="badge ok" data-i18n="Answered">Answered</span>`
+    : `<span class="badge warn" data-i18n="No confident answer">No confident answer</span>`);
+  if (d.deepened) {
+    const files = (d.extracted_files || []).map(escapeHtml).join(", ");
+    badges.push(`<span class="badge info" title="${files}" data-i18n="Deepened (analysed on demand)">Deepened (analysed on demand)</span>`);
+  }
+  document.getElementById("aq-badges").innerHTML = badges.join(" ");
+
+  // Primary answer card.
+  const a = d.answer;
+  const ans = document.getElementById("aq-answer");
+  if (a) {
+    const detail = a.detail || {};
+    const summary = detail.summary || (detail.data && detail.data.summary) || "";
+    const sig = (detail.data && detail.data.signature) || (detail.signature) || "";
+    const writes = (a.data_access && a.data_access.writes || []).map(w => escapeHtml(w.entity_id)).join(", ");
+    const reads = (a.data_access && a.data_access.reads || []).map(w => escapeHtml(w.entity_id)).join(", ");
+    ans.innerHTML = `
+      <div class="ask-card">
+        <h3><code>${escapeHtml(a.name || a.symbol_id)}</code>
+          <span class="muted">(${escapeHtml(a.kind || "")})</span></h3>
+        ${sig ? `<pre class="ask-sig">${escapeHtml(sig)}</pre>` : ""}
+        ${summary ? `<p>${escapeHtml(summary)}</p>` : ""}
+        <p class="muted"><code>${escapeHtml(a.symbol_id)}</code></p>
+        ${writes ? `<p><strong data-i18n="Writes">Writes</strong>: ${writes}</p>` : ""}
+        ${reads ? `<p><strong data-i18n="Reads">Reads</strong>: ${reads}</p>` : ""}
+      </div>`;
+  } else {
+    ans.innerHTML = `<p class="muted" data-i18n="No matching symbol — try a different phrasing, or provide a source root so Mnemos can analyse on demand.">No matching symbol — try a different phrasing, or provide a source root so Mnemos can analyse on demand.</p>`;
+  }
+
+  // Other matches.
+  const matches = (d.matches || []).slice(1);
+  const wrap = document.getElementById("aq-matches-wrap");
+  if (matches.length) {
+    document.getElementById("aq-matches").innerHTML = matches.map(m =>
+      `<li><code>${escapeHtml(m.name || m.symbol_id)}</code> <span class="muted">${escapeHtml(m.kind || "")}</span></li>`).join("");
+    wrap.hidden = false;
+  } else {
+    wrap.hidden = true;
+  }
+
+  result.hidden = false;
+  MnemosUI.applyI18n(result);
+}
+
+async function traceProcess() {
+  const pid = document.getElementById("aq-pid").value.trim();
+  const q = document.getElementById("aq-q").value.trim();
+  const root = document.getElementById("aq-root").value.trim();
+  if (!pid || !q) { MnemosUI.showToast(MnemosUI.t("Pick a project and enter the process to trace."), "warn"); return; }
+  if (!root) { MnemosUI.showToast(MnemosUI.t("A source root is required to trace a process — set it under Deepen options."), "warn"); return; }
+
+  const pending = document.getElementById("aq-pending");
+  const flowSec = document.getElementById("aq-flow");
+  flowSec.hidden = true;
+  pending.hidden = false;
+  document.getElementById("aq-pending-msg").textContent =
+    MnemosUI.t("Tracing the process across tiers… (analyses the relevant FE/BE/DB files)");
+  try {
+    const r = await fetch(`/api/v1/projects/${pid}/trace_flow/auto`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ entry: q, source_root: root }),
+    });
+    if (!r.ok) { await MnemosUI.showError("Process trace failed", r); return; }
+    renderFlow(await r.json());
+  } finally {
+    pending.hidden = true;
+  }
+}
+
+function renderFlow(d) {
+  const f = d.flow || {};
+  document.getElementById("aq-flow-badges").innerHTML =
+    `<span class="badge ok" data-i18n="Traced">Traced</span>` +
+    (d.auto_collected_files || []).map(x => `<span class="badge info">${escapeHtml(x)}</span>`).join(" ");
+  document.getElementById("aq-flow-summary").textContent = f.summary || "";
+
+  document.getElementById("aq-flow-steps").innerHTML = (f.steps || []).map(st => {
+    const sig = st.signal || {};
+    const sigTxt = sig.name ? ` <span class="muted">(${escapeHtml(sig.kind || "")}: ${escapeHtml(sig.name)})</span>` : "";
+    return `<li><strong>[${escapeHtml(st.tier || "?")}]</strong> ${escapeHtml(st.component || "")} — ${escapeHtml(st.action || "")}${sigTxt}</li>`;
+  }).join("");
+
+  const flags = f.flags || [];
+  document.getElementById("aq-flow-flags").innerHTML = flags.length
+    ? "<h3 data-i18n='Flags'>Flags</h3><ul class='flow-flags'>" + flags.map(fl =>
+        `<li><strong>${escapeHtml(fl.name || "")}</strong>: `
+        + (fl.values || []).map(v => `<code>${escapeHtml(String(v.value))}</code> = ${escapeHtml(v.meaning || "")}`).join("; ")
+        + "</li>").join("") + "</ul>"
+    : "";
+
+  const dt = (f.data_touched || []).map(t => `${escapeHtml(t.op || "")} ${escapeHtml(t.entity || "")}`).join(", ");
+  document.getElementById("aq-flow-data").textContent = dt ? (MnemosUI.t("Data touched") + ": " + dt) : "";
+
+  const sec = document.getElementById("aq-flow");
+  sec.hidden = false;
+  MnemosUI.applyI18n(sec);
+}
+
+MnemosUI.mountProjectPicker("#aq-pid", { autoSubmit: false });
+</script>
+{% endblock %}

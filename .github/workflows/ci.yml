@@ -67,8 +67,8 @@ jobs:
         # than in production when the ``db_probe`` subprocess fails
         # silently. Team B 5th-round must-fix #9.
         run: |
-          dotnet build analyzers/ggoss-sql-mssql -c Release
-          dotnet build analyzers/ggoss-csharp -c Release
+          dotnet build analyzers/ggoss-sql-mssql/src -c Release
+          dotnet build analyzers/ggoss-csharp/src -c Release
       - name: Alembic upgrade/downgrade cycle
         working-directory: server
         run: |

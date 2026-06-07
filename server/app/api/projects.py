@@ -1,11 +1,13 @@
 import uuid
 from datetime import datetime
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.analyzers.registry import ANALYZER_LANGUAGES
+from app.extractor.agent_extract import AGENT_LANGUAGE_EXTENSIONS
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
@@ -17,7 +19,23 @@ from app.models.projects import Project
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
 
-Language = Literal["csharp", "typescript"]
+# A language is accepted if a deterministic ggoss analyzer ships for it
+# OR it is eligible for Claude-Code agent extraction (PR-140). Hardcoding
+# {csharp, typescript} previously made it impossible to even create a
+# project for a C++ / Go / Python / Oracle codebase.
+SUPPORTED_LANGUAGES = ANALYZER_LANGUAGES | frozenset(AGENT_LANGUAGE_EXTENSIONS)
+
+
+def _validate_languages(value: list[str] | None) -> list[str] | None:
+    if value is None:
+        return None
+    unsupported = sorted({lang for lang in value if lang not in SUPPORTED_LANGUAGES})
+    if unsupported:
+        raise ValueError(
+            f"unsupported language(s): {unsupported}. supported: "
+            f"{sorted(SUPPORTED_LANGUAGES)}"
+        )
+    return value
 
 
 class ProjectCreate(BaseModel):
@@ -25,13 +43,17 @@ class ProjectCreate(BaseModel):
     gitlab_project_id: int = Field(gt=0)
     gitlab_url: HttpUrl
     default_branch: str = Field(default="main", min_length=1)
-    languages: list[Language] = Field(min_length=1)
+    languages: list[str] = Field(min_length=1)
+
+    _check_langs = field_validator("languages")(_validate_languages)
 
 
 class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1)
     default_branch: str | None = Field(default=None, min_length=1)
-    languages: list[Language] | None = None
+    languages: list[str] | None = None
+
+    _check_langs = field_validator("languages")(_validate_languages)
 
 
 class ProjectOut(BaseModel):

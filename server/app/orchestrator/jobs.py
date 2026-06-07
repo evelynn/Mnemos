@@ -18,7 +18,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.analyzers.registry import runner_for
+from app.analyzers.registry import analyzer_available, runner_for
 from app.audit.logger import record as audit_record
 from app.config import get_settings
 from app.db import SessionLocal
@@ -28,7 +28,7 @@ from app.merge.contract_id import http_contract_id
 from app.merge.findings import run_all as rebuild_findings
 from app.merge.runtime import reconcile_observations
 from app.merge.writer import upsert_edge, upsert_node
-from app.models.graph import AnalysisRun
+from app.models.graph import AnalysisRun, Node
 from app.models.projects import Project
 from app.orchestrator.progress import ProgressBus
 from app.orchestrator.stages import StageTracker
@@ -212,6 +212,192 @@ async def _run_analyzer_stage(
         stage.set_stats({k: totals.get(k, 0) for k in ("symbols", "edges", "contracts", "data_entities")})
 
 
+async def _run_agent_extraction_stage(
+    bus: ProgressBus,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    language: str,
+    path: str,
+    position: int,
+    totals: dict[str, int],
+    file_limit: int,
+) -> None:
+    """PR-140 — Claude-Code source extraction for a language with no
+    deterministic ggoss analyzer (spec principle #4: delegate to Claude
+    Code). Hands each source file to the operator's Claude Code
+    subscription and ingests the inferred symbols/edges through the same
+    graph path as the analyzers. Degrades to a recorded skip when the
+    Agent SDK isn't available or the language has no known file types."""
+    from app.extractor.agent_extract import (
+        AGENT_LANGUAGE_EXTENSIONS,
+        discover_source_files,
+        extract_file_via_agent_sdk,
+        is_agent_sdk_available,
+        to_envelopes,
+    )
+
+    stage_name = f"agent_extract:{language}"
+
+    if not is_agent_sdk_available():
+        async with StageTracker(
+            bus, run_id, project_id, stage_name, language=language, position=position
+        ) as stage:
+            stage.set_stats({"skipped": True, "reason": "agent_sdk_unavailable"})
+        return
+    if language not in AGENT_LANGUAGE_EXTENSIONS:
+        async with StageTracker(
+            bus, run_id, project_id, stage_name, language=language, position=position
+        ) as stage:
+            stage.set_stats({"skipped": True, "reason": "language_not_supported"})
+        return
+
+    files = discover_source_files(path, language, limit=file_limit)
+    if not files:
+        async with StageTracker(
+            bus, run_id, project_id, stage_name, language=language, position=position
+        ) as stage:
+            stage.set_stats({"skipped": True, "reason": "no_source_files"})
+        return
+
+    # Code extraction emits symbols; SQL/DB extraction emits data_entity
+    # nodes (tables). Accept both plus edges so either path ingests fully.
+    accept = {"symbol", "data_entity", "edge"}
+    files_done = 0
+    files_failed = 0
+    async with StageTracker(
+        bus, run_id, project_id, stage_name,
+        language=language, position=position, time_budget_sec=3600,
+    ) as stage:
+        for fpath in files:
+            try:
+                code = fpath.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            file_rel = str(fpath.relative_to(path)) if str(fpath).startswith(
+                str(path)
+            ) else fpath.name
+            extracted = await extract_file_via_agent_sdk(
+                language=language, file_rel=file_rel, code=code
+            )
+            files_done += 1
+            if not extracted:
+                continue
+            # Ingest + COMMIT this file's nodes in a short-lived session,
+            # then report progress. Committing before stage.increment()
+            # releases the SQLite write lock so the StageTracker's
+            # progress flush (a separate session) never contends — the
+            # PR-141 "database is locked" failure. A per-file DB error
+            # degrades that file, never the whole run.
+            added = 0
+            try:
+                async with SessionLocal() as session:
+                    for env in to_envelopes(language, file_rel, extracted):
+                        before = sum(totals.values())
+                        await _record_payload(
+                            session,
+                            project_id=project_id,
+                            payload=env,
+                            accept_kinds=accept,
+                            totals=totals,
+                        )
+                        added += sum(totals.values()) - before
+                    await session.commit()
+            except Exception:  # noqa: BLE001
+                log.exception("agent_extract: ingest failed for %s", file_rel)
+                files_failed += 1
+                continue
+            if added:
+                await stage.increment(added)
+        stage.set_stats(
+            {
+                "files_analyzed": files_done,
+                "files_failed": files_failed,
+                "symbols": totals.get("symbols", 0),
+                "edges": totals.get("edges", 0),
+                "extractor": "claude_code",
+            }
+        )
+
+
+async def _run_call_linking_stage(
+    bus: ProgressBus,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    position: int,
+    totals: dict[str, int],
+) -> None:
+    """PR-154 — resolve agent-extracted cross-file calls into CALLS edges.
+
+    Each agent-extracted Symbol carries ``data.calls_out`` (bare callee
+    names, possibly defined in another file). Match each name to a Symbol
+    elsewhere in the project; create a CALLS edge only when the match is
+    unambiguous (exactly one non-self symbol of that name) to keep
+    precision. This is what makes find_callers/callees work across files
+    for Claude-extracted code, not just within a single file."""
+    async with StageTracker(
+        bus, run_id, project_id, "link_calls", position=position, time_budget_sec=120
+    ) as stage:
+        async with SessionLocal() as session:
+            linked = await link_inferred_calls(session, project_id, totals)
+            await session.commit()
+        for _ in range(linked):
+            await stage.increment()
+        stage.set_stats({"links_created": linked})
+
+
+async def link_inferred_calls(
+    session: AsyncSession, project_id: uuid.UUID, totals: dict[str, int]
+) -> int:
+    """Resolve agent-extracted ``data.calls_out`` callee names into CALLS
+    edges, unambiguous matches only. Returns the number of edges created.
+    Pure-DB (no bus/stage) so it is directly testable."""
+    symbols = (
+        await session.execute(
+            select(Node).where(
+                Node.project_id == project_id,
+                Node.kind == "Symbol",
+                Node.valid_to.is_(None),
+            )
+        )
+    ).scalars().all()
+    by_name: dict[str, list[str]] = {}
+    callers: list[Node] = []
+    for n in symbols:
+        nm = (n.data or {}).get("name")
+        if nm:
+            by_name.setdefault(nm, []).append(n.id)
+        if (n.data or {}).get("calls_out"):
+            callers.append(n)
+
+    linked = 0
+    for n in callers:
+        for callee in (n.data or {}).get("calls_out") or []:
+            targets = [i for i in by_name.get(callee, []) if i != n.id]
+            if len(targets) != 1:
+                continue  # unresolved or ambiguous — skip for precision
+            before = sum(totals.values())
+            await _record_payload(
+                session,
+                project_id=project_id,
+                payload={
+                    "record_type": "edge",
+                    "source_name": "link_calls",
+                    "data": {
+                        "source_id": n.id,
+                        "target_id": targets[0],
+                        "kind": "CALLS",
+                        "certainty": "inferred",
+                        "metadata": {"extractor": "claude_code", "resolved": "cross_file"},
+                    },
+                },
+                accept_kinds={"edge"},
+                totals=totals,
+            )
+            if sum(totals.values()) > before:
+                linked += 1
+    return linked
+
+
 async def _run_db_live_schema_stages(
     bus: ProgressBus,
     project_id: uuid.UUID,
@@ -382,6 +568,33 @@ async def run_ingest(
                     position += 1
                     await _run_analyzer_stage(
                         bus, project_id, run_id, language, verb, path, position, totals
+                    )
+
+            # Stage L0-Agent: delegate extraction to the operator's Claude
+            # Code subscription (spec principle #4) for any language the
+            # deterministic analyzers can't handle — either no ggoss analyzer
+            # is registered (C++) OR one is registered but its binary isn't
+            # installed (the docker-free case, PR-144). Without the latter,
+            # a docker-free Python/C#/TS project extracted nothing and Q&A
+            # had an empty graph. Bounded by ``agent_extract_limit``.
+            agent_limit = int(opts.get("agent_extract_limit", 12))
+            if agent_limit > 0:
+                ran_agent = False
+                for language in project.languages:
+                    if not analyzer_available(language):
+                        position += 1
+                        await _run_agent_extraction_stage(
+                            bus, project_id, run_id, language, path,
+                            position, totals, agent_limit,
+                        )
+                        ran_agent = True
+                # Stage L0-Link: resolve agent-extracted cross-file CALLS
+                # (each symbol's data.calls_out → a unique Symbol by name)
+                # so find_callers/callees work across files, not just within.
+                if ran_agent:
+                    position += 1
+                    await _run_call_linking_stage(
+                        bus, project_id, run_id, position, totals
                     )
 
             # Stage L0-DB: live database schema for every registered

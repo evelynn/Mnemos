@@ -26,7 +26,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 _GGOSS_PY = (
     Path(__file__).resolve().parents[2]

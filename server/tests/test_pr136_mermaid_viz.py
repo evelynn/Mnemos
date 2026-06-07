@@ -168,7 +168,8 @@ def test_diffs_html_has_lifecycle_diagram_with_break_glass():
 def test_plans_diffs_templates_render():
     from jinja2 import Environment, FileSystemLoader
     env = Environment(loader=FileSystemLoader(str(_TEMPLATES)), autoescape=True)
-    class _U: role = "operator"
+    class _U:
+        role = "operator"
     for name in ("plans.html", "diffs.html"):
         out = env.get_template(name).render(user=_U(), request=None,
                                             csrf_token="t")
@@ -186,7 +187,8 @@ def test_report_template_still_renders():
     tpl = env.get_template("report.html")
     # _layout 의 ``{{ user.role }}`` 처럼 view 가 주입하는 컨텍스트는
     # 이 단위 테스트에서 의미가 없으므로 빈 객체 stub 으로 채움.
-    class _U: role = "viewer"
+    class _U:
+        role = "viewer"
     out = tpl.render(user=_U(), request=None, csrf_token="t")
     assert 'id="rp-lifecycle"' in out
     assert "stateDiagram-v2" in out

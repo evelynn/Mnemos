@@ -35,6 +35,9 @@ node_modules/
 /data/
 *.sqlite
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
 
 # .NET build artifacts (PR-127 — local dotnet publish)
 analyzers/*/src/bin/

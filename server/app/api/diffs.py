@@ -121,14 +121,19 @@ async def submit_diff(
         plan_id=plan.id,
         diff=body.diff,
     )
-    jsonable = report.as_jsonable()
+    # auto_review_findings is the LIST of findings (each {rule, severity,
+    # message, …}) — the shape the model, the GUI and DiffOut all expect.
+    # Storing report.as_jsonable() (the whole {verdict, passes, findings}
+    # dict) instead made submit_diff 500 on response serialization, since
+    # the HTTP path was never exercised end-to-end. Keep just the findings.
+    review_findings = [f.as_jsonable() for f in report.findings]
     submission = DiffSubmission(
         plan_id=body.plan_id,
         task_id=body.task_id,
         diff=body.diff,
         test_results=body.test_results,
         self_review_notes=body.self_review_notes,
-        auto_review_findings=jsonable,
+        auto_review_findings=review_findings,
         status="blocked" if report.verdict == "blocked" else "pending_approval",
     )
     db.add(submission)

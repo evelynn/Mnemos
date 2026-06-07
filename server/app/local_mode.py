@@ -198,14 +198,21 @@ async def ensure_sqlite_schema() -> None:
 
     install_polyglot()
 
-    # Pull every model into the metadata registry.
+    # Pull every model into the metadata registry. This list MUST cover
+    # every module under app/models that declares a __tablename__ — a
+    # missing module means create_all silently skips its table and the
+    # feature 500s at runtime ("no such table"). Keep it complete.
     from app.models import audit as _audit  # noqa: F401
     from app.models import auth as _auth  # noqa: F401
+    from app.models import comments as _comments  # noqa: F401
     from app.models import findings as _findings  # noqa: F401
     from app.models import graph as _graph  # noqa: F401
+    from app.models import onboarding as _onboarding  # noqa: F401
     from app.models import organization as _org  # noqa: F401
     from app.models import plans as _plans  # noqa: F401
     from app.models import projects as _projects  # noqa: F401
+    from app.models import runtime as _runtime  # noqa: F401
+    from app.models import samples as _samples  # noqa: F401
     from app.models import stages as _stages  # noqa: F401
     from app.models.base import Base
 

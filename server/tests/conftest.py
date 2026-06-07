@@ -31,6 +31,13 @@ os.environ.setdefault("MNEMOS_ENV", "test")
 # checks in (they fail without a live DB/Redis); the live tests
 # in test_pr110_startup_verify.py exercise it directly.
 os.environ.setdefault("MNEMOS_SKIP_STARTUP_VERIFY", "1")
+# PR-144 — the Claude-Code extraction fallback now fires whenever a
+# deterministic analyzer binary is absent, which is always true in the
+# test env. Tests must never dial the real subscription (slow, non-
+# deterministic), so disable the Agent SDK path by default; the agent
+# stage then records a clean "agent_sdk_unavailable" skip. Unit tests for
+# the agent code exercise the pure helpers, not the live call.
+os.environ.setdefault("MNEMOS_DISABLE_AGENT_SDK", "1")
 
 
 def pytest_collection_modifyitems(config, items):
