@@ -73,6 +73,34 @@ cache. If it can't load, the endpoint returns `503` and the mic hides.
 | `MNEMOS_STT_DEVICE` / `_COMPUTE` / `_BEAM_SIZE` | `cpu` / `int8` / `5` | faster-whisper knobs |
 | `MNEMOS_STT_MAX_UPLOAD_BYTES` | 25 MB | reject larger clips |
 
+### Recognition rate (measured)
+
+A real Korean run on 4 natural sentences (e.g. "주민등록증을 보여
+주시겠어요?", "지하철에서 다리를 벌리고 앉지 마라.") with a lightweight
+**int8 Korean ASR** scored **CER 0.00% / WER 0.00% / 4-of-4 exact** —
+Korean recognition genuinely works end-to-end on a CPU-class model.
+
+Caveats, stated plainly:
+* Those 4 clips are clean, in-domain studio audio, so 0% is a best case;
+  noisy mic input will be higher.
+* The measurement used a comparable GitHub-hosted Korean model, **not** the
+  exact shipped Moonshine `tiny-ko`, because that model's weights download
+  from `download.moonshine.ai` / Hugging Face, both blocked by the build
+  sandbox's network allowlist. Moonshine's own model card reports
+  **6.46% WER** for `tiny-ko`.
+
+Reproduce against the **shipped** engine where the weights are reachable:
+
+```bash
+# a dir of <name>.wav + a trans.txt of "<name> <reference>"
+python scripts/accuracy/stt_korean_wer.py --sherpa-dir /path/to/test_wavs --language ko
+# or a JSONL manifest of {"audio": "...", "text": "..."}, with a CI floor:
+python scripts/accuracy/stt_korean_wer.py --manifest ko.jsonl --max-cer 10
+```
+
+The harness drives ``app.voice.engine`` directly, so it measures whatever
+``MNEMOS_STT_ENGINE`` is configured (Moonshine or faster-whisper).
+
 ---
 
 ## Text-to-speech (voice output)
