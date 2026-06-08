@@ -88,6 +88,14 @@ not one-shot analysis. The three request types are co-equal:
   plan submission, and worktree editing to IDE agents.
 - **Plan / diff / MR flow** — AI-driven changes land as plans, run through a
   multi-pass ultrareview, and open GitLab MRs when approved.
+- **Voice on the Ask tab** — a full **local** voice loop: *speak* a
+  question (mic → STT) and *hear* the answer (🔊 → TTS). STT defaults to
+  **Moonshine tiny-ko** (optional `[voice]` extra — ~26M params, ONNX,
+  no torch, beats Whisper-tiny on Korean), with multilingual faster-whisper
+  as a one-env-var alternative (`[voice-whisper]`). TTS is **Kokoro-82M**
+  (optional `[tts]` extra — Apache-2.0, multilingual incl. Korean). No audio
+  or text leaves the deployment; buttons auto-hide when an extra isn't
+  installed. See [`docs/voice-commands.md`](docs/voice-commands.md).
 - **RBAC** — local login with `admin` / `operator` / `viewer` roles,
   organisation-scoped multi-tenancy, optional OIDC SSO with JWKS signature
   verification.

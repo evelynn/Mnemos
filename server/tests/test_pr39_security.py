@@ -288,6 +288,10 @@ async def test_middleware_adds_default_headers_to_response():
     assert resp.headers["X-Frame-Options"] == "DENY"
     assert resp.headers["Referrer-Policy"] == "same-origin"
     assert "camera=()" in resp.headers["Permissions-Policy"]
+    # PR-155 — microphone is self-allowed for the Ask tab voice feature,
+    # but camera/geolocation/etc stay hard-denied.
+    assert "microphone=(self)" in resp.headers["Permissions-Policy"]
+    assert "geolocation=()" in resp.headers["Permissions-Policy"]
     # Default CSP applied.
     assert "default-src 'self'" in resp.headers["Content-Security-Policy"]
     # HSTS NOT set in default-dev mode.

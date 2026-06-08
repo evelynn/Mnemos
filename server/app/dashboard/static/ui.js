@@ -1573,6 +1573,27 @@
     "Findings rebuild queued.": "Findings 재구축이 예약되었습니다.",
     "Approve failed": "승인 실패",
     "Grant refused": "권한 거부됨",
+    // Voice command input (PR-155)
+    "Ask by voice": "음성으로 질문",
+    "Voice input": "음성 입력",
+    "Start voice input": "음성 입력 시작",
+    "Stop recording": "녹음 중지",
+    "Speak your question (local recognition: $1)":
+      "음성으로 질문하세요 (로컬 인식: $1)",
+    "Recognised: $1": "인식됨: $1",
+    "Transcription failed": "음성 인식 실패",
+    "Didn't catch that — please try again.":
+      "음성을 인식하지 못했습니다 — 다시 시도해 주세요.",
+    "Microphone access was blocked. Allow it in your browser to use voice input.":
+      "마이크 접근이 차단되었습니다. 음성 입력을 사용하려면 브라우저에서 허용하세요.",
+    "Voice recognition isn't enabled on this server.":
+      "이 서버에서는 음성 인식이 활성화되어 있지 않습니다.",
+    // Voice output / TTS (PR-156)
+    "Listen": "듣기",
+    "Read the answer aloud": "답변을 음성으로 읽기",
+    "Speech failed": "음성 출력 실패",
+    "Voice output isn't enabled on this server.":
+      "이 서버에서는 음성 출력이 활성화되어 있지 않습니다.",
     "Live analysis stream disconnected after 6 retries. Click the Monitor button to start a fresh stream, or reload the page to start over.":
       "분석 스트림 연결이 6회 재시도 후 끊어졌습니다. Monitor 버튼을 다시 누르거나 페이지를 새로고침하세요.",
     // Onboarding card
@@ -2205,6 +2226,230 @@
     return btn;
   }
 
+  // ─── Voice status + output (PR-155 / PR-156) ─────────────────────
+  //
+  // ``MnemosUI.voiceStatus()`` caches one probe of /api/v1/voice/status so
+  // both the mic (STT) and listen (TTS) buttons can decide whether to show
+  // without each re-hitting the endpoint. Shape:
+  //   { available, engine, model,           // STT, flat (back-compat)
+  //     stt: {available, engine, model, language},
+  //     tts: {available, engine, voice, lang_code} }
+  var _voiceStatusPromise = null;
+  function voiceStatus() {
+    if (!_voiceStatusPromise) {
+      _voiceStatusPromise = fetch("/api/v1/voice/status",
+        { headers: { "accept": "application/json" } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .catch(function () { return null; });
+    }
+    return _voiceStatusPromise;
+  }
+
+  // ``MnemosUI.speak(text, opts)`` reads text aloud via the local TTS
+  // engine (Kokoro). Synthesis runs on the server; the returned audio/wav
+  // Blob is played through an <audio> element (a blob: URL — allowed by the
+  // CSP ``media-src 'self' blob:``). Returns a promise resolving to whether
+  // playback started.
+  var _ttsAudio = null;
+  function speak(text, opts) {
+    opts = opts || {};
+    text = (text || "").trim();
+    if (!text) return Promise.resolve(false);
+    var body = { text: text };
+    if (opts.voice) body.voice = opts.voice;
+    return fetch("/api/v1/voice/speak", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (r) {
+      if (!r.ok) {
+        if (r.status === 503) {
+          showToast(t("Voice output isn't enabled on this server."), "error");
+        } else {
+          showError("Speech failed", r);
+        }
+        return false;
+      }
+      return r.blob().then(function (blob) {
+        try {
+          if (_ttsAudio) { try { _ttsAudio.pause(); } catch (_) {} }
+          var url = URL.createObjectURL(blob);
+          _ttsAudio = new Audio(url);
+          _ttsAudio.addEventListener("ended", function () {
+            URL.revokeObjectURL(url);
+          });
+          var p = _ttsAudio.play();
+          if (p && p.catch) p.catch(function () {});
+        } catch (_) { return false; }
+        return true;
+      });
+    });
+  }
+
+  // ─── Voice command input (PR-155) ────────────────────────────────
+  //
+  // ``MnemosUI.mountVoiceInput({ button, target, projectInput })`` turns
+  // a button into a push-to-talk control: click to record, click again
+  // to stop. The clip is POSTed to ``/api/v1/voice/transcribe`` and the
+  // recognised text is dropped into ``target``.
+  //
+  // The speech→text itself runs on the SERVER (a local faster-whisper
+  // model), not in the browser — so no audio leaves the operator's own
+  // deployment. The browser only captures the clip. That is why we use
+  // MediaRecorder + a POST rather than the built-in ``SpeechRecognition``
+  // API, which streams microphone audio to a cloud vendor.
+  //
+  // Degrades quietly: if the browser lacks MediaRecorder/getUserMedia
+  // (e.g. a plain-http origin, which isn't a secure context) or the
+  // server reports no STT engine installed, the button hides itself.
+  function mountVoiceInput(opts) {
+    opts = opts || {};
+    var btn = typeof opts.button === "string"
+      ? document.querySelector(opts.button) : opts.button;
+    var target = typeof opts.target === "string"
+      ? document.querySelector(opts.target) : opts.target;
+    if (!btn || !target) return;
+
+    function resolveEl(ref) {
+      if (!ref) return null;
+      return typeof ref === "string" ? document.querySelector(ref) : ref;
+    }
+
+    function hide() {
+      btn.hidden = true;
+      btn.setAttribute("aria-hidden", "true");
+    }
+
+    // getUserMedia + MediaRecorder only exist in a secure context
+    // (https or localhost). Outside one they're undefined; hide rather
+    // than throw on first click.
+    var supported = !!(navigator.mediaDevices
+      && navigator.mediaDevices.getUserMedia
+      && typeof window.MediaRecorder !== "undefined");
+    if (!supported) { hide(); return; }
+
+    // Confirm the server actually has an STT engine before offering the mic.
+    voiceStatus().then(function (s) {
+      var stt = s && (s.stt || s);
+      if (!stt || !stt.available) { hide(); return; }
+      btn.hidden = false;
+      btn.removeAttribute("aria-hidden");
+      btn.title = t("Speak your question (local recognition: $1)",
+        { m: stt.model || stt.engine });
+    });
+
+    var rec = null, chunks = [], recording = false, stream = null;
+
+    function setRecording(on) {
+      recording = on;
+      btn.classList.toggle("recording", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      btn.setAttribute("aria-label",
+        on ? t("Stop recording") : t("Start voice input"));
+    }
+
+    function stopStream() {
+      if (stream) {
+        stream.getTracks().forEach(function (tr) { tr.stop(); });
+        stream = null;
+      }
+    }
+
+    function start() {
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+        stream = s;
+        chunks = [];
+        try { rec = new MediaRecorder(stream); }
+        catch (e) { rec = new MediaRecorder(stream, {}); }
+        rec.ondataavailable = function (ev) {
+          if (ev.data && ev.data.size) chunks.push(ev.data);
+        };
+        rec.onstop = function () { stopStream(); upload(); };
+        rec.start();
+        setRecording(true);
+      }).catch(function () {
+        showToast(t("Microphone access was blocked. Allow it in your "
+          + "browser to use voice input."), "error");
+      });
+    }
+
+    function stop() {
+      if (rec && rec.state !== "inactive") rec.stop();
+      setRecording(false);
+    }
+
+    function upload() {
+      if (!chunks.length) return;
+      var mime = (rec && rec.mimeType) || "audio/webm";
+      var blob = new Blob(chunks, { type: mime });
+      var ext = mime.indexOf("mp4") >= 0 ? "mp4"
+        : (mime.indexOf("ogg") >= 0 ? "ogg" : "webm");
+      var fd = new FormData();
+      fd.append("audio", blob, "command." + ext);
+      // Send the operator's chosen UI locale as a recognition hint —
+      // a Korean operator's command is recognised as Korean, not guessed.
+      var loc = "";
+      try { loc = _resolveLocale(); } catch (_) {}
+      if (loc) fd.append("language", loc);
+      var pid = "";
+      var pin = resolveEl(opts.projectInput);
+      if (pin && pin.value) pid = pin.value.trim();
+      else if (typeof currentProjectFromUrl === "function") {
+        pid = currentProjectFromUrl() || "";
+      }
+      if (pid) fd.append("project_id", pid);
+
+      btn.disabled = true;
+      btn.classList.add("busy");
+      // ``fetch`` is auto-patched to attach the CSRF token; FormData sets
+      // its own multipart Content-Type, so we touch neither header.
+      fetch("/api/v1/voice/transcribe", { method: "POST", body: fd })
+        .then(function (r) {
+          if (!r.ok) {
+            if (r.status === 503) {
+              showToast(t("Voice recognition isn't enabled on this server."),
+                "error");
+              hide();
+              return null;
+            }
+            return showError("Transcription failed", r).then(function () {
+              return null;
+            });
+          }
+          return r.json();
+        })
+        .then(function (data) {
+          if (!data) return;
+          var text = (data.text || "").trim();
+          if (!text) {
+            showToast(t("Didn't catch that — please try again."), "warn");
+            return;
+          }
+          // Append (don't clobber) so a second utterance extends the
+          // first — natural for building up a longer question by voice.
+          var cur = (target.value || "").trim();
+          target.value = cur ? (cur + " " + text) : text;
+          target.focus();
+          try {
+            target.dispatchEvent(new Event("input", { bubbles: true }));
+          } catch (_) {}
+          var shown = text.length > 60 ? text.slice(0, 60) + "…" : text;
+          showToast(t("Recognised: $1", { text: shown }), "success");
+          if (typeof opts.onResult === "function") opts.onResult(text, data);
+        })
+        .finally(function () {
+          btn.disabled = false;
+          btn.classList.remove("busy");
+          btn.setAttribute("aria-label", t("Start voice input"));
+        });
+    }
+
+    setRecording(false);
+    btn.addEventListener("click", function () {
+      if (recording) stop(); else start();
+    });
+  }
+
   window.MnemosUI = {
     showToast: showToast,
     startTour: startTour,
@@ -2231,6 +2476,9 @@
     exportXlsx: exportXlsx,
     renderMermaid: renderMermaid,
     mountProjectPicker: mountProjectPicker,
+    mountVoiceInput: mountVoiceInput,
+    voiceStatus: voiceStatus,
+    speak: speak,
     currentProjectFromUrl: currentProjectFromUrl,
     notify: notify,
     readNotifications: readNotifications,
