@@ -6,6 +6,7 @@ the "product complete" state.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 _SERVER = Path(__file__).resolve().parents[1]
@@ -88,38 +89,27 @@ def test_revoke_documents_race_window():
 
 
 # ---------------------------------------------------------------------------
-# README — product-completion declaration
+# README — delivery history stays documented. The README condenses the
+# per-PR tables into a phase summary; the team-product sprint this file
+# closed must keep its row, and the current-state block must keep a live
+# (format-checked, not number-pinned) test count so it can't silently rot.
 # ---------------------------------------------------------------------------
 
 
-def test_readme_declares_product_complete():
+def test_readme_records_team_product_phase():
     body = _read(_README)
-    assert "Productisation cycle complete (PR-1 → PR-48)" in body
-    # Audit cycle log table includes every round.
-    assert "Round  PRs" in body
-    # User-command checklist marks every item ✅.
-    assert "User command check" in body
-    # The four headline user commands are each accounted for.
-    for token in (
-        "문제 발견 안 될 때까지",
-        "UI/UX 부분까지",
-        "RBAC + 유저 로그인 + 권한 관리",
-        "제대로 된 팀 운영 시스템",
-        "미려한 디자인",
-        "상품으로써 완성",
-    ):
-        assert token in body, f"README missing user-command line {token!r}"
+    assert "## Delivery history" in body
+    assert "PR-38 → PR-48" in body
 
 
-def test_readme_records_final_state():
+def test_readme_records_current_state():
     body = _read(_README)
-    # Final-state numbers.
-    assert "48 PRs" in body
-    assert "585 unit + 16 integration" in body
-    # Three middlewares.
-    assert "3 new middlewares" in body
-    # Spec §2 still 10/10.
-    assert "10/10" in body
+    assert "**Current state**" in body
+    # Test counts are stated in the "N unit + M integration" shape; the
+    # numbers themselves move with the suite, so pin the shape only.
+    assert re.search(r"[\d,]+ unit \+ \d+ integration", body)
+    # Spec §2 still fully preserved.
+    assert "10 of 10" in body
 
 
 # ---------------------------------------------------------------------------
