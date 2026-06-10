@@ -116,3 +116,56 @@ async def test_cross_org_audit_entries_excluded(http_client, db_session):
     )
     assert r.status_code == 200
     assert r.json() == []
+
+
+async def test_cross_org_analysis_run_is_404_and_uncancellable(http_client, db_session):
+    """An analysis run addressed by run_id must stay org-scoped.
+
+    Regression: the run read/stages/cancel endpoints key off run_id (not
+    project_id) so the require_project_org dependency couldn't gate them;
+    until require_run_org was added, an operator in org A could read AND
+    cancel org B's running analyses just by knowing the run UUID.
+    """
+    org_a = await _make_org(db_session, f"orga-{uuid.uuid4().hex[:6]}")
+    org_b = await _make_org(db_session, f"orgb-{uuid.uuid4().hex[:6]}")
+
+    from app.models.graph import AnalysisRun
+    from app.models.projects import Project
+
+    project_b = Project(
+        name="proj-b",
+        gitlab_project_id=44,
+        gitlab_url="https://gitlab.example.com/proj-b3",
+        languages=["csharp"],
+        organization_id=org_b.id,
+    )
+    db_session.add(project_b)
+    await db_session.flush()
+
+    run_b = AnalysisRun(
+        project_id=project_b.id,
+        status="running",
+        triggered_by="user:owner-b",
+        git_sha="HEAD",
+        scope="full",
+    )
+    db_session.add(run_b)
+    await db_session.flush()
+
+    user_a = await _make_user(db_session, "operator", org_a.id)
+    await db_session.commit()
+
+    r = await _login(http_client, user_a.username, "pw-test-bound-1234")
+    assert r.status_code == 200
+
+    # Read, stages, and SSE all 404 across the boundary (never leak the run).
+    assert (await http_client.get(f"/api/v1/analysis_runs/{run_b.id}")).status_code == 404
+    assert (
+        await http_client.get(f"/api/v1/analysis_runs/{run_b.id}/stages")
+    ).status_code == 404
+
+    # Cancel must not mutate org B's run.
+    r = await http_client.post(f"/api/v1/analysis_runs/{run_b.id}/cancel")
+    assert r.status_code == 404
+    await db_session.refresh(run_b)
+    assert run_b.status == "running"

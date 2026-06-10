@@ -17,12 +17,15 @@
 </section>
 
 <section id="query-runner">
-  <h2>SQL query (read-only)</h2>
+  <h2>SQL query — validate &amp; authorise (read-only)</h2>
   <p class="muted">
-    The analyzer runs the SELECT against the production DB and returns
-    masked rows. SQLGlot blocks anything that mutates state (spec §2.8);
-    a missing or oversized <code>LIMIT</code> is clamped — a
-    <code>Warning</code> header tells you what we trimmed.
+    The platform never connects to a production DB itself (spec §2.5/§2.8).
+    This form <strong>checks and authorises</strong> a SELECT: SQLGlot blocks
+    anything that mutates state, an oversized <code>LIMIT</code> is clamped,
+    per-DB policy (sensitive tables, AWR consent, maintenance window) is
+    enforced, and the request is written to the audit log. It returns the
+    rewritten SQL for the analyzer to run; the masked rows then show up in the
+    <strong>Sample viewer</strong> above once the analyzer reports them back.
   </p>
   <form onsubmit="return runQuery(event)">
     <label>DB component ID
@@ -172,7 +175,18 @@ async function runQuery(ev) {
   const rows = payload.rows || [];
   const cols = payload.columns || [];
   if (!rows.length) {
-    out.innerHTML = banner + '<p class="muted">No rows returned.</p>';
+    // The platform validated + authorised + logged the query but does not
+    // execute it (the analyzer does). Show the rewritten SQL to hand off,
+    // and point at the Sample viewer where masked rows land — rather than
+    // implying the query ran and matched nothing.
+    const rewritten = payload.rewritten_sql || document.getElementById("q-sql").value;
+    out.innerHTML = banner
+      + '<p class="toast success" role="status">Query authorised and written to the audit log. '
+      + 'The platform does not run SQL directly — hand the rewritten statement to the analyzer, '
+      + 'then view masked rows in the Sample viewer above.</p>'
+      + '<label>Rewritten SQL (clamped, write-blocked)'
+      + '<textarea rows="4" readonly>' + escapeHtml(rewritten) + '</textarea></label>';
+    MnemosUI.showToast("Query authorised and logged.", "success");
     return false;
   }
   // P2-6 — pagination for large result sets. Rendering 10 000 <tr>

@@ -172,6 +172,26 @@ async def create_comment(
     return await _out(c, db)
 
 
+@router.get("/api/v1/comments/{comment_id}")
+async def get_comment(
+    comment_id: uuid.UUID,
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+) -> CommentOut:
+    """Fetch a single comment by id — used by the dashboard's edit modal
+    to prefill the textarea with the current body (PR-43's edit flow
+    GETs this before opening the form)."""
+    c = (
+        await db.execute(select(Comment).where(Comment.id == comment_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    # 404 before returning anything so a cross-org caller can't confirm
+    # the comment exists.
+    await _check_target_in_user_org(db, c.target_kind, c.target_id, user)
+    return await _out(c, db)
+
+
 @router.patch("/api/v1/comments/{comment_id}")
 async def edit_comment(
     comment_id: uuid.UUID,

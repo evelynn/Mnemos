@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
-from app.auth.org_scope import require_project_org
+from app.auth.org_scope import require_project_org, require_run_org
 from app.auth.rbac import require_operator
 from app.db import get_session
 from app.models.graph import AnalysisRun, Edge, Node
@@ -115,7 +115,10 @@ async def trigger_analysis(
     return _to_out(run)
 
 
-@router.get("/analysis_runs/{run_id}")
+@router.get(
+    "/analysis_runs/{run_id}",
+    dependencies=[Depends(require_run_org())],
+)
 async def get_run(
     run_id: uuid.UUID,
     _: CurrentUser,
@@ -149,7 +152,10 @@ async def list_runs(
     return [_to_out(r) for r in rows]
 
 
-@router.get("/analysis_runs/{run_id}/events")
+@router.get(
+    "/analysis_runs/{run_id}/events",
+    dependencies=[Depends(require_run_org())],
+)
 async def run_events(
     run_id: uuid.UUID,
     request: Request,
@@ -169,7 +175,10 @@ async def run_events(
     return StreamingResponse(_sse(), media_type="text/event-stream")
 
 
-@router.post("/analysis_runs/{run_id}/cancel")
+@router.post(
+    "/analysis_runs/{run_id}/cancel",
+    dependencies=[Depends(require_run_org())],
+)
 async def cancel_run(
     run_id: uuid.UUID,
     user: CurrentUser,
@@ -194,7 +203,10 @@ async def cancel_run(
     return {"status": "cancelled"}
 
 
-@router.get("/analysis_runs/{run_id}/stages")
+@router.get(
+    "/analysis_runs/{run_id}/stages",
+    dependencies=[Depends(require_run_org())],
+)
 async def get_run_stages(
     run_id: uuid.UUID,
     _: CurrentUser,
