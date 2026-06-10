@@ -26,12 +26,12 @@
     <button type="submit" class="primary">Create secret</button>
   </form>
   <pre id="secret-create-result" class="muted"></pre>
-  {% else %}
-  <p class="muted"><em>Secret mutation is admin-only.</em></p>
-  {% endif %}
 
   <button class="primary" onclick="loadSecrets()">Refresh list</button>
   <div id="secrets-list"><p class="muted">Click refresh.</p></div>
+  {% else %}
+  <p class="muted"><em data-i18n="Secret management is admin-only.">Secret management is admin-only.</em></p>
+  {% endif %}
 </section>
 
 <section id="project-dbs">

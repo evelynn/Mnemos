@@ -373,6 +373,13 @@ async def summarise_l1(
             )
         )
         count += 1
+        # Commit per item so the SQLite write lock (local mode runs the
+        # API and this inline job in one process against one file) is
+        # released between LLM calls — otherwise a single end-of-stage
+        # commit holds the lock for the whole batch and the separate
+        # session behind progress_cb / a concurrent request hits
+        # "database is locked" (PR-141 pattern). Postgres is unaffected.
+        await session.commit()
         if progress_cb is not None:
             await progress_cb()
     await session.commit()
@@ -486,6 +493,13 @@ async def summarise_l2(
             )
         )
         count += 1
+        # Commit per item so the SQLite write lock (local mode runs the
+        # API and this inline job in one process against one file) is
+        # released between LLM calls — otherwise a single end-of-stage
+        # commit holds the lock for the whole batch and the separate
+        # session behind progress_cb / a concurrent request hits
+        # "database is locked" (PR-141 pattern). Postgres is unaffected.
+        await session.commit()
         if progress_cb is not None:
             await progress_cb()
     await session.commit()
@@ -584,6 +598,13 @@ async def summarise_l3(
             )
         )
         count += 1
+        # Commit per item so the SQLite write lock (local mode runs the
+        # API and this inline job in one process against one file) is
+        # released between LLM calls — otherwise a single end-of-stage
+        # commit holds the lock for the whole batch and the separate
+        # session behind progress_cb / a concurrent request hits
+        # "database is locked" (PR-141 pattern). Postgres is unaffected.
+        await session.commit()
         if progress_cb is not None:
             await progress_cb()
     await session.commit()

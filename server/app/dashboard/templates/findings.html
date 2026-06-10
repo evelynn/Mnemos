@@ -176,7 +176,7 @@ function _showNextFindingsPage() {
       ? ` <a class="cwe-link" href="https://cwe.mitre.org/data/definitions/${escapeHtml(String(f.cwe_id).replace(/[^0-9]/g, ""))}.html" target="_blank" rel="noopener">${escapeHtml(f.cwe_id)}</a>`
       : "";
     const planBtn = (f.status === "open" || f.status === "acknowledged")
-      ? `<button class="mini-btn" onclick="createPlanFromFinding('${escapeHtml(f.id)}')" data-i18n="Create plan">Create plan</button>`
+      ? `<button class="mini-btn" onclick="createPlanFromFinding('${escapeHtml(f.id)}')" data-required-role="operator" data-i18n="Create plan">Create plan</button>`
       : "";
     const compliance = (f.compliance_tags && f.compliance_tags.length)
       ? `<div class="compliance-tags">`
@@ -205,6 +205,7 @@ function _showNextFindingsPage() {
   tpl.innerHTML = html;
   tbody.appendChild(tpl.content);
   MnemosUI.applyI18n(tbody);
+  MnemosUI.gateByRole(tbody);
   // PR-56 — lazily fill the "related plans" badge when its
   // <details> is first opened, so we don't fire N fetches up front.
   tbody.querySelectorAll(".fix-detail").forEach((det) => {
