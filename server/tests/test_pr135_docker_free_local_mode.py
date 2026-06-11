@@ -297,7 +297,8 @@ def test_serve_local_bootstrap_sets_docker_free_env(monkeypatch):
     """_bootstrap_env 가 모든 docker-free 기본값을 설정."""
     # 깨끗한 슬레이트
     for k in ("MNEMOS_LOCAL_MODE", "DATABASE_URL", "SECRET_KEY",
-              "FERNET_KEY", "SESSION_COOKIE_SECURE"):
+              "FERNET_KEY", "SESSION_COOKIE_SECURE",
+              "MNEMOS_DISABLE_AGENT_SDK"):
         monkeypatch.delenv(k, raising=False)
     from app.serve_local import _bootstrap_env
     _bootstrap_env("/tmp/x.db")
@@ -306,3 +307,17 @@ def test_serve_local_bootstrap_sets_docker_free_env(monkeypatch):
     assert len(os.environ["SECRET_KEY"]) >= 40
     assert os.environ["FERNET_KEY"]
     assert os.environ["SESSION_COOKIE_SECURE"] == "false"
+    # PR-158 — local mode defaults the Claude Agent SDK off so analysis
+    # completes fast on the zero-dependency trial path instead of stalling
+    # at l1_summaries on a 60s-per-summary Claude-CLI timeout.
+    assert os.environ["MNEMOS_DISABLE_AGENT_SDK"] == "1"
+
+
+def test_serve_local_bootstrap_respects_agent_sdk_override(monkeypatch):
+    """An operator who explicitly wants the Agent SDK in local mode can
+    re-enable it — _bootstrap_env uses setdefault, so a pre-set value wins."""
+    monkeypatch.setenv("MNEMOS_DISABLE_AGENT_SDK", "0")
+    from app.serve_local import _bootstrap_env
+    _bootstrap_env("/tmp/x.db")
+    assert os.environ["MNEMOS_DISABLE_AGENT_SDK"] == "0"
+
