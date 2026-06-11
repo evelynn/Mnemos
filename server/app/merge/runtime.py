@@ -103,6 +103,45 @@ def _operation_of(span: dict[str, Any], attrs: dict[str, str]) -> str:
     return span.get("name", "")
 
 
+def _operation_from_node_id(node_id: Any) -> str | None:
+    """Extract the HTTP path from a contract *node id* so a runtime
+    observation can match an edge that carries the route on its target
+    node rather than in ``edge.data``.
+
+    The platform has several contract-id shapes in flight depending on
+    who minted the node — all of them keep the path as the last
+    whitespace/colon-separated field:
+
+        ``contract:POST /orders``        (seed + merge canonical) → ``/orders``
+        ``contract:http:POST:/orders``   (ggoss-py analyzer)      → ``/orders``
+        ``http.POST./orders``            (contract_id.http_contract_id) → ``/orders``
+
+    Returns ``None`` for anything that isn't an HTTP contract id (e.g. a
+    symbol or data node), so the caller simply skips it.
+    """
+    if not node_id:
+        return None
+    s = str(node_id)
+    # Only HTTP contracts carry a path; ignore grpc./mq./dll./data: etc.
+    if s.startswith("contract:http:"):
+        # contract:http:POST:/orders  → take the part after the method
+        rest = s[len("contract:http:"):]
+        _, _, path = rest.partition(":")
+        return path or None
+    if s.startswith("contract:"):
+        rest = s[len("contract:"):]
+        # "POST /orders" → "/orders"; if no method prefix, use as-is.
+        _, _, after = rest.partition(" ")
+        path = after or rest
+        return path if path.startswith("/") else None
+    if s.startswith("http."):
+        # http.POST./orders → /orders
+        idx = s.find("./")
+        if idx != -1:
+            return s[idx + 1:]
+    return None
+
+
 def _operation_matches(candidate: Any, observed: str) -> bool:
     """True when a stored edge operation matches a runtime-observed
     one — raw, or after the path-template normalisation contract ids
@@ -267,10 +306,19 @@ async def reconcile_observations(
             # path-template normalisation contract ids use —
             # otherwise a runtime ``/api/orders/{id}`` never matches a
             # stored ``/api/orders/42``.
+            # Match against the operation stored on the edge's own data…
             if any(
                 _operation_matches(edge_data.get(k), obs_op)
                 for k in ("operation", "path", "route")
             ):
+                hit = edge
+                break
+            # …or against the path carried by the target *contract node*
+            # (the common case — analyzers key the route on the contract
+            # node id, e.g. ``contract:POST /orders``, not on edge.data,
+            # so without this the standard EXPOSES/CALLS edge never
+            # reconciles and the observation is stuck unmatched).
+            if _operation_matches(_operation_from_node_id(edge.target_id), obs_op):
                 hit = edge
                 break
         if hit is None:

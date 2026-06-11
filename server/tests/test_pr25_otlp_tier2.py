@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import uuid as _uuid
+from datetime import datetime as _dt
+from datetime import timezone as _tz
 from pathlib import Path
 
+import pytest as _pytest
 
 from app.merge.runtime import (
     _attr_dict,
@@ -229,3 +233,73 @@ def test_phase2_backlog_marks_p2_1_p2_2_shipped():
     # in a follow-up housekeeping commit.
     assert "## P2-1" in body
     assert "## P2-2" in body
+
+
+# ---------------------------------------------------------------------------
+# PR-159 — reconcile matches an observation against the route on the
+# target *contract node id* (the common case), marking the edge exercised.
+# Integration: needs the DB (real Postgres in CI; the savepoint fixture
+# rolls it back). Regression for the gap where observations stayed
+# unmatched because analyzers key the route on the contract node, not
+# edge.data.
+# ---------------------------------------------------------------------------
+
+@_pytest.mark.integration
+async def test_reconcile_matches_via_contract_node_id(db_session):
+    from sqlalchemy import select
+
+    from app.merge.runtime import reconcile_observations
+    from app.models.graph import Edge
+    from app.models.runtime import RuntimeObservation
+
+    org = _uuid.uuid4()
+    proj = _uuid.uuid4()
+    now = _dt.now(tz=_tz.utc)
+
+    # EXPOSES edge whose route lives ONLY on the target contract node id
+    # (empty edge.data — exactly what the static analyzers emit).
+    hit = Edge(
+        id=_uuid.uuid4(), project_id=proj, valid_from=now,
+        source_id="sym:orders-api:CreateOrder",
+        target_id="contract:POST /orders", kind="EXPOSES",
+        certainty="verified", data={}, created_by="seed",
+    )
+    decoy = Edge(
+        id=_uuid.uuid4(), project_id=proj, valid_from=now,
+        source_id="sym:orders-api:GetOrder",
+        target_id="contract:GET /orders/{id}", kind="EXPOSES",
+        certainty="verified", data={}, created_by="seed",
+    )
+    obs = RuntimeObservation(
+        organization_id=org, project_id=None, service="orders-api",
+        operation="/orders", kind="EXPOSES", seen_count=3,
+    )
+    db_session.add_all([hit, decoy, obs])
+    await db_session.flush()
+
+    res = await reconcile_observations(
+        db_session, project_id=proj, organization_id=org
+    )
+    assert res["matched"] == 1
+    assert res["unmatched"] == 0
+
+    refreshed = (
+        await db_session.execute(select(Edge).where(Edge.id == hit.id))
+    ).scalar_one()
+    assert refreshed.data.get("exercised") == "true"
+    assert refreshed.data.get("hit_count") == 3
+    assert refreshed.data.get("last_seen_at")
+
+    # The decoy route (/orders/{id}) must NOT be marked exercised.
+    decoy_refreshed = (
+        await db_session.execute(select(Edge).where(Edge.id == decoy.id))
+    ).scalar_one()
+    assert "exercised" not in (decoy_refreshed.data or {})
+
+    # The observation is pinned to the project once reconciled.
+    obs_refreshed = (
+        await db_session.execute(
+            select(RuntimeObservation).where(RuntimeObservation.id == obs.id)
+        )
+    ).scalar_one()
+    assert obs_refreshed.project_id == proj

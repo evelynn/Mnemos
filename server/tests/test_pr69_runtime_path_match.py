@@ -14,7 +14,7 @@ hardening — ``noise.ts`` decoys — is asserted by test_pr66.)
 
 from __future__ import annotations
 
-from app.merge.runtime import _operation_matches
+from app.merge.runtime import _operation_from_node_id, _operation_matches
 
 
 def test_exact_match():
@@ -59,3 +59,47 @@ def test_reconcile_uses_the_matcher():
     idx = body.find("async def reconcile_observations(")
     slab = body[idx:idx + 2400]
     assert "_operation_matches(" in slab
+
+
+# ---------------------------------------------------------------------------
+# PR-159 — the route a runtime observation must match usually lives on the
+# *target contract node id* (e.g. ``contract:POST /orders``), not on
+# ``edge.data``. Without parsing it out the standard EXPOSES/CALLS edge
+# never reconciles and every observation is stuck unmatched.
+# ---------------------------------------------------------------------------
+
+
+def test_operation_from_node_id_parses_each_contract_shape():
+    # seed + merge canonical
+    assert _operation_from_node_id("contract:POST /orders") == "/orders"
+    assert _operation_from_node_id("contract:GET /orders/{id}") == "/orders/{id}"
+    # ggoss-py analyzer shape
+    assert _operation_from_node_id("contract:http:POST:/orders") == "/orders"
+    # contract_id.http_contract_id shape
+    assert _operation_from_node_id("http.POST./orders") == "/orders"
+
+
+def test_operation_from_node_id_ignores_non_http_nodes():
+    for nid in (
+        "sym:orders-api:CreateOrder",
+        "data:orders.dbo.Orders",
+        "comp:orders-api",
+        "",
+        None,
+    ):
+        assert _operation_from_node_id(nid) is None
+
+
+def test_observed_route_matches_contract_node_path():
+    """End-to-end of the matcher pair: a runtime ``/orders/42`` resolves
+    against a ``contract:GET /orders/{id}`` target node via path templating."""
+    assert _operation_matches(
+        _operation_from_node_id("contract:POST /orders"), "/orders"
+    )
+    assert _operation_matches(
+        _operation_from_node_id("contract:GET /orders/{id}"), "/orders/42"
+    )
+    # distinct routes still don't match
+    assert not _operation_matches(
+        _operation_from_node_id("contract:POST /customers"), "/orders"
+    )
