@@ -78,25 +78,23 @@ def test_findings_page_head_is_translatable():
 
 
 # ---------------------------------------------------------------------------
-# README documents Phase 2 status
+# Phase 2 record stays documented. The README condenses delivery history
+# into a phase summary; the per-item P2 record lives in the backlog doc.
 # ---------------------------------------------------------------------------
 
 
-def test_readme_phase2_status_table_present():
+def test_readme_summarises_phase2_and_links_backlog():
     body = _read(_README)
-    assert "## Phase 2 status" in body
-    # All 10 P2 items are listed.
+    assert "## Delivery history" in body
+    assert "PR-20 → PR-31" in body
+    assert "phase2_backlog.md" in body
+
+
+def test_phase2_backlog_lists_all_items():
+    body = _read(_BACKLOG)
     for marker in ("P2-1", "P2-2", "P2-3", "P2-4", "P2-5",
                    "P2-6", "P2-7", "P2-8", "P2-9", "P2-10"):
         assert marker in body
-
-
-def test_readme_lists_each_phase2_pr():
-    body = _read(_README)
-    # Sprint table — each PR in the sprint shows up.
-    for pr in ("PR-20", "PR-21", "PR-22", "PR-23",
-               "PR-24", "PR-25", "PR-26", "PR-27"):
-        assert pr in body
 
 
 # ---------------------------------------------------------------------------

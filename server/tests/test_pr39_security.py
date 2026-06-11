@@ -251,9 +251,11 @@ def test_csp_default_blocks_third_party_iframes_and_forms():
     body = _read(_APP / "security" / "headers.py")
     assert "frame-ancestors 'none'" in body
     assert "form-action 'self'" in body
-    # htmx CDN is allowlisted because the dashboard loads it from
-    # there — a self-hosted operator can override via MNEMOS_CSP.
-    assert "https://unpkg.com" in body
+    # No third-party script origins: ui.js, mermaid, and exceljs are all
+    # self-hosted under /static, so the default CSP stays 'self'-only and
+    # the platform runs fully air-gapped (the unused htmx CDN was dropped).
+    assert "https://unpkg.com" not in body
+    assert "script-src 'self' 'unsafe-inline';" in body
 
 
 def test_hsts_is_opt_in_via_env():

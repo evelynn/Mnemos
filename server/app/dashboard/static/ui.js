@@ -1952,6 +1952,124 @@
     // SSE strip
     "Analysis stream disconnected — open the Analysis tab to reconnect.":
       "분석 스트림 연결 끊김 — Analysis 탭을 열어 재연결하세요.",
+    // PR — i18n gap fill: Ask tab, report flows, lifecycle captions,
+    // org/secret/project toasts, comment-thread + project-picker labels.
+    "A source root is required to trace a process — set it under Deepen options.":
+      "프로세스를 추적하려면 소스 루트가 필요합니다 — Deepen options 에서 설정하세요.",
+    "Analyse more on demand if the graph can't answer":
+      "그래프가 답하지 못하면 필요 시 추가로 분석",
+    "Answer":
+      "답변",
+    "Answered":
+      "답변됨",
+    "Answering…":
+      "답변 생성 중…",
+    "Answering… (may analyse source files on demand)":
+      "답변 생성 중… (필요 시 소스 파일을 분석할 수 있음)",
+    "Ask":
+      "질의",
+    "Ask a question about the analysed system in plain language — Mnemos answers from the knowledge graph (symbols, data access, summaries). If the graph can't answer yet, it analyses the most relevant source files on demand and answers anyway.":
+      "분석된 시스템에 대해 자연어로 질문하세요 — Mnemos 가 지식 그래프(심볼, 데이터 접근, 요약)에서 답합니다. 그래프가 아직 답할 수 없으면 가장 관련 있는 소스 파일을 즉석에서 분석해 답합니다.",
+    "Ask the system":
+      "시스템에 질의",
+    "Comment body":
+      "댓글 내용",
+    "Could not load organisations":
+      "조직을 불러오지 못했습니다",
+    "Could not load projects":
+      "프로젝트를 불러오지 못했습니다",
+    "Cross-tier processes (flows)":
+      "계층 간 프로세스 (플로우)",
+    "Data touched":
+      "접근한 데이터",
+    "Deepen options":
+      "심화 옵션",
+    "Deepened (analysed on demand)":
+      "심화됨 (즉석 분석)",
+    "Diagram render failed: ":
+      "다이어그램 렌더링 실패: ",
+    "Edit comment":
+      "댓글 편집",
+    "Erase failed":
+      "삭제 실패",
+    "Every diff submission moves through this state machine. A blocked verdict can only be cleared by a break-glass grant consumed by a different operator (two-eyes).":
+      "모든 diff 제출은 이 상태 기계를 따릅니다. blocked 판정은 다른 운영자가 소비하는 break-glass 권한(2인 확인)으로만 해제할 수 있습니다.",
+    "Export failed":
+      "내보내기 실패",
+    "Finding lifecycle":
+      "발견 항목 생명주기",
+    "Flags:":
+      "플래그:",
+    "Gate B lifecycle":
+      "Gate B 생명주기",
+    "LLM pipeline health":
+      "LLM 파이프라인 상태",
+    "Live analysis stream disconnected after 6 retries. ":
+      "실시간 분석 스트림이 6회 재시도 후 끊겼습니다. ",
+    "Microphone access was blocked. Allow it in your ":
+      "마이크 접근이 차단되었습니다. 다음에서 허용하세요: ",
+    "No confident answer":
+      "확신할 수 있는 답변 없음",
+    "No matching symbol — try a different phrasing, or provide a source root so Mnemos can analyse on demand.":
+      "일치하는 심볼 없음 — 다르게 표현하거나, Mnemos 가 즉석 분석할 수 있도록 소스 루트를 지정하세요.",
+    "No process flows yet — run trace_flow on a frontend/backend/DB slice to see the end-to-end process here.":
+      "아직 프로세스 플로우가 없습니다 — 프론트엔드/백엔드/DB 구간에 trace_flow 를 실행하면 종단 간 프로세스가 여기 표시됩니다.",
+    "No projects in your organisation yet.":
+      "아직 조직에 프로젝트가 없습니다.",
+    "Organisation created.":
+      "조직이 생성되었습니다.",
+    "Organisation creation failed":
+      "조직 생성 실패",
+    "Other matches":
+      "다른 일치 항목",
+    "Per-project breakdown of how many summaries used the real LLM vs the stub, and why.":
+      "프로젝트별로 실제 LLM 과 스텁 중 무엇을 사용한 요약이 몇 건인지와 그 이유를 분석합니다.",
+    "Pick a project and enter the process to trace.":
+      "프로젝트를 선택하고 추적할 프로세스를 입력하세요.",
+    "Plan lifecycle":
+      "계획 생명주기",
+    "Process trace":
+      "프로세스 추적",
+    "Project":
+      "프로젝트",
+    "Project creation failed":
+      "프로젝트 생성 실패",
+    "Question":
+      "질문",
+    "Reads":
+      "읽기",
+    "Register your first project →":
+      "첫 프로젝트를 등록하세요 →",
+    "Save":
+      "저장",
+    "Secret creation failed":
+      "시크릿 생성 실패",
+    "Secret management is admin-only.":
+      "시크릿 관리는 관리자 전용입니다.",
+    "Secret stored.":
+      "시크릿이 저장되었습니다.",
+    "Select a project":
+      "프로젝트 선택",
+    "Source root (enables deepening)":
+      "소스 루트 (심화 분석 활성화)",
+    "The state machine each plan moves through. Reject feedback loops back to draft so the author can revise. Regenerate re-opens the plan for the analyser to redraft from scratch.":
+      "각 계획이 거치는 상태 기계입니다. Reject 의 피드백은 초안으로 되돌아가 작성자가 수정하게 하고, Regenerate 는 분석기가 처음부터 다시 작성하도록 계획을 다시 엽니다.",
+    "Token issued. Ask an admin to send it to you, or open the reset link directly:":
+      "토큰이 발급되었습니다. 관리자에게 전달을 요청하거나, 재설정 링크를 직접 여세요:",
+    "Trace as a process (FE→BE→DB)":
+      "프로세스로 추적 (FE→BE→DB)",
+    "Traced":
+      "추적됨",
+    "Tracing the process across tiers… (analyses the relevant FE/BE/DB files)":
+      "계층을 가로질러 프로세스 추적 중… (관련 FE/BE/DB 파일을 분석)",
+    "Trigger failed":
+      "실행 시작 실패",
+    "Unknown project":
+      "알 수 없는 프로젝트",
+    "User erased.":
+      "사용자가 삭제되었습니다.",
+    "Writes":
+      "쓰기",
   };
 
   var _locale = null;

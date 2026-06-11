@@ -408,7 +408,10 @@ function dismissTokenDialog() {
 
 function approve(id, blocked) {
   if (!blocked) {
-    submitApprove(id, null);
+    // Clean/warn verdict: no break-glass token needed, approve straight
+    // through. submitApprove() takes no args (it reads the dialog token
+    // field), so calling it here would only warn "paste the token first".
+    submitApproveNoToken(id);
     return;
   }
   pendingApproveId = id;

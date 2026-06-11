@@ -83,13 +83,14 @@ async function load(ev) {
         <pre>${JSON.stringify(p.impact_report, null, 2)}</pre>
       </details>
       <div class="actions">
-        <button onclick="decide('${p.id}','approve')" class="primary">Approve</button>
-        <button onclick="decide('${p.id}','reject')" class="danger">Reject</button>
+        <button onclick="decide('${p.id}','approve')" class="primary" data-required-role="operator">Approve</button>
+        <button onclick="decide('${p.id}','reject')" class="danger" data-required-role="operator">Reject</button>
       </div>
       <div data-comment-thread data-target="${p.id}" data-mount="plan:${p.id}"></div>
     </div>`;
   }
   out.innerHTML = html;
+  MnemosUI.gateByRole(out);
   setTimeout(() => {
     document.querySelectorAll('[data-mount^="plan:"]').forEach((el) => {
       if (el._mnemosMounted) return;

@@ -30,6 +30,17 @@ def _bootstrap_env(db_path: str) -> None:
     # Docker, so Python projects get verified deterministic extraction in
     # the basic config instead of the inferred Claude-Code fallback.
     os.environ.setdefault("MNEMOS_INREPO_ANALYZERS", "1")
+    # Docker-free local mode is the "zero external services" trial path.
+    # The Claude Agent SDK extractor (path 2) spawns the bundled Claude
+    # Code CLI per summary and waits up to 60s for it before falling back
+    # to the deterministic stub — without a Claude Code subscription /
+    # network that timeout fires on *every* L1/L2/L3 summary, so an
+    # analysis run appears to hang at the l1_summaries stage for minutes.
+    # Default the Agent SDK off here so local-mode analysis completes
+    # fast with deterministic stub summaries. An operator who wants the
+    # real LLM can still set ANTHROPIC_API_KEY (path 1, unaffected) or
+    # re-enable the Agent SDK with MNEMOS_DISABLE_AGENT_SDK=0.
+    os.environ.setdefault("MNEMOS_DISABLE_AGENT_SDK", "1")
     # Local dev/eval is not production; this also keeps the PR-97
     # placeholder-SECRET_KEY guard from firing on a generated key.
     os.environ.setdefault("MNEMOS_ENV", "local")

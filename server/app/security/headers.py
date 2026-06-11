@@ -18,9 +18,10 @@ HTTPS deployment expects:
   Recognition still runs server-side/local — only the *capture* happens
   in the browser, so this grants nothing to a third party.
 * ``Content-Security-Policy`` — tight default. Lets the dashboard
-  load its own CSS / JS and the htmx CDN; blocks everything else.
-  Operators can override via ``MNEMOS_CSP`` if they self-host
-  htmx.
+  load its own self-hosted CSS / JS (ui.js, mermaid, exceljs all
+  live under /static) and blocks everything else — no third-party
+  origins, so the platform works fully air-gapped. Operators can
+  override via ``MNEMOS_CSP``.
 
 The middleware is intentionally permissive on dev (no HSTS, looser
 CSP if ``MNEMOS_CSP_DEV=true``) so an operator running the stack
@@ -38,7 +39,7 @@ from starlette.responses import Response
 
 _DEFAULT_CSP = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' https://unpkg.com; "
+    "script-src 'self' 'unsafe-inline'; "
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: https:; "
     "font-src 'self' data:; "
@@ -78,8 +79,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault("Permissions-Policy", _PERMISSIONS_POLICY)
 
-        # CSP — overridable via env so an operator on an air-gapped
-        # network without https://unpkg.com can self-host htmx.
+        # CSP — overridable via env (MNEMOS_CSP) for operators who add
+        # their own first-party assets. The default is 'self'-only.
         csp = os.environ.get("MNEMOS_CSP", _DEFAULT_CSP)
         response.headers.setdefault("Content-Security-Policy", csp)
 

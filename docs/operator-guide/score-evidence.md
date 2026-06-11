@@ -151,3 +151,26 @@ Tests reality) 병렬 감사를 돌린 결과, 자칭 90.7 vs 실측 ~70 의
   used 외에 외부 증거 무
 - embedding provider 설정 + pgvector 미설치 시 silent BM25 강등
 - Org-scope retrofit Phase C-1b (auth/org_scope.py:10-14 TODO)
+
+## 자율 라운드 PR-158~159 (docker-free 운영 결함 2건, 실행으로 발견)
+
+이 두 라운드는 **추측이 아니라 docker-free 인스턴스를 실제로 띄워**
+핵심 플로우를 끝까지 행사해 발견한 결함을 닫는다.
+
+| PR | 영역 | 발견 (실행 증거) | 점수 |
+|----|------|-----------------|------|
+| 158 | 운영검증(배포) | `serve_local` 로 부팅 후 analysis run 이 stage 18 `l1_summaries` 에서 60s+ stall — Agent SDK 가 매 요약마다 번들 Claude CLI 를 spawn 하고 60s timeout 대기. 로컬 모드 기본 `MNEMOS_DISABLE_AGENT_SDK=1` 로 **run 3s 완주**(stub 요약 + fallback_reason 영속) | 78→86 |
+| 159 | OTLP runtime | `/otlp/v1/traces` 수신·scrub 은 정상이나 `reconcile_observations` 가 관측을 그래프에 못 붙임 — 라우트가 `edge.data` 가 아니라 **contract 노드 id** 에 있어서 표준 EXPOSES/CALLS 엣지가 영구 unmatched. `_operation_from_node_id` 로 노드 id 경로 매칭 추가 → **matched 0→1**, `exercised/hit_count/last_seen` 영속 | 75→86 |
+
+검증: 양 라운드 모두 격리 실행으로 fix 전/후 차이 실측. 게이트 매 라운드
+GREEN (ruff 0, pytest not-integration GREEN, mypy 69 불변, boot ready 200).
+
+갱신 가중평균(해당 영역만 반영): 운영검증 0.07×(+0.8) + OTLP 0.03×(+1.1)
+≈ +0.09 → **약 90.8/100**. 나머지 차원 불변.
+
+### 158 이 닫은 honest 격차
+
+위 "남아있는 honest 격차" 의 *"LLM extractor agent-sdk timeout 시 stub
+fallback 가 silent"* 는 로컬 모드에선 더 이상 발생하지 않는다 — Agent SDK
+경로 자체가 기본 off 라 timeout 이 없고, stub 은 `fallback_reason=no_backend`
+로 즉시·명시적으로 기록된다. (운영자가 명시적으로 켜면 종전 동작 유지.)

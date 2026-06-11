@@ -53,6 +53,32 @@ async def resolve_project_org(
     return row
 
 
+async def resolve_run_org(
+    session: "AsyncSession", run_id: uuid.UUID
+) -> tuple[bool, uuid.UUID | None]:
+    """Resolve the organisation that owns an analysis run.
+
+    Returns ``(found, org_id)``. ``found`` is False when no run with that
+    id exists, so callers can return 404 without leaking whether the id
+    is real-but-foreign vs. nonexistent.
+    """
+    from sqlalchemy import select
+
+    from app.models.graph import AnalysisRun
+    from app.models.projects import Project
+
+    row = (
+        await session.execute(
+            select(Project.organization_id)
+            .join(AnalysisRun, AnalysisRun.project_id == Project.id)
+            .where(AnalysisRun.id == run_id)
+        )
+    ).one_or_none()
+    if row is None:
+        return False, None
+    return True, row[0]
+
+
 def require_project_org():
     """FastAPI dependency: 404 when the project sits in a different org.
 
@@ -70,6 +96,32 @@ def require_project_org():
     ) -> "User":
         org_id = await resolve_project_org(db, project_id)
         if not same_org(user, org_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
+        return user
+
+    return _dep
+
+
+def require_run_org():
+    """FastAPI dependency for endpoints addressed by ``run_id`` instead of
+    ``project_id`` (the analysis-run read/cancel/SSE/stages routes).
+
+    Resolves the run's owning organisation and 404s on a cross-tenant or
+    unknown run — same "404 never leaks existence" contract as
+    ``require_project_org``. Without this, a user in org A could read or
+    cancel org B's runs just by knowing the run UUID (which appears in SSE
+    URLs and audit logs).
+    """
+    from app.auth.deps import current_user
+    from app.db import get_session
+
+    async def _dep(
+        run_id: uuid.UUID,
+        user: "User" = Depends(current_user),
+        db=Depends(get_session),
+    ) -> "User":
+        found, org_id = await resolve_run_org(db, run_id)
+        if not found or not same_org(user, org_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not_found")
         return user
 
