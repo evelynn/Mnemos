@@ -64,7 +64,8 @@ def test_phrase_book_covers_every_page_h1():
 
 def test_admin_sidebar_section_is_translatable():
     body = _read(_TPL / "_layout.html")
-    assert 'data-i18n="Admin"' in body
+    # PR-168 folded the admin links into the "More" group (no separate
+    # "Admin" header), but the admin items themselves stay translatable.
     assert 'data-i18n="Organizations"' in body
     assert 'data-i18n="SSO / OIDC"' in body
     assert 'data-i18n="GDPR tools"' in body

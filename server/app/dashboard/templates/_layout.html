@@ -47,36 +47,56 @@
         </div>
       </div>
     </div>
+    {% set _analysis_tabs = ['analysis', 'data', 'graph', 'findings', 'report'] %}
+    {% set _more_tabs = ['plans', 'diffs', 'audit', 'health', 'settings', 'profile', 'docs', 'users', 'organizations', 'sso', 'gdpr'] %}
     <nav>
-      <div class="nav-section" data-i18n="Explore">Explore</div>
       <a href="/" class="{% if active_tab == 'dashboard' %}active{% endif %}" data-i18n="Dashboard">Dashboard</a>
       <a href="/projects" class="{% if active_tab == 'projects' %}active{% endif %}" data-i18n="Projects">Projects</a>
       <a href="/ask" class="{% if active_tab == 'ask' %}active{% endif %}" data-i18n="Ask">Ask</a>
 
-      <div class="nav-section" data-i18n="Analysis">Analysis</div>
-      <a href="/analysis" class="{% if active_tab == 'analysis' %}active{% endif %}" data-i18n="Analysis">Analysis</a>
-      <a href="/data" class="{% if active_tab == 'data' %}active{% endif %}" data-i18n="Data">Data</a>
-      <a href="/graph" class="{% if active_tab == 'graph' %}active{% endif %}" data-i18n="Graph">Graph</a>
-      <a href="/findings" class="{% if active_tab == 'findings' %}active{% endif %}" data-i18n="Findings">Findings</a>
-      <a href="/report" class="{% if active_tab == 'report' %}active{% endif %}" data-i18n="Report">Report</a>
+      <div class="nav-group{% if active_tab in _analysis_tabs %} open{% endif %}" data-group="analysis">
+        <button type="button" class="nav-group-toggle"
+                aria-expanded="{{ 'true' if active_tab in _analysis_tabs else 'false' }}">
+          <span data-i18n="Analysis">Analysis</span>
+          <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
+          </svg>
+        </button>
+        <div class="nav-group-items">
+          <a href="/analysis" class="{% if active_tab == 'analysis' %}active{% endif %}" data-i18n="Runs">Runs</a>
+          <a href="/data" class="{% if active_tab == 'data' %}active{% endif %}" data-i18n="Data">Data</a>
+          <a href="/graph" class="{% if active_tab == 'graph' %}active{% endif %}" data-i18n="Graph">Graph</a>
+          <a href="/findings" class="{% if active_tab == 'findings' %}active{% endif %}" data-i18n="Findings">Findings</a>
+          <a href="/report" class="{% if active_tab == 'report' %}active{% endif %}" data-i18n="Report">Report</a>
+        </div>
+      </div>
 
-      <div class="nav-section" data-i18n="Governance">Governance</div>
-      <a href="/plans" class="{% if active_tab == 'plans' %}active{% endif %}" data-i18n="Plans">Plans</a>
-      <a href="/diffs" class="{% if active_tab == 'diffs' %}active{% endif %}" data-i18n="Diffs">Diffs</a>
-
-      <div class="nav-section" data-i18n="System">System</div>
-      <a href="/audit" class="{% if active_tab == 'audit' %}active{% endif %}" data-i18n="Audit">Audit</a>
-      <a href="/health" class="{% if active_tab == 'health' %}active{% endif %}" data-i18n="Health">Health</a>
-      <a href="/settings" class="{% if active_tab == 'settings' %}active{% endif %}" data-i18n="Settings">Settings</a>
-      <a href="/profile" class="{% if active_tab == 'profile' %}active{% endif %}" data-i18n="Profile">Profile</a>
-      <a href="/docs" class="{% if active_tab == 'docs' %}active{% endif %}" data-i18n="Docs">Docs</a>
-      {% if user.role == 'admin' %}
-      <div class="nav-section" data-i18n="Admin">Admin</div>
-      <a href="/users" class="{% if active_tab == 'users' %}active{% endif %}" data-i18n="Users">Users</a>
-      <a href="/organizations" class="{% if active_tab == 'organizations' %}active{% endif %}" data-i18n="Organizations">Organizations</a>
-      <a href="/sso" class="{% if active_tab == 'sso' %}active{% endif %}" data-i18n="SSO / OIDC">SSO / OIDC</a>
-      <a href="/gdpr" class="{% if active_tab == 'gdpr' %}active{% endif %}" data-i18n="GDPR tools">GDPR tools</a>
-      {% endif %}
+      <div class="nav-group{% if active_tab in _more_tabs %} open{% endif %}" data-group="more">
+        <button type="button" class="nav-group-toggle"
+                aria-expanded="{{ 'true' if active_tab in _more_tabs else 'false' }}">
+          <span data-i18n="More">More</span>
+          <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
+          </svg>
+        </button>
+        <div class="nav-group-items">
+          <a href="/plans" class="{% if active_tab == 'plans' %}active{% endif %}" data-i18n="Plans">Plans</a>
+          <a href="/diffs" class="{% if active_tab == 'diffs' %}active{% endif %}" data-i18n="Diffs">Diffs</a>
+          <a href="/audit" class="{% if active_tab == 'audit' %}active{% endif %}" data-i18n="Audit">Audit</a>
+          <a href="/health" class="{% if active_tab == 'health' %}active{% endif %}" data-i18n="Health">Health</a>
+          <a href="/settings" class="{% if active_tab == 'settings' %}active{% endif %}" data-i18n="Settings">Settings</a>
+          <a href="/profile" class="{% if active_tab == 'profile' %}active{% endif %}" data-i18n="Profile">Profile</a>
+          <a href="/docs" class="{% if active_tab == 'docs' %}active{% endif %}" data-i18n="Docs">Docs</a>
+          {% if user.role == 'admin' %}
+          <a href="/users" class="{% if active_tab == 'users' %}active{% endif %}" data-i18n="Users">Users</a>
+          <a href="/organizations" class="{% if active_tab == 'organizations' %}active{% endif %}" data-i18n="Organizations">Organizations</a>
+          <a href="/sso" class="{% if active_tab == 'sso' %}active{% endif %}" data-i18n="SSO / OIDC">SSO / OIDC</a>
+          <a href="/gdpr" class="{% if active_tab == 'gdpr' %}active{% endif %}" data-i18n="GDPR tools">GDPR tools</a>
+          {% endif %}
+        </div>
+      </div>
     </nav>
     <form method="post" action="/logout" class="logout-form">
       <span class="muted">{{ user.username }}</span>
@@ -205,6 +225,33 @@
         } catch (_) {}
         markActive(pref);
       });
+    }
+  });
+
+  // PR-168 — collapsible sidebar groups (Analysis + More). The nav now
+  // shows just the core links plus two foldable groups, instead of 15
+  // flat items. The group holding the current page is opened by the
+  // server (the ``open`` class); for the rest, honour the operator's
+  // last expand/collapse choice so it sticks across page loads.
+  document.addEventListener("DOMContentLoaded", function () {
+    var groups = document.querySelectorAll(".nav-group");
+    for (var i = 0; i < groups.length; i++) {
+      (function (group) {
+        var key = "mnemos_nav_" + group.getAttribute("data-group");
+        var toggle = group.querySelector(".nav-group-toggle");
+        if (!toggle) return;
+        var open = group.classList.contains("open");  // server: active group
+        if (!open) {
+          try { open = localStorage.getItem(key) === "1"; } catch (_) {}
+        }
+        group.classList.toggle("open", open);
+        toggle.setAttribute("aria-expanded", open ? "true" : "false");
+        toggle.addEventListener("click", function () {
+          var now = group.classList.toggle("open");
+          toggle.setAttribute("aria-expanded", now ? "true" : "false");
+          try { localStorage.setItem(key, now ? "1" : "0"); } catch (_) {}
+        });
+      })(groups[i]);
     }
   });
 </script>

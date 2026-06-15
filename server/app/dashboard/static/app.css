@@ -1217,6 +1217,23 @@ h3 { font-size: 1rem; font-weight: 600; }
   font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.07em;
   font-weight: 600; color: var(--text-muted); margin: var(--sp-4) 0.6rem var(--sp-1);
 }
+
+/* PR-168 — collapsible nav groups (Analysis / More) so the sidebar
+   shows the core links plus two folds, not 15 flat items. */
+.nav-group { margin-top: var(--sp-2); }
+.nav-group-toggle {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%; background: none; border: 0; cursor: pointer;
+  font-family: inherit; font-size: 0.68rem; text-transform: uppercase;
+  letter-spacing: 0.07em; font-weight: 600; color: var(--text-muted);
+  padding: 0.4rem 0.6rem; border-radius: var(--radius-md);
+}
+.nav-group-toggle:hover { color: var(--text); background: var(--surface-alt); }
+.nav-group-toggle .chev { opacity: 0.65; transition: transform 0.15s ease; flex: none; }
+.nav-group.open > .nav-group-toggle .chev { transform: rotate(90deg); }
+.nav-group:not(.open) > .nav-group-items { display: none; }
+.nav-group-items { display: flex; flex-direction: column; gap: 2px; }
+.nav-group-items a { padding-left: 1.1rem; }
 .logout-form { border-top: 1px solid var(--border); padding-top: var(--sp-3); margin-top: var(--sp-3); }
 .logout-form button {
   background: var(--surface); color: var(--text); border: 1px solid var(--border);

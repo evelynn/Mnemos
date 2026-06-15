@@ -1683,6 +1683,8 @@
     "Explore": "탐색",
     "Governance": "거버넌스",
     "System": "시스템",
+    "More": "더보기",
+    "Runs": "실행",
     "Narrative summaries need an LLM — not configured in local mode.":
       "내러티브 요약은 LLM이 필요합니다 — 로컬 모드에서는 미설정.",
     "No nodes of that kind — showing the full graph instead.":
