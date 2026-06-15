@@ -6,7 +6,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, union_all, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
@@ -310,12 +310,35 @@ async def graph_component_map(
     or for the "everything" overview).
     """
     limit = max(10, min(limit, 1000))
-    node_stmt = select(Node).where(
-        Node.project_id == project_id, Node.valid_to.is_(None)
+    # Rank nodes by graph degree (number of edges touching them) so a
+    # truncated view shows the connected hubs, not an arbitrary
+    # id-ordered slice that renders as a disconnected dot-cloud (a
+    # single-repo Symbol graph put 200 unrelated nodes on screen with
+    # one edge). Degree is one pass over the project's edges (cheap),
+    # joined onto the node rows; un-connected nodes (degree 0) sort last.
+    endpoints = union_all(
+        select(Edge.source_id.label("nid")).where(
+            Edge.project_id == project_id, Edge.valid_to.is_(None)
+        ),
+        select(Edge.target_id.label("nid")).where(
+            Edge.project_id == project_id, Edge.valid_to.is_(None)
+        ),
+    ).subquery()
+    degree = (
+        select(endpoints.c.nid.label("nid"), func.count().label("deg"))
+        .group_by(endpoints.c.nid)
+        .subquery()
+    )
+    node_stmt = (
+        select(Node)
+        .outerjoin(degree, degree.c.nid == Node.id)
+        .where(Node.project_id == project_id, Node.valid_to.is_(None))
     )
     if kind:
         node_stmt = node_stmt.where(Node.kind == kind)
-    node_stmt = node_stmt.order_by(Node.id).limit(limit)
+    node_stmt = node_stmt.order_by(
+        func.coalesce(degree.c.deg, 0).desc(), Node.id
+    ).limit(limit)
     nodes = (await db.execute(node_stmt)).scalars().all()
     node_ids = {n.id for n in nodes}
 

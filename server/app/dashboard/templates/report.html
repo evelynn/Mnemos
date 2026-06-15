@@ -137,6 +137,18 @@
 </style>
 
 <script>
+// Local mode (no LLM) writes "[stub L3] … summarised from N evidence
+// rows" placeholders instead of a real narrative. Surface a clean note
+// rather than leaking the stub marker into the executive report.
+function summaryHtml(s) {
+  const t = (s || "").trim();
+  if (!t || t.startsWith("[stub")) {
+    return '<span class="muted" data-i18n="Narrative summaries need an LLM — not configured in local mode.">'
+      + 'Narrative summaries need an LLM — not configured in local mode.</span>';
+  }
+  return escapeHtml(t);
+}
+
 async function buildReport(ev) {
   ev && ev.preventDefault();
   const pid = document.getElementById("rpid").value.trim();
@@ -217,7 +229,7 @@ async function buildReport(ev) {
   document.getElementById("rp-l3").innerHTML = l3.length
     ? l3.map(item => `<div class="l3-item">
         <h4>${escapeHtml(item.target_id || "system")}</h4>
-        <p>${escapeHtml(item.summary || "")}</p>
+        <p>${summaryHtml(item.summary)}</p>
         ${(item.open_questions || []).length
           ? "<p class=\"muted\"><strong>" + escapeHtml(MnemosUI.t("Open questions:"))
             + "</strong> " + item.open_questions.map(escapeHtml).join("; ") + "</p>"
@@ -247,7 +259,7 @@ async function buildReport(ev) {
           : "";
         return `<div class="l3-item">
           <h4>${escapeHtml((f.target_id || "flow").replace(/^flow:/, ""))}</h4>
-          <p>${escapeHtml(f.summary || "")}</p>
+          <p>${summaryHtml(f.summary)}</p>
           ${stepsHtml}${flagsHtml}
         </div>`;
       }).join("")

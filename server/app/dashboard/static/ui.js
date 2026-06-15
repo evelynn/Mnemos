@@ -1683,6 +1683,10 @@
     "Explore": "탐색",
     "Governance": "거버넌스",
     "System": "시스템",
+    "Narrative summaries need an LLM — not configured in local mode.":
+      "내러티브 요약은 LLM이 필요합니다 — 로컬 모드에서는 미설정.",
+    "No nodes of that kind — showing the full graph instead.":
+      "해당 종류의 노드가 없어 — 전체 그래프를 표시합니다.",
     "Sign out": "로그아웃",
     // PR-38 — user management + profile.
     "Profile": "프로필",
