@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analyzers.registry import analyzer_available, runner_for
@@ -28,7 +28,7 @@ from app.merge.contract_id import http_contract_id
 from app.merge.findings import run_all as rebuild_findings
 from app.merge.runtime import reconcile_observations
 from app.merge.writer import upsert_edge, upsert_node
-from app.models.graph import AnalysisRun, Node
+from app.models.graph import AnalysisRun, Edge, Node
 from app.models.projects import Project
 from app.orchestrator.progress import ProgressBus
 from app.orchestrator.stages import StageTracker
@@ -516,6 +516,52 @@ async def _run_db_live_schema_stages(
     return position
 
 
+async def _graph_inventory(
+    session: AsyncSession, project_id: uuid.UUID
+) -> dict[str, int]:
+    """Distinct current-graph entity counts (rows with ``valid_to IS NULL``).
+
+    ``run.stats`` historically carried ``totals`` — the number of ingest
+    *records* — which double-counts any symbol/contract/data-entity that is
+    referenced from several sites. A table named in six SQL statements
+    ingests six ``data_entity`` records but is a single node; a route handler
+    re-emitted per call site inflates the contract count. A dogfood run on a
+    real Next.js app reported 66 data entities / 63 contracts where the true
+    distinct graph held 34 / 47 (data entities ~2x inflated). Report the
+    distinct current nodes/edges so the operator-facing headline matches the
+    graph that queries actually traverse.
+    """
+    inv: dict[str, int] = {}
+    for kind, key in (
+        ("Symbol", "symbols"),
+        ("Contract", "contracts"),
+        ("DataEntity", "data_entities"),
+    ):
+        inv[key] = int(
+            (
+                await session.execute(
+                    select(func.count(func.distinct(Node.id))).where(
+                        Node.project_id == project_id,
+                        Node.kind == kind,
+                        Node.valid_to.is_(None),
+                    )
+                )
+            ).scalar()
+            or 0
+        )
+    inv["edges"] = int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(Edge)
+                .where(Edge.project_id == project_id, Edge.valid_to.is_(None))
+            )
+        ).scalar()
+        or 0
+    )
+    return inv
+
+
 async def run_ingest(
     ctx: dict,
     project_id_str: str,
@@ -685,19 +731,23 @@ async def run_ingest(
 
         completed = datetime.now(tz=timezone.utc)
         async with SessionLocal() as session:
+            # Headline stats = distinct current graph, not raw ingest-record
+            # counts. ``totals`` double-counts any entity referenced from
+            # several sites; overlay the true distinct node/edge counts.
+            final_stats = {**totals, **await _graph_inventory(session, project_id)}
             await _set_run_status(
                 session,
                 run_id,
                 status="completed",
                 completed_at=completed,
-                stats=totals,
+                stats=final_stats,
             )
         await audit_record(
             actor="system",
             action="analysis.completed",
             target=str(run_id),
             project_id=project_id,
-            details=totals,
+            details=final_stats,
         )
         try:
             from app.obs.metrics import analysis_runs_total
@@ -705,7 +755,7 @@ async def run_ingest(
             analysis_runs_total.labels(status="completed").inc()
         except Exception:
             pass
-        await bus.publish(run_id, {"event": "run_completed", **totals})
+        await bus.publish(run_id, {"event": "run_completed", **final_stats})
     except Exception as exc:  # noqa: BLE001
         log.exception("run_ingest failed")
         async with SessionLocal() as session:

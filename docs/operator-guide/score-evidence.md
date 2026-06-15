@@ -210,3 +210,23 @@ Windows-환경(= PR-160 베이스라인 동일집합·회귀 0), boot ready 200.
 
 남은 관련 격차(후속 후보): `list_submissions_filtered` 의 verdict 필터도 동일 dict 가정
 (대시보드 카운트, Low); approve 재승인 멱등 가드 부재.
+
+## 자율 라운드 PR-162 (dogfood로 발견한 run.stats 과대계수 — 그래프 데이터 품질)
+
+Mnemos를 **실제 외부 프로젝트**(Smart-AI-Report-V4, Next.js 343파일/57.6k LoC)에 dogfood로
+돌려 발견. `run.stats`가 distinct 현재 그래프가 아니라 ingest 레코드 수(`totals`)를 보고해,
+여러 곳에서 참조되는 엔티티가 중복 계수됐다.
+
+| PR | 영역 | 발견 (dogfood 실측) | 점수 |
+|----|------|--------------------|------|
+| 162 | 그래프 데이터 품질 | Smart-AI-Report-V4 실분석: run.stats가 data_entities **66**/contracts **63**/edges **10826** 보고했으나 distinct 현재 그래프는 **34**/**47**/**7808**(테이블이 6개 SQL문에서 참조되면 6번 계수). `_graph_inventory`로 완료 시 distinct 현재 노드/엣지를 보고. temporal upsert·totals·진행률 불변 | 88→89 |
+
+검증: 실제 run_ingest 재실행으로 fix 전(1816/63/66/10826)→후(1768/47/34/7808) 실측. 단위테스트
+mutation 내장(totals=3 vs inventory=1). 게이트 GREEN(ruff 0, mypy 68 불변, pytest not-integration
+1568 pass / 19 사전존재 Windows-환경=PR-161 동일집합·회귀 0).
+
+갱신 가중평균: 그래프품질 0.08×(+0.1) → +0.008 → 약 **91.3/100**. 나머지 차원 불변.
+
+남은 dogfood 후속(검증됨): DataEntity 시스템카탈로그/키워드 FP 필터(sqlite_master/dual/set 등,
+PR-163 후보); ggoss-ts EXPOSES 엣지 부재로 duplicate_endpoint+OTLP reconcile TS 무발화(PR-164);
+finding taxonomy에 보안·인가·로직 룰 부재(0 findings, 설계 논의).
