@@ -14,7 +14,27 @@ from app.models.auth import User
 
 _settings = get_settings()
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
+_STATIC_DIR = Path(__file__).parent / "static"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+
+def _asset_url(path: str) -> str:
+    """Append the static file's mtime as a ``?v=`` cache-buster.
+
+    The static handler sends no ``Cache-Control``, so a browser that
+    cached an earlier ``app.css`` keeps showing the old design after a
+    redesign ships (PR-165 dogfood: the operator saw the pre-redesign
+    stylesheet). Keying the URL on mtime makes the browser refetch the
+    moment the file changes, with no manual version bump."""
+    name = path.rsplit("/", 1)[-1]
+    try:
+        v = int((_STATIC_DIR / name).stat().st_mtime)
+    except OSError:
+        return path
+    return f"{path}?v={v}"
+
+
+templates.env.globals["asset_url"] = _asset_url
 
 router = APIRouter(tags=["dashboard"])
 

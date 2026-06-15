@@ -1679,6 +1679,10 @@
     "SSO / OIDC": "SSO / OIDC",
     "GDPR tools": "GDPR 도구",
     "Admin": "관리자",
+    // PR-165 — sidebar section headers (Analysis/Admin already above).
+    "Explore": "탐색",
+    "Governance": "거버넌스",
+    "System": "시스템",
     "Sign out": "로그아웃",
     // PR-38 — user management + profile.
     "Profile": "프로필",

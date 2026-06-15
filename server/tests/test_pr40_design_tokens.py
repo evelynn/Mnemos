@@ -175,7 +175,9 @@ def test_pre_paint_theme_application_in_base_template():
     # The inline script must appear before the <link rel="stylesheet">
     # so the variable override is in place when the cascade applies.
     script_idx = body.find('localStorage.getItem("mnemos_theme")')
-    stylesheet_idx = body.find('href="/static/app.css"')
+    # The href is cache-busted via asset_url() (PR-165), so anchor on the
+    # stable rel="stylesheet" marker rather than the literal path.
+    stylesheet_idx = body.find('rel="stylesheet"')
     assert 0 < script_idx < stylesheet_idx
 
 
