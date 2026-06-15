@@ -110,6 +110,9 @@ async function loadFindings(ev) {
   if (sev) qs.set("severity", sev);
   if (st) qs.set("status", st);
   const r = await fetch(`/api/v1/projects/${pid}/findings?${qs}`);
+  // Guard: a 500/403 must not render as "No findings." — that would
+  // tell the operator the project is clean when the API actually failed.
+  if (!r.ok) { await MnemosUI.showError(MnemosUI.t("Could not load findings"), r); return false; }
   const rows = await r.json();
   // P2-9 onboarding step 3 — 8th-round audit B3: reaching the
   // findings view *at all* (with the form filled out) counts as

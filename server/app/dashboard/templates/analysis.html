@@ -128,6 +128,7 @@ async function loadRuns(ev) {
   ev.preventDefault();
   const pid = document.getElementById("rpid").value.trim();
   const r = await fetch(`/api/v1/projects/${pid}/analysis_runs`);
+  if (!r.ok) { await MnemosUI.showError(MnemosUI.t("Could not load runs"), r); return false; }
   let rows = await r.json();
   // P2-7 drill-down — apply client-side ``?status=`` / ``?since=24h``
   // filters when the dashboard sent us here with a specific question.

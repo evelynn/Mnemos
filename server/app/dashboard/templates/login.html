@@ -3,25 +3,25 @@
 {% block body %}
 <main class="login">
   <h1>Mnemos</h1>
-  <p class="subtitle">Knowledge Production Platform</p>
+  <p class="subtitle" data-i18n="Knowledge Production Platform">Knowledge Production Platform</p>
   <form method="post" action="/login" class="login-form">
     {% if error %}<p class="error">{{ error }}</p>{% endif %}
     <label>
-      Username
+      <span data-i18n="Username">Username</span>
       <input type="text" name="username" autocomplete="username" required autofocus />
     </label>
     <label>
-      Password
+      <span data-i18n="Password">Password</span>
       <input type="password" name="password" autocomplete="current-password" required />
     </label>
-    <button type="submit">Sign in</button>
+    <button type="submit" data-i18n="Sign in">Sign in</button>
   </form>
   <p class="subtitle">
     <a href="/forgot" data-i18n="Forgot password?">Forgot password?</a>
   </p>
   <p class="subtitle">
-    <a href="/api/v1/auth/oidc/login">Sign in with SSO</a>
-    <span class="muted"> (only if an OIDC provider is configured)</span>
+    <a href="/api/v1/auth/oidc/login" data-i18n="Sign in with SSO">Sign in with SSO</a>
+    <span class="muted" data-i18n="(only if an OIDC provider is configured)"> (only if an OIDC provider is configured)</span>
   </p>
 </main>
 <script>

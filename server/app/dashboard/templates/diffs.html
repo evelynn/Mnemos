@@ -168,10 +168,12 @@ async function load(ev) {
   const pid = document.getElementById("pid").value.trim();
   if (!pid) return false;
   const r = await fetch(`/api/v1/plans/${pid}/submissions`);
+  if (!r.ok) { await MnemosUI.showError(MnemosUI.t("Could not load submissions"), r); return false; }
   const rows = await r.json();
   const out = document.getElementById("out");
   if (!Array.isArray(rows) || rows.length === 0) {
-    out.innerHTML = '<p class="muted">No submissions for this plan.</p>';
+    out.innerHTML = '<p class="muted" data-i18n="No submissions for this plan.">No submissions for this plan.</p>';
+    MnemosUI.applyI18n(out);
     return false;
   }
   out.innerHTML = rows.map(renderSubmission).join("");

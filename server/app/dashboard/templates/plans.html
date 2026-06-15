@@ -63,33 +63,42 @@ async function load(ev) {
   ev.preventDefault();
   const pid = document.getElementById("pid").value.trim();
   const r = await fetch(`/api/v1/projects/${pid}/plans`);
+  // Guard the fetch — without this an HTTP 500/403 fell through to the
+  // "No plans yet." branch, making an API failure look like a clean
+  // project (audit finding). Surface the real error instead.
+  if (!r.ok) { await MnemosUI.showError(MnemosUI.t("Could not load plans"), r); return false; }
   const rows = await r.json();
   const out = document.getElementById("out");
   if (!Array.isArray(rows) || rows.length === 0) {
-    out.innerHTML = '<p class="muted">No plans yet.</p>';
+    out.innerHTML = '<p class="muted" data-i18n="No plans yet.">No plans yet.</p>';
+    MnemosUI.applyI18n(out);
     return false;
   }
+  // Every interpolated plan field is escaped — titles, motivations and
+  // the impact report are operator/agent-authored and were previously
+  // written into innerHTML raw (stored-XSS risk).
   let html = '';
   for (const p of rows) {
     html += `<div class="plan">
-      <h3>${p.spec.title ?? p.id} <span class="muted">${p.status}</span></h3>
-      <p>${p.spec.motivation ?? ""}</p>
+      <h3>${escapeHtml(p.spec.title ?? p.id)} <span class="muted">${escapeHtml(p.status)}</span></h3>
+      <p>${escapeHtml(p.spec.motivation ?? "")}</p>
       <details>
-        <summary>Tasks (${p.tasks.length})</summary>
-        <ul>${p.tasks.map(t => `<li><b>${t.id}</b>: ${t.title}</li>`).join("")}</ul>
+        <summary>${MnemosUI.t("Tasks")} (${p.tasks.length})</summary>
+        <ul>${p.tasks.map(t => `<li><b>${escapeHtml(t.id)}</b>: ${escapeHtml(t.title)}</li>`).join("")}</ul>
       </details>
       <details>
-        <summary>Impact</summary>
-        <pre>${JSON.stringify(p.impact_report, null, 2)}</pre>
+        <summary data-i18n="Impact">Impact</summary>
+        <pre>${escapeHtml(JSON.stringify(p.impact_report, null, 2))}</pre>
       </details>
       <div class="actions">
-        <button onclick="decide('${p.id}','approve')" class="primary" data-required-role="operator">Approve</button>
-        <button onclick="decide('${p.id}','reject')" class="danger" data-required-role="operator">Reject</button>
+        <button onclick="decide('${escapeHtml(p.id)}','approve')" class="primary" data-required-role="operator" data-i18n="Approve">Approve</button>
+        <button onclick="decide('${escapeHtml(p.id)}','reject')" class="danger" data-required-role="operator" data-i18n="Reject">Reject</button>
       </div>
-      <div data-comment-thread data-target="${p.id}" data-mount="plan:${p.id}"></div>
+      <div data-comment-thread data-target="${escapeHtml(p.id)}" data-mount="plan:${escapeHtml(p.id)}"></div>
     </div>`;
   }
   out.innerHTML = html;
+  MnemosUI.applyI18n(out);
   MnemosUI.gateByRole(out);
   setTimeout(() => {
     document.querySelectorAll('[data-mount^="plan:"]').forEach((el) => {
