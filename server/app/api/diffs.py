@@ -185,9 +185,14 @@ async def approve_submission(
     if plan.worktree_path is None:
         raise HTTPException(status_code=400, detail="plan_or_worktree_missing")
 
-    findings = submission.auto_review_findings or {}
-    verdict = findings.get("verdict") if isinstance(findings, dict) else None
-    if verdict == "blocked":
+    # Gate B veto (spec §2.5): a diff whose ultrareview verdict was
+    # ``blocked`` may only be approved by consuming a break-glass grant.
+    # ``status`` is the authoritative signal ``submit_diff`` sets; the
+    # ``auto_review_findings`` column holds the *list* of findings, not a
+    # ``{"verdict": ...}`` dict, so the old ``findings.get("verdict")``
+    # always read None and silently skipped this gate — a blocked diff
+    # could be approved with no token. Gate on status instead.
+    if submission.status == "blocked":
         token = body.break_glass_token if body else None
         if not token:
             raise HTTPException(

@@ -190,3 +190,23 @@ SQLite 쓰기 경합을 닫는다.
 베이스라인과 **동일집합 → 회귀 0**, docker-free boot ready 200. (Linux CI 에선 GREEN.)
 
 갱신 가중평균: 운영검증 0.07×(+0.2) ≈ +0.014 → **약 91.0/100**. 나머지 차원 불변.
+
+## 자율 라운드 PR-161 (Plan/Diff Gate-B 우회 결함 1건 — Critical 보안)
+
+Plan/Diff workflow(최저 차원 8.0)를 실측하던 중 발견한 **Critical 보안 우회**:
+approve 엔드포인트가 break-glass 게이트를 `auto_review_findings.get("verdict")`
+(dict 가정)로 검사했으나 `submit_diff` 는 findings 를 **list** 로 저장 → verdict 가
+항상 None → **blocked diff 가 토큰 없이 승인 가능**(§2.5 Gate-B 무력화).
+
+| PR | 영역 | 발견 (코드/테스트 증거) | 점수 |
+|----|------|-----------------------|------|
+| 161 | Plan/Diff workflow | approve 게이트가 list-형태 findings 에서 verdict=None 으로 읽혀 스킵 → blocked diff 가 토큰 없이 승인+MR 생성 도달. `submission.status` 권위 필드로 게이트 전환. 실 `submit_diff→approve` 회귀 테스트로 old 코드 우회 재현(토큰 없이 409 미발생). 기존 테스트는 dict-형 fixture / approve 미호출이라 우회를 놓침 | 80→85 |
+
+검증: 신규 회귀 테스트가 mutation check 통과(old "DID NOT RAISE" → fix 409). 게이트
+GREEN — ruff 0, mypy 69→68(-1, 신규 0), pytest not-integration 1567 pass / 19 사전존재
+Windows-환경(= PR-160 베이스라인 동일집합·회귀 0), boot ready 200.
+
+갱신 가중평균: Plan/Diff 0.05×(+0.5) ≈ +0.025 → **약 91.2/100**. 나머지 차원 불변.
+
+남은 관련 격차(후속 후보): `list_submissions_filtered` 의 verdict 필터도 동일 dict 가정
+(대시보드 카운트, Low); approve 재승인 멱등 가드 부재.
