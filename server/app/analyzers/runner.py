@@ -116,8 +116,9 @@ class AnalyzerRunner:
     ) -> AsyncIterator[RunRecord]:
         # Prefer the installed binary (production / docker). Fall back to the
         # in-repo Python source when it isn't on PATH (PR-153, docker-free).
-        if shutil.which(self.binary) is not None:
-            args = [self.binary, verb, str(path)]
+        resolved_binary = shutil.which(self.binary)
+        if resolved_binary is not None:
+            args = [resolved_binary, verb, str(path)]
         else:
             script = inrepo_script(self.binary)
             args = (

@@ -193,6 +193,7 @@ async def _run_analyzer_stage(
     ) as stage:
         accept = _VERB_ACCEPT.get(verb, set())
         async with SessionLocal() as session:
+            pending_progress = 0
             async for rec in runner.run(verb, path):
                 if rec.stream == "stderr":
                     totals["errors"] += 1
@@ -207,8 +208,18 @@ async def _run_analyzer_stage(
                 )
                 after = sum(totals.values())
                 if after > before:
-                    await stage.increment(after - before)
+                    pending_progress += after - before
+                # SQLite local mode permits only one writer at a time. Commit
+                # graph rows before StageTracker opens its own progress-write
+                # session, otherwise local no-Docker analyses can fail with
+                # ``database is locked`` while the analyzer is streaming rows.
+                if pending_progress >= 50:
+                    await session.commit()
+                    await stage.increment(pending_progress)
+                    pending_progress = 0
             await session.commit()
+            if pending_progress:
+                await stage.increment(pending_progress)
         stage.set_stats({k: totals.get(k, 0) for k in ("symbols", "edges", "contracts", "data_entities")})
 
 

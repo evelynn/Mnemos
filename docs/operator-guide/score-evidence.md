@@ -174,3 +174,19 @@ GREEN (ruff 0, pytest not-integration GREEN, mypy 69 불변, boot ready 200).
 fallback 가 silent"* 는 로컬 모드에선 더 이상 발생하지 않는다 — Agent SDK
 경로 자체가 기본 off 라 timeout 이 없고, stub 은 `fallback_reason=no_backend`
 로 즉시·명시적으로 기록된다. (운영자가 명시적으로 켜면 종전 동작 유지.)
+
+## 자율 라운드 PR-160 (docker-free 쓰기 경합 결함 1건, 테스트로 발견·재현)
+
+PR-158/159 에 이어, 중단됐던 자율 라운드를 재개해 docker-free 결정적 분석 경로의
+SQLite 쓰기 경합을 닫는다.
+
+| PR | 영역 | 발견 (실행/테스트 증거) | 점수 |
+|----|------|-----------------------|------|
+| 160 | 운영검증(배포) | `_run_analyzer_stage` 가 분석기 세션(미커밋 = SQLite 쓰기 락)을 연 채 `stage.increment` 를 호출 → `StageTracker._flush` 의 별도 세션이 25행째에 충돌 → `database is locked`. PR-141 이 에이전트 스테이지에만 적용했던 commit-before-increment 를 결정적 분석 스테이지에 완성. docker-free in-repo ggoss-py(PR-153)가 실제 행을 추출하게 되며 발현. 결정적 회귀 테스트로 old 코드 실패(25행째 lock) 재현 | 86→88 |
+
+검증: 신규 회귀 테스트가 fix 전/후 차이 실측(25행째 `OperationalError` vs 120행 완주).
+게이트 GREEN — ruff 0, mypy 69(불변), pytest not-integration **1566 pass / 19 실패는
+사전존재 Windows-환경**(서브프로세스 cp949·WinError 193·node/dotnet·`/bin/true`)으로 HEAD
+베이스라인과 **동일집합 → 회귀 0**, docker-free boot ready 200. (Linux CI 에선 GREEN.)
+
+갱신 가중평균: 운영검증 0.07×(+0.2) ≈ +0.014 → **약 91.0/100**. 나머지 차원 불변.
