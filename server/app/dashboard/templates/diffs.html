@@ -81,27 +81,27 @@ document.querySelector(".lifecycle-section details")
 </script>
 
 <dialog id="grant-dialog" class="modal" aria-labelledby="grant-title">
-  <header><h2 id="grant-title">Issue break-glass grant</h2></header>
+  <header><h2 id="grant-title" data-i18n="Issue break-glass grant">Issue break-glass grant</h2></header>
   <div class="body">
-    <p class="muted">
+    <p class="muted" data-i18n="grant-dialog-blurb">
       Ultrareview will be re-run on the current diff. If the verdict is still
       <strong>blocked</strong> the grant will be refused. The rationale is
       stored verbatim in the audit log.
     </p>
-    <label for="grant-rationale">Rationale (≥ 200 chars)</label>
+    <label for="grant-rationale" data-i18n="Rationale (≥ 200 chars)">Rationale (≥ 200 chars)</label>
     <textarea id="grant-rationale" required minlength="200" aria-invalid="true" autofocus></textarea>
-    <p id="grant-counter" class="counter">0 / 200 chars</p>
+    <p id="grant-counter" class="counter" data-i18n="0 / 200 chars">0 / 200 chars</p>
   </div>
   <menu>
-    <button type="button" onclick="MnemosUI.closeDialog('grant-dialog')">Cancel</button>
-    <button type="button" id="grant-submit" class="primary" onclick="submitGrant()" disabled>Issue grant</button>
+    <button type="button" onclick="MnemosUI.closeDialog('grant-dialog')" data-i18n="Cancel">Cancel</button>
+    <button type="button" id="grant-submit" class="primary" onclick="submitGrant()" disabled data-i18n="Issue grant">Issue grant</button>
   </menu>
 </dialog>
 
 <dialog id="token-dialog" class="modal" aria-labelledby="token-title" onclose="dismissTokenDialog()">
-  <header><h2 id="token-title">Break-glass token issued</h2></header>
+  <header><h2 id="token-title" data-i18n="Break-glass token issued">Break-glass token issued</h2></header>
   <div class="body">
-    <p class="muted">
+    <p class="muted" data-i18n="token-dialog-blurb">
       Hand the <strong>token</strong> to a different operator out-of-band
       (Slack DM, voice call, etc). Send the <strong>share link</strong>
       separately — clicking it opens the approve dialog with the right
@@ -110,39 +110,39 @@ document.querySelector(".lifecycle-section details")
       Single-use. The initiator (you) cannot consume it.
     </p>
 
-    <label class="muted">Token (carries authority — copy via secure channel)</label>
+    <label class="muted" data-i18n="Token (carries authority — copy via secure channel)">Token (carries authority — copy via secure channel)</label>
     <div class="token-block">
       <code id="token-value"></code>
-      <button type="button" class="primary" onclick="copyTokenToClipboard()">Copy</button>
+      <button type="button" class="primary" onclick="copyTokenToClipboard()" data-i18n="Copy">Copy</button>
     </div>
 
-    <label class="muted" style="margin-top:0.8rem; display:block;">Share link (no authority — only loads the right form)</label>
+    <label class="muted" style="margin-top:0.8rem; display:block;" data-i18n="Share link (no authority — only loads the right form)">Share link (no authority — only loads the right form)</label>
     <div class="token-block">
       <input id="share-url" type="text" readonly aria-label="Shareable break-glass token URL" />
-      <button type="button" onclick="copyShareUrl()">Copy link</button>
+      <button type="button" onclick="copyShareUrl()" data-i18n="Copy link">Copy link</button>
     </div>
-    <p class="muted" style="font-size:0.8rem; margin:0.3rem 0 0;">
+    <p class="muted" style="font-size:0.8rem; margin:0.3rem 0 0;" data-i18n="share-url-blurb">
       The link contains the submission id and a 6-char grant fingerprint
       in the URL fragment, so it never reaches the server access log.
       Clear your browser history after the operator confirms.
     </p>
   </div>
   <menu>
-    <button type="button" onclick="dismissTokenDialog()">Close</button>
+    <button type="button" onclick="dismissTokenDialog()" data-i18n="Close">Close</button>
   </menu>
 </dialog>
 
 <dialog id="approve-dialog" class="modal" aria-labelledby="approve-title">
-  <header><h2 id="approve-title">Approve with break-glass token</h2></header>
+  <header><h2 id="approve-title" data-i18n="Approve with break-glass token">Approve with break-glass token</h2></header>
   <div class="body">
-    <p class="muted">Paste the token an admin issued for this submission.</p>
-    <label for="approve-token">Token</label>
+    <p class="muted" data-i18n="Paste the token an admin issued for this submission.">Paste the token an admin issued for this submission.</p>
+    <label for="approve-token" data-i18n="Token">Token</label>
     <input id="approve-token" type="text" autocomplete="off" spellcheck="false"
            oninput="this.value = this.value.trim()" />
   </div>
   <menu>
-    <button type="button" onclick="MnemosUI.closeDialog('approve-dialog')">Cancel</button>
-    <button type="button" class="primary" onclick="submitApprove()">Approve → MR</button>
+    <button type="button" onclick="MnemosUI.closeDialog('approve-dialog')" data-i18n="Cancel">Cancel</button>
+    <button type="button" class="primary" onclick="submitApprove()" data-i18n="Approve → MR">Approve → MR</button>
   </menu>
 </dialog>
 
@@ -193,7 +193,7 @@ async function loadFiltered(verdict) {
   const rows = r.ok ? await r.json() : [];
   const out = document.getElementById("out");
   if (!rows.length) {
-    out.innerHTML = `<p class="muted">No ${escapeHtml(verdict)} submissions in your organisation.</p>`;
+    out.innerHTML = `<p class="muted">${MnemosUI.t("No $1 submissions in your organisation.", { 1: escapeHtml(verdict) })}</p>`;
     return;
   }
   out.innerHTML = rows.map(renderSubmission).join("");
@@ -211,25 +211,25 @@ function renderSubmission(s) {
   let passHtml = "";
   for (const p of passes) {
     passHtml += `<details ${p.findings.length ? "open" : ""}>
-      <summary class="pass-header"><span>${p.position}. ${p.name}</span><span class="muted">${p.findings.length} finding${p.findings.length === 1 ? "" : "s"}${p.error ? " · error" : ""}</span></summary>
+      <summary class="pass-header"><span>${escapeHtml(String(p.position))}. ${escapeHtml(p.name)}</span><span class="muted">${p.findings.length} ${MnemosUI.t(p.findings.length === 1 ? "finding" : "findings")}${p.error ? ` · ${MnemosUI.t("error")}` : ""}</span></summary>
       ${p.error ? `<pre class="error">${escapeHtml(p.error)}</pre>` : ""}
       ${p.findings.map(renderFinding).join("")}
     </details>`;
   }
   const mrBadge = s.gitlab_mr_url ? `<p><a href="${s.gitlab_mr_url}" target="_blank">MR !${s.gitlab_mr_iid}</a></p>` : "";
-  const overrideHint = verdict === "blocked" ? " — needs break-glass grant" : "";
+  const overrideHint = verdict === "blocked" ? ` — ${MnemosUI.t("needs break-glass grant")}` : "";
   return `<section class="submission">
     <h3>
-      <span>Task ${s.task_id} <span class="muted">${s.status}</span></span>
-      <span class="verdict ${verdict}">${verdict}${overrideHint}</span>
+      <span>${MnemosUI.t("Task")} ${escapeHtml(String(s.task_id))} <span class="muted">${escapeHtml(s.status)}</span></span>
+      <span class="verdict ${verdict}">${escapeHtml(verdict)}${overrideHint}</span>
     </h3>
-    <details><summary>Diff</summary><pre>${escapeHtml(s.diff || "(empty)")}</pre></details>
+    <details><summary data-i18n="Diff">${MnemosUI.t("Diff")}</summary><pre>${escapeHtml(s.diff || "(empty)")}</pre></details>
     ${passHtml}
     ${mrBadge}
     <div class="actions">
-      ${verdict === 'blocked' && window.MNEMOS_USER_ROLE_HINT === 'admin' ? `<button onclick="issueGrant('${s.id}')">Issue break-glass grant (admin)</button>` : ""}
-      <button class="primary" data-required-role="operator" onclick="approve('${s.id}', ${verdict === 'blocked'})">${verdict === 'blocked' ? 'Approve with token' : 'Approve → MR'}</button>
-      <button class="danger" data-required-role="operator" onclick="reject('${s.id}')">Reject</button>
+      ${verdict === 'blocked' && window.MNEMOS_USER_ROLE_HINT === 'admin' ? `<button onclick="issueGrant('${s.id}')">${MnemosUI.t("Issue break-glass grant (admin)")}</button>` : ""}
+      <button class="primary" data-required-role="operator" onclick="approve('${s.id}', ${verdict === 'blocked'})">${verdict === 'blocked' ? MnemosUI.t("Approve with token") : MnemosUI.t("Approve → MR")}</button>
+      <button class="danger" data-required-role="operator" onclick="reject('${s.id}')" data-i18n="Reject">${MnemosUI.t("Reject")}</button>
     </div>
     <div data-comment-thread data-target="${s.id}" data-mount="diff_submission:${s.id}"></div>
   </section>`;
@@ -290,7 +290,7 @@ async function submitGrant() {
   const ta = document.getElementById("grant-rationale");
   const rationale = ta.value;
   if (rationale.length < 200) {
-    MnemosUI.showToast("Rationale must be at least 200 characters.", "warn");
+    MnemosUI.showToast(MnemosUI.t("Rationale must be at least 200 characters."), "warn");
     return;
   }
   const r = await fetch(`/api/v1/diff_submissions/${pendingGrantId}/break_glass_grant`, {
@@ -331,7 +331,7 @@ function showTokenDialog(payload) {
     document.getElementById("token-countdown").textContent = `${m}:${s}`;
     if (remaining === 0) {
       MnemosUI.closeDialog("token-dialog");
-      MnemosUI.showToast("Break-glass token expired.", "warn");
+      MnemosUI.showToast(MnemosUI.t("Break-glass token expired."), "warn");
       // dialog `onclose` fires dismissTokenDialog which clears the timer.
     }
   };
@@ -344,9 +344,9 @@ async function copyTokenToClipboard() {
   const token = document.getElementById("token-value").textContent;
   const ok = await MnemosUI.copyToClipboard(token);
   if (ok) {
-    MnemosUI.showToast("Token copied to clipboard.", "success");
+    MnemosUI.showToast(MnemosUI.t("Token copied to clipboard."), "success");
   } else {
-    MnemosUI.showToast("Copy failed — select the token manually and copy with Ctrl/Cmd-C.", "warn");
+    MnemosUI.showToast(MnemosUI.t("Copy failed — select the token manually and copy with Ctrl/Cmd-C."), "warn");
   }
 }
 
@@ -355,7 +355,7 @@ async function copyShareUrl() {
   if (!url) return;
   const ok = await MnemosUI.copyToClipboard(url);
   MnemosUI.showToast(
-    ok ? "Share link copied." : "Copy failed — select the URL manually.",
+    ok ? MnemosUI.t("Share link copied.") : MnemosUI.t("Copy failed — select the URL manually."),
     ok ? "success" : "warn",
   );
 }
@@ -382,7 +382,7 @@ async function maybeAutoLoadFromHash() {
   document.getElementById("approve-token").value = "";
   MnemosUI.showDialog("approve-dialog");
   MnemosUI.showToast(
-    `Loaded shared approval context (submission ${sid.slice(0,8)}…). Paste the token from the OOB channel.`,
+    MnemosUI.t("Loaded shared approval context (submission $1…). Paste the token from the OOB channel.", { 1: sid.slice(0, 8) }),
     "success",
   );
 }
@@ -425,7 +425,7 @@ function approve(id, blocked) {
 async function submitApprove() {
   const token = document.getElementById("approve-token").value.trim();
   if (!token) {
-    MnemosUI.showToast("Paste the break-glass token first.", "warn");
+    MnemosUI.showToast(MnemosUI.t("Paste the break-glass token first."), "warn");
     return;
   }
   MnemosUI.closeDialog("approve-dialog");
@@ -443,7 +443,7 @@ async function submitApproveRaw(id, token) {
     await MnemosUI.showError("Approve failed", r);
     return;
   }
-  MnemosUI.showToast("Approved — GitLab MR created.", "success");
+  MnemosUI.showToast(MnemosUI.t("Approved — GitLab MR created."), "success");
 }
 
 function submitApproveNoToken(id) { return submitApproveRaw(id, null); }
@@ -453,7 +453,7 @@ async function reject(id) {
     await MnemosUI.showError("Reject failed", r);
     return;
   }
-  MnemosUI.showToast("Submission rejected.", "success");
+  MnemosUI.showToast(MnemosUI.t("Submission rejected."), "success");
 }
 
 // PR-137 — Plan ID picker. Loads plans for the picker so the

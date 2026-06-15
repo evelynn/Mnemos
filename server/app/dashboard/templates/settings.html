@@ -4,8 +4,8 @@
 <header class="page-head"><h1 data-i18n="Settings">Settings</h1></header>
 
 <section>
-  <h2>Connections (Secrets)</h2>
-  <p class="muted">
+  <h2 data-i18n="Connections (Secrets)">Connections (Secrets)</h2>
+  <p class="muted" data-i18n="Encrypted at rest via the configured KMS backend. Only the metadata is ever returned by this API — the plaintext value is accessible only to the analyzer containers that need it.">
     Encrypted at rest via the configured KMS backend. Only the
     metadata is ever returned by this API — the plaintext value is
     accessible only to the analyzer containers that need it.
@@ -13,7 +13,7 @@
 
   {% if user.role == 'admin' %}
   <form onsubmit="return createSecret(event)">
-    <label><span data-i18n="Label">Label</span><input type="text" name="label" required placeholder="mssql-prod-orderdb" /></label>
+    <label><span data-i18n="Label">Label</span><input type="text" name="label" required data-i18n-placeholder="mssql-prod-orderdb" placeholder="mssql-prod-orderdb" /></label>
     <label><span data-i18n="Kind">Kind</span>
       <select name="kind" required>
         <option value="db_connection">db_connection</option>
@@ -23,81 +23,81 @@
       </select>
     </label>
     <label><span data-i18n="Value">Value</span><input type="password" name="value" required autocomplete="new-password" /></label>
-    <button type="submit" class="primary">Create secret</button>
+    <button type="submit" class="primary" data-i18n="Create secret">Create secret</button>
   </form>
   <pre id="secret-create-result" class="muted"></pre>
 
-  <button class="primary" onclick="loadSecrets()">Refresh list</button>
-  <div id="secrets-list"><p class="muted">Click refresh.</p></div>
+  <button class="primary" onclick="loadSecrets()" data-i18n="Refresh list">Refresh list</button>
+  <div id="secrets-list"><p class="muted" data-i18n="Click refresh.">Click refresh.</p></div>
   {% else %}
   <p class="muted"><em data-i18n="Secret management is admin-only.">Secret management is admin-only.</em></p>
   {% endif %}
 </section>
 
 <section id="project-dbs">
-  <h2>Project databases</h2>
-  <p class="muted">
+  <h2 data-i18n="Project databases">Project databases</h2>
+  <p class="muted" data-i18n="Per-project DB bindings carry sensitive_tables, masking_rules, allow_awr, and maintenance_windows (spec §12.2). The platform refuses to bind a credential that the analyzer's db_probe verb cannot prove is read-only.">
     Per-project DB bindings carry <code>sensitive_tables</code>,
     <code>masking_rules</code>, <code>allow_awr</code>, and
     <code>maintenance_windows</code> (spec §12.2). The platform refuses
     to bind a credential that the analyzer's <code>db_probe</code> verb
     cannot prove is read-only.
   </p>
-  <button class="primary" onclick="loadProjectDbs()">Load existing bindings</button>
-  <div id="project-dbs-box"><p class="muted">Click load.</p></div>
+  <button class="primary" onclick="loadProjectDbs()" data-i18n="Load existing bindings">Load existing bindings</button>
+  <div id="project-dbs-box"><p class="muted" data-i18n="Click load.">Click load.</p></div>
 
   {% if user.role == 'admin' %}
   <details style="margin-top:1rem;">
-    <summary><strong>Add a new binding</strong></summary>
+    <summary><strong data-i18n="Add a new binding">Add a new binding</strong></summary>
     <form id="pdb-create" onsubmit="return submitProjectDb(event)">
-      <label>Project
+      <label><span data-i18n="Project">Project</span>
         <select name="project_id" id="pdb-project" required></select>
       </label>
-      <label>Kind
+      <label><span data-i18n="Kind">Kind</span>
         <select name="kind" id="pdb-kind" required onchange="updateKindHint()">
           <option value="">— select —</option>
           <option value="oracle">Oracle</option>
           <option value="mssql">MSSQL</option>
         </select>
       </label>
-      <p id="pdb-kind-hint" class="muted" style="margin:0.25rem 0 0.5rem;">
+      <p id="pdb-kind-hint" class="muted" style="margin:0.25rem 0 0.5rem;" data-i18n="Select a kind to see the expected connection string format.">
         Select a kind to see the expected connection string format.
       </p>
-      <label>Display name
+      <label><span data-i18n="Display name">Display name</span>
         <input name="display_name" id="pdb-display" maxlength="200" required />
       </label>
-      <label>Component ID <span class="muted">(GitLab path or service-registry id)</span>
+      <label><span data-i18n="Component ID">Component ID</span> <span class="muted" data-i18n="(GitLab path or service-registry id)">(GitLab path or service-registry id)</span>
         <input name="component_id" id="pdb-component" maxlength="300" required />
       </label>
-      <label>Secret <span class="muted">(decrypted connection string source)</span>
+      <label><span data-i18n="Secret">Secret</span> <span class="muted" data-i18n="(decrypted connection string source)">(decrypted connection string source)</span>
         <select name="secret_id" id="pdb-secret">
           <option value="">— none (probe will fail) —</option>
         </select>
       </label>
       <p id="pdb-secret-hint" class="muted" style="margin:0.25rem 0 0.5rem;"></p>
-      <label><input type="checkbox" id="pdb-awr" /> Allow Oracle AWR queries</label>
-      <label>Sensitive tables <span class="muted">(one per line)</span>
+      <label><input type="checkbox" id="pdb-awr" /> <span data-i18n="Allow Oracle AWR queries">Allow Oracle AWR queries</span></label>
+      <label><span data-i18n="Sensitive tables">Sensitive tables</span> <span class="muted" data-i18n="(one per line)">(one per line)</span>
         <textarea id="pdb-sensitive" rows="3"></textarea>
       </label>
-      <label>Masking rules — full <span class="muted">(regex per line, redact entire column)</span>
+      <label><span data-i18n="Masking rules — full">Masking rules — full</span> <span class="muted" data-i18n="(regex per line, redact entire column)">(regex per line, redact entire column)</span>
         <textarea id="pdb-mask-full" rows="2"></textarea>
       </label>
-      <label>Masking rules — partial <span class="muted">(regex per line, redact most chars)</span>
+      <label><span data-i18n="Masking rules — partial">Masking rules — partial</span> <span class="muted" data-i18n="(regex per line, redact most chars)">(regex per line, redact most chars)</span>
         <textarea id="pdb-mask-partial" rows="2"></textarea>
       </label>
-      <label>Maintenance windows <span class="muted">(cron expression per line)</span>
+      <label><span data-i18n="Maintenance windows">Maintenance windows</span> <span class="muted" data-i18n="(cron expression per line)">(cron expression per line)</span>
         <textarea id="pdb-windows" rows="2" placeholder="0 2 * * *"></textarea>
       </label>
-      <button type="submit" class="primary">Register (with probe)</button>
+      <button type="submit" class="primary" data-i18n="Register (with probe)">Register (with probe)</button>
     </form>
   </details>
   {% endif %}
 </section>
 
 <dialog id="probe-fail-dialog" class="modal" aria-labelledby="probe-fail-title">
-  <header><h2 id="probe-fail-title">Probe failed — registration refused</h2></header>
+  <header><h2 id="probe-fail-title" data-i18n="Probe failed — registration refused">Probe failed — registration refused</h2></header>
   <div class="body">
-    <p class="muted">
+    <p class="muted" data-i18n="Spec §2.5 — the analyzer's db_probe verb did not confirm read-only access for this credential. Details below come straight from the analyzer; the binding has not been persisted.">
       Spec §2.5 — the analyzer's <code>db_probe</code> verb did not
       confirm read-only access for this credential. Details below come
       straight from the analyzer; the binding has <em>not</em> been
@@ -106,7 +106,7 @@
     <div id="probe-fail-detail"></div>
   </div>
   <menu>
-    <button type="button" onclick="MnemosUI.closeDialog('probe-fail-dialog')">Close</button>
+    <button type="button" onclick="MnemosUI.closeDialog('probe-fail-dialog')" data-i18n="Close">Close</button>
   </menu>
 </dialog>
 
@@ -145,44 +145,53 @@ async function loadSecrets() {
   }
   const rows = await r.json();
   if (!rows.length) {
-    out.innerHTML = '<p class="muted">No secrets stored.</p>';
+    out.innerHTML = `<p class="muted" data-i18n="No secrets stored.">${MnemosUI.t("No secrets stored.")}</p>`;
+    MnemosUI.applyI18n(out);
     return;
   }
   const isAdmin = {{ 'true' if user.role == 'admin' else 'false' }};
-  let html = '<table class="data"><thead><tr><th>Label</th><th>Kind</th><th>Created</th><th>Last tested</th><th>Test result</th><th></th></tr></thead><tbody>';
+  let html = `<table class="data"><thead><tr>`
+    + `<th data-i18n="Label">${MnemosUI.t("Label")}</th>`
+    + `<th data-i18n="Kind">${MnemosUI.t("Kind")}</th>`
+    + `<th data-i18n="Created">${MnemosUI.t("Created")}</th>`
+    + `<th data-i18n="Last tested">${MnemosUI.t("Last tested")}</th>`
+    + `<th data-i18n="Test result">${MnemosUI.t("Test result")}</th>`
+    + `<th></th>`
+    + `</tr></thead><tbody>`;
   for (const s of rows) {
     const actions = isAdmin
-      ? `<button onclick="testSecret('${s.id}')">Test</button>
-         <button onclick="deleteSecret('${s.id}','${s.label}')" class="danger">Delete</button>`
-      : '<span class="muted">read-only</span>';
+      ? `<button onclick="testSecret('${s.id}')" data-i18n="Test">${MnemosUI.t("Test")}</button>
+         <button onclick="deleteSecret('${s.id}','${escapeHtml(s.label)}')" class="danger" data-i18n="Delete">${MnemosUI.t("Delete")}</button>`
+      : `<span class="muted" data-i18n="read-only">${MnemosUI.t("read-only")}</span>`;
     html += `<tr>
-      <td><strong>${s.label}</strong></td>
-      <td><code>${s.kind}</code></td>
-      <td>${s.created_at}</td>
-      <td>${s.last_tested_at || '-'}</td>
-      <td>${s.last_test_result || '-'}</td>
+      <td><strong>${escapeHtml(s.label)}</strong></td>
+      <td><code>${escapeHtml(s.kind)}</code></td>
+      <td>${escapeHtml(s.created_at)}</td>
+      <td>${escapeHtml(s.last_tested_at || '-')}</td>
+      <td>${escapeHtml(s.last_test_result || '-')}</td>
       <td>${actions}</td>
     </tr>`;
   }
   html += "</tbody></table>";
   out.innerHTML = html;
+  MnemosUI.applyI18n(out);
 }
 
 async function testSecret(id) {
   const r = await fetch(`/api/v1/secrets/${id}/test`, {method: "POST"});
   if (r.ok) {
-    MnemosUI.showToast("Secret test passed.", "success");
+    MnemosUI.showToast(MnemosUI.t("Secret test passed."), "success");
   } else {
-    await MnemosUI.showError("Secret test failed", r);
+    await MnemosUI.showError(MnemosUI.t("Secret test failed"), r);
   }
   loadSecrets();
 }
 
 async function deleteSecret(id, label) {
-  if (!confirm(`Delete secret "${label}"?`)) return;
+  if (!confirm(MnemosUI.t("Delete secret \"$1\"?", {1: label}))) return;
   const r = await fetch(`/api/v1/secrets/${id}`, {method: "DELETE"});
   if (r.ok || r.status === 204) loadSecrets();
-  else await MnemosUI.showError("Delete failed", r);
+  else await MnemosUI.showError(MnemosUI.t("Delete failed"), r);
 }
 
 // ----------------------------------------------------------------------
@@ -197,7 +206,7 @@ const _PDB_HINTS = {
 function updateKindHint() {
   const kind = document.getElementById("pdb-kind").value;
   const el = document.getElementById("pdb-kind-hint");
-  el.innerHTML = _PDB_HINTS[kind] || "Select a kind to see the expected connection string format.";
+  el.innerHTML = _PDB_HINTS[kind] || MnemosUI.t("Select a kind to see the expected connection string format.");
 }
 
 async function _populateProjectDbForm() {
@@ -207,7 +216,7 @@ async function _populateProjectDbForm() {
     const projects = await pr.json();
     const sel = document.getElementById("pdb-project");
     if (sel) {
-      sel.innerHTML = '<option value="">— select —</option>' + projects.map(
+      sel.innerHTML = `<option value="">— ${MnemosUI.t("select")} —</option>` + projects.map(
         p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`
       ).join("");
     }
@@ -222,17 +231,15 @@ async function _populateProjectDbForm() {
     const sel = document.getElementById("pdb-secret");
     if (sel) {
       if (secrets.length === 0) {
-        sel.innerHTML = '<option value="">— no db_connection secrets exist —</option>';
+        sel.innerHTML = `<option value="">— ${MnemosUI.t("no db_connection secrets exist")} —</option>`;
         const hint = document.getElementById("pdb-secret-hint");
         if (hint) {
-          hint.innerHTML = '<strong>No db_connection secret yet.</strong> '
-            + 'Create one in the <em>Secrets</em> section above first '
-            + '(kind = <code>db_connection</code>) — registration will be refused '
-            + 'until a secret is wired up.';
+          hint.innerHTML = `<strong>${MnemosUI.t("No db_connection secret yet.")}</strong> `
+            + MnemosUI.t("Create one in the Secrets section above first (kind = db_connection) — registration will be refused until a secret is wired up.");
           hint.classList.add("toast", "warn");
         }
       } else {
-        sel.innerHTML = '<option value="">— none —</option>' + secrets.map(
+        sel.innerHTML = `<option value="">— ${MnemosUI.t("none")} —</option>` + secrets.map(
           s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.label)}</option>`
         ).join("");
       }
@@ -270,7 +277,7 @@ async function submitProjectDb(ev) {
   ev.preventDefault();
   const projectId = document.getElementById("pdb-project").value;
   if (!projectId) {
-    MnemosUI.showToast("Pick a project.", "warn");
+    MnemosUI.showToast(MnemosUI.t("Pick a project."), "warn");
     return false;
   }
   // Pre-validate regex lines so the operator doesn't get silent drops.
@@ -280,8 +287,7 @@ async function submitProjectDb(ev) {
     const all = [...badFull.map(b => "[full] " + b.raw + " — " + b.error),
                  ...badPart.map(b => "[partial] " + b.raw + " — " + b.error)];
     MnemosUI.showToast(
-      "Invalid masking regex (server would silently skip these): "
-      + all.slice(0, 2).join("; "),
+      MnemosUI.t("Invalid masking regex (server would silently skip these): $1", {1: all.slice(0, 2).join("; ")}),
       "warn",
     );
     // Continue anyway — server is authoritative, but the toast keeps
@@ -322,11 +328,11 @@ async function submitProjectDb(ev) {
     return false;
   }
   if (!r.ok) {
-    await MnemosUI.showError("Registration failed", r);
+    await MnemosUI.showError(MnemosUI.t("Registration failed"), r);
     return false;
   }
   document.getElementById("pdb-create").reset();
-  MnemosUI.showToast("Project DB bound successfully.", "success");
+  MnemosUI.showToast(MnemosUI.t("Project DB bound successfully."), "success");
   loadProjectDbs();
   return false;
 }
@@ -346,7 +352,8 @@ async function loadProjectDbs() {
   }
   const projects = await r.json();
   if (!projects.length) {
-    box.innerHTML = '<p class="muted">No projects in your organisation yet.</p>';
+    box.innerHTML = `<p class="muted" data-i18n="No projects in your organisation yet.">${MnemosUI.t("No projects in your organisation yet.")}</p>`;
+    MnemosUI.applyI18n(box);
     return;
   }
   const chunks = [];
@@ -366,22 +373,27 @@ async function loadProjectDbs() {
       } catch (_) {
         try { detail = await dr.text(); } catch (_) { detail = ""; }
       }
-      inner = '<p class="toast error" role="alert">Failed to load DB bindings: HTTP '
-        + dr.status + (detail ? ' — ' + escapeHtml(detail.slice(0, 200)) : '')
-        + '</p>';
+      inner = `<p class="toast error" role="alert">${MnemosUI.t("Failed to load DB bindings: HTTP $1", {1: dr.status + (detail ? ' — ' + escapeHtml(detail.slice(0, 200)) : '')})}</p>`;
       chunks.push(`<section><h2>${escapeHtml(p.name)}</h2>${inner}</section>`);
       continue;
     }
     const dbs = await dr.json();
     if (!dbs.length) {
-      inner = '<p class="muted">no DBs bound</p>';
+      inner = `<p class="muted" data-i18n="no DBs bound">${MnemosUI.t("no DBs bound")}</p>`;
     } else {
-      inner = '<table class="data"><thead><tr><th>Display</th><th>Kind</th><th>Component ID</th><th>AWR</th><th>Sensitive tables</th><th>Windows</th></tr></thead><tbody>';
+      inner = `<table class="data"><thead><tr>`
+        + `<th data-i18n="Display">${MnemosUI.t("Display")}</th>`
+        + `<th data-i18n="Kind">${MnemosUI.t("Kind")}</th>`
+        + `<th data-i18n="Component ID">${MnemosUI.t("Component ID")}</th>`
+        + `<th data-i18n="AWR">${MnemosUI.t("AWR")}</th>`
+        + `<th data-i18n="Sensitive tables">${MnemosUI.t("Sensitive tables")}</th>`
+        + `<th data-i18n="Windows">${MnemosUI.t("Windows")}</th>`
+        + `</tr></thead><tbody>`;
       for (const d of dbs) {
         inner += `<tr>
-          <td><strong>${d.display_name}</strong></td>
-          <td><code>${d.kind}</code></td>
-          <td><code>${d.component_id}</code></td>
+          <td><strong>${escapeHtml(d.display_name)}</strong></td>
+          <td><code>${escapeHtml(d.kind)}</code></td>
+          <td><code>${escapeHtml(d.component_id)}</code></td>
           <td>${d.allow_awr ? '✓' : '-'}</td>
           <td>${(d.sensitive_tables || []).length}</td>
           <td>${(d.maintenance_windows || []).length}</td>
@@ -389,9 +401,10 @@ async function loadProjectDbs() {
       }
       inner += "</tbody></table>";
     }
-    chunks.push(`<details open><summary><strong>${p.name}</strong> <span class="muted">${p.id}</span></summary>${inner}</details>`);
+    chunks.push(`<details open><summary><strong>${escapeHtml(p.name)}</strong> <span class="muted">${escapeHtml(p.id)}</span></summary>${inner}</details>`);
   }
   box.innerHTML = chunks.join("");
+  MnemosUI.applyI18n(box);
 }
 </script>
 {% endblock %}

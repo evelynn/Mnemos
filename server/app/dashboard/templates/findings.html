@@ -194,7 +194,8 @@ function _showNextFindingsPage() {
         + `<span class="related-plans" data-finding="${escapeHtml(f.id)}"></span></div>`
         + `<details class="raw-detail"><summary>raw</summary><pre>${escapeHtml(JSON.stringify(f.detail))}</pre></details>`
         + `</details>`
-      : `<pre>${escapeHtml(JSON.stringify(f.detail))}</pre>${planBtn}`;
+      : `<details class="fix-detail"><summary data-i18n="Detail">Detail</summary>`
+        + `<pre>${escapeHtml(JSON.stringify(f.detail, null, 2))}</pre></details>${planBtn}`;
     html += `<tr>`
       + `<td><span class="priority-pill ${priority}">${priority}</span></td>`
       + `<td><span class="risk-bar" style="--risk:${risk}">${risk}</span></td>`

@@ -81,6 +81,14 @@ def create_app() -> FastAPI:
         title="Mnemos Platform",
         version="0.1.0",
         lifespan=lifespan,
+        # FastAPI's Swagger UI pulls assets from a CDN the dashboard CSP
+        # blocks, and its default mount (/docs) shadowed the operator
+        # docs tab — so the "Docs" nav link rendered a blank page. Move
+        # the API explorer aside so /docs falls through to the in-tree
+        # markdown docs viewer (dashboard tab_page). OpenAPI JSON stays
+        # at the default /openapi.json for tooling.
+        docs_url="/api-docs",
+        redoc_url="/api-redoc",
     )
     install_error_handlers(app)
 

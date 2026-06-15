@@ -13,20 +13,20 @@
 </section>
 
 <div id="onboard-banner" class="onboarding-step-cta" hidden>
-  <strong>Step 2 of 3:</strong> Trigger the first analysis run. The
-  project ID is pre-filled below — just press <em>Start analysis</em>.
+  <strong data-i18n="Step 2 of 3:">Step 2 of 3:</strong> <span data-i18n="Trigger the first analysis run. The project ID is pre-filled below — just press Start analysis.">Trigger the first analysis run. The
+  project ID is pre-filled below — just press <em>Start analysis</em>.</span>
 </div>
 
 <section>
-  <h2>Trigger run</h2>
+  <h2 data-i18n="Trigger run">Trigger run</h2>
   <form id="trigger" onsubmit="return triggerRun(event)">
     <label><span data-i18n="Project ID">Project ID</span><input type="text" name="project_id" required placeholder="uuid" /></label>
     <label><span data-i18n="Source path">Source path</span><input type="text" name="source_path" required value="/work" /></label>
     <label><span data-i18n="Git SHA">Git SHA</span><input type="text" name="git_sha" value="HEAD" /></label>
     <label><span data-i18n="Scope">Scope</span>
       <select name="scope">
-        <option value="full" selected>full (L0 extract + findings + L1–L3)</option>
-        <option value="continuation">continuation (skip L0; summaries only)</option>
+        <option value="full" selected data-i18n="full (L0 extract + findings + L1–L3)">full (L0 extract + findings + L1–L3)</option>
+        <option value="continuation" data-i18n="continuation (skip L0; summaries only)">continuation (skip L0; summaries only)</option>
       </select>
     </label>
     <button type="submit" class="primary" data-i18n="Start analysis">Start analysis</button>
@@ -57,15 +57,15 @@
 </section>
 
 <section>
-  <h2>Pipeline monitor <span id="sse-status" class="sse-status" hidden></span></h2>
+  <h2><span data-i18n="Pipeline monitor">Pipeline monitor</span> <span id="sse-status" class="sse-status" hidden></span></h2>
   <label><span data-i18n="Run ID">Run ID</span><input type="text" id="run-id" placeholder="uuid" /></label>
-  <button onclick="monitor()" class="primary">Monitor</button>
-  <button onclick="stopMonitor()">Stop</button>
+  <button onclick="monitor()" class="primary" data-i18n="Monitor">Monitor</button>
+  <button onclick="stopMonitor()" data-i18n="Stop">Stop</button>
 
   <div id="pipeline"></div>
 
   <details>
-    <summary>Raw event stream</summary>
+    <summary data-i18n="Raw event stream">Raw event stream</summary>
     <pre id="events"></pre>
   </details>
 </section>
@@ -151,7 +151,14 @@ async function loadRuns(ev) {
     MnemosUI.applyI18n(out);
     return false;
   }
-  let html = '<table class="data"><thead><tr><th>ID</th><th>Status</th><th>Triggered by</th><th>Git SHA</th><th>Started</th><th>Stats</th><th></th></tr></thead><tbody>';
+  let html = '<table class="data"><thead><tr>'
+    + `<th data-i18n="ID">ID</th>`
+    + `<th data-i18n="Status">Status</th>`
+    + `<th data-i18n="Triggered by">Triggered by</th>`
+    + `<th data-i18n="Git SHA">Git SHA</th>`
+    + `<th data-i18n="Started">Started</th>`
+    + `<th data-i18n="Stats">Stats</th>`
+    + '<th></th></tr></thead><tbody>';
   for (const r of rows) {
     const stats = r.stats ? JSON.stringify(r.stats) : "";
     // Tell webhook-driven runs apart from manual ones at a glance —
@@ -172,12 +179,13 @@ async function loadRuns(ev) {
       <td><code>${escapeHtml((r.git_sha || "").slice(0, 12))}</code></td>
       <td>${r.started_at ? `<time data-ts="${r.started_at}">${r.started_at}</time>` : ""}</td>
       <td><pre class="code">${escapeHtml(stats)}</pre></td>
-      <td><button onclick="monitorId('${r.id}')">Monitor</button></td>
+      <td><button onclick="monitorId('${r.id}')" data-i18n="Monitor">${MnemosUI.t("Monitor")}</button></td>
     </tr>`;
   }
   html += "</tbody></table>";
   out.innerHTML = html;
   MnemosUI.hydrateRelativeTimes(out);
+  MnemosUI.applyI18n(out);
   return false;
 }
 
@@ -209,7 +217,7 @@ async function monitor() {
   if (!id) return;
   _stages = new Map();
   document.getElementById("events").textContent = "";
-  document.getElementById("pipeline").innerHTML = '<p class="muted">Waiting for stage events…</p>';
+  document.getElementById("pipeline").innerHTML = `<p class="muted">${MnemosUI.t("Waiting for stage events…")}</p>`;
 
   await refreshStages(id);
   await openStream(id);
@@ -341,7 +349,7 @@ async function refreshStages(id) {
 function renderPipeline(stages) {
   const pipeline = document.getElementById("pipeline");
   if (!stages.length) {
-    pipeline.innerHTML = '<p class="muted">No stages recorded yet.</p>';
+    pipeline.innerHTML = `<p class="muted">${MnemosUI.t("No stages recorded yet.")}</p>`;
     return;
   }
   const html = ['<div class="pipeline-grid">'];
@@ -351,7 +359,7 @@ function renderPipeline(stages) {
       : (s.status === "completed" ? 100 : 0);
     const progress = s.items_total > 0
       ? `${s.items_done} / ${s.items_total}`
-      : (s.status === "completed" ? "done" : "–");
+      : (s.status === "completed" ? MnemosUI.t("done") : "–");
     const stats = s.stats ? `<pre>${JSON.stringify(s.stats)}</pre>` : "";
     const err = s.error_log ? `<pre class="error">${s.error_log}</pre>` : "";
     html.push(`<div class="stage-card">
@@ -405,7 +413,7 @@ async function loadLatency(ev) {
   const box = document.getElementById("latency-box");
   box.innerHTML = '<div class="skeleton skeleton-card"></div>';
   const r = await fetch(`/api/v1/projects/${pid}/pipeline_latency?runs=10`);
-  if (!r.ok) { await MnemosUI.showError("Latency load failed", r); return false; }
+  if (!r.ok) { await MnemosUI.showError(MnemosUI.t("Latency load failed"), r); return false; }
   const d = await r.json();
   if (!d.stages.length) {
     box.innerHTML = '<p class="muted" data-i18n="No completed runs to measure yet.">No completed runs to measure yet.</p>';

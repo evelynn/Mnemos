@@ -20,27 +20,27 @@
     <div class="muted" id="hb-overall-when"></div>
   </div>
   <div class="health-block" id="hb-database">
-    <h2>Database</h2>
+    <h2 data-i18n="Database">Database</h2>
     <div class="status" id="hb-database-status">…</div>
     <pre class="health-msg" id="hb-database-msg"></pre>
   </div>
   <div class="health-block" id="hb-redis">
-    <h2>Redis</h2>
+    <h2 data-i18n="Redis">Redis</h2>
     <div class="status" id="hb-redis-status">…</div>
     <pre class="health-msg" id="hb-redis-msg"></pre>
   </div>
   <div class="health-block" id="hb-worker">
-    <h2>Worker</h2>
+    <h2 data-i18n="Worker">Worker</h2>
     <div class="status" id="hb-worker-status">…</div>
     <pre class="health-msg" id="hb-worker-msg"></pre>
   </div>
   <div class="health-block" id="hb-crypto">
-    <h2>Crypto</h2>
+    <h2 data-i18n="Crypto">Crypto</h2>
     <div class="status" id="hb-crypto-status">…</div>
     <pre class="health-msg" id="hb-crypto-msg"></pre>
   </div>
   <div class="health-block" id="hb-analyzers">
-    <h2>Analyzers</h2>
+    <h2 data-i18n="Analyzers">Analyzers</h2>
     <div class="status" id="hb-analyzers-status">…</div>
     <pre class="health-msg" id="hb-analyzers-msg"></pre>
   </div>
@@ -48,7 +48,7 @@
 
 <section>
   <h2 data-i18n="Operational counts (24h)">Operational counts (24h)</h2>
-  <p class="muted">
+  <p class="muted" data-i18n="Pulled directly from Postgres so every browser sees the same numbers, unlike worker-process Prometheus counters.">
     Pulled directly from Postgres so every browser sees the same
     numbers, unlike worker-process Prometheus counters.
   </p>
@@ -91,13 +91,13 @@ function _setStatus(prefix, ok, advisory, message) {
   const msg = document.getElementById(prefix + "-msg");
   if (!status || !msg) return;
   if (ok && !advisory) {
-    status.textContent = "✓ ok";
+    status.textContent = "✓ " + MnemosUI.t("ok");
     status.className = "status ok";
   } else if (ok && advisory) {
-    status.textContent = "⚠ degraded";
+    status.textContent = "⚠ " + MnemosUI.t("degraded");
     status.className = "status warn";
   } else {
-    status.textContent = "✗ fail";
+    status.textContent = "✗ " + MnemosUI.t("fail");
     status.className = "status fail";
   }
   msg.textContent = message || "";
@@ -121,10 +121,10 @@ async function reload() {
     const oEl = document.getElementById("hb-overall-value");
     const ow = document.getElementById("hb-overall-when");
     if (r.ok) {
-      oEl.textContent = "✓ READY";
+      oEl.textContent = "✓ " + MnemosUI.t("READY");
       oEl.className = "big ok";
     } else {
-      oEl.textContent = "✗ DEGRADED";
+      oEl.textContent = "✗ " + MnemosUI.t("DEGRADED");
       oEl.className = "big fail";
     }
     ow.textContent = new Date().toLocaleTimeString();
