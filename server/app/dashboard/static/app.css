@@ -18,42 +18,40 @@
  * ────────────────────────────────────────────────────────────── */
 
 :root {
-  /* Light theme — the legacy palette, now tokenised. */
-  --bg:                   #f7f7f8;
-  --surface:              #ffffff;
-  --surface-alt:          #f6f8fa;
-  --surface-tint:         #eef0f3;
-  --border:               #d0d7de;
-  --border-soft:          #e1e4e8;
+  /* shadcn-vue design tokens — neutral (zinc) base + indigo primary, a
+     light sidebar, the shadcn radius and very soft borders/shadows. Every
+     component below reads these vars, so remapping the values here restyles
+     the whole dashboard to the shadcn look without touching the markup. */
+  --bg:                   #fafafa;   /* zinc-50  app canvas  */
+  --surface:              #ffffff;   /* white cards          */
+  --surface-alt:          #f4f4f5;   /* zinc-100 subtle fill */
+  --surface-tint:         #f4f4f5;
+  --border:               #e4e4e7;   /* zinc-200             */
+  --border-soft:          #f0f0f1;
 
-  --text:                 #1f2328;
-  --text-muted:           #6b7178;
-  --text-inverted:        #ffffff;
+  --text:                 #09090b;   /* zinc-950 foreground  */
+  --text-muted:           #71717a;   /* zinc-500             */
+  --text-inverted:        #fafafa;
 
-  /* PR-48 — bumped from #1f6feb (4.18:1 on white) to #0a5fc7
-     which clears WCAG 2.1 AA (4.74:1). The audit team flagged
-     the original for the brand-logo + small-text use cases on a
-     light surface. Dark-mode accent already passes (8.2:1). */
-  --accent:               #0a5fc7;
-  --accent-soft:          #eef5ff;
-  --accent-strong:        #0a3b8c;
+  --accent:               #4f46e5;   /* indigo-600 primary   */
+  --accent-soft:          #eef2ff;   /* indigo-50            */
+  --accent-strong:        #4338ca;   /* indigo-700           */
 
-  --success:              #145a1f;
-  --success-bg:           #dff4e0;
-  --warn:                 #6a4b00;
-  --warn-bg:              #fff1c2;
-  --danger:               #82071e;
-  --danger-bg:            #ffdede;
-  --danger-button:        #c93c37;
-  --danger-banner:        #c62828;
+  --success:              #15803d;
+  --success-bg:           #f0fdf4;
+  --warn:                 #b45309;
+  --warn-bg:              #fffbeb;
+  --danger:               #dc2626;
+  --danger-bg:            #fef2f2;
+  --danger-button:        #dc2626;
+  --danger-banner:        #dc2626;
 
-  --sidebar-bg:           #1f2328;
-  --sidebar-fg:           #d0d4d8;
-  --sidebar-active:       #313840;
-  --sidebar-active-fg:    #ffffff;
+  /* Light shadcn sidebar — was a dark slab; now a clean bordered panel. */
+  --sidebar-bg:           #ffffff;
+  --sidebar-fg:           #52525b;   /* zinc-600             */
+  --sidebar-active:       #f4f4f5;   /* zinc-100 active fill */
+  --sidebar-active-fg:    #09090b;
 
-  /* Spacing scale — a single source of truth so the audit team can
-     stop catching margin: 0.25rem vs 0.3rem drift. */
   --sp-1: 0.25rem;
   --sp-2: 0.5rem;
   --sp-3: 0.75rem;
@@ -62,18 +60,18 @@
   --sp-6: 1.5rem;
   --sp-8: 2rem;
 
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
   --radius-pill: 999px;
 
-  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.06);
-  --shadow-hover: 0 1px 4px rgba(31, 111, 235, 0.18);
-  --shadow-modal: 0 12px 32px rgba(0, 0, 0, 0.2);
-  --shadow-toast: 0 2px 8px rgba(0, 0, 0, 0.15);
+  --shadow-card:  0 1px 2px 0 rgba(0, 0, 0, 0.04);
+  --shadow-hover: 0 1px 3px 0 rgba(0, 0, 0, 0.10);
+  --shadow-modal: 0 10px 38px -10px rgba(0, 0, 0, 0.22), 0 10px 20px -15px rgba(0, 0, 0, 0.14);
+  --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.12);
 
-  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", monospace;
+  --font-body: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", "Cascadia Code", monospace;
 
   --transition-fast: 0.15s;
 }
@@ -82,39 +80,39 @@
    theme switcher, or when the browser reports prefers-color-scheme:
    dark and no explicit preference is stored. */
 :root[data-theme="dark"] {
-  --bg:                   #0d1117;
-  --surface:              #161b22;
-  --surface-alt:          #1c2129;
-  --surface-tint:         #21262d;
-  --border:               #30363d;
-  --border-soft:          #21262d;
+  --bg:                   #09090b;   /* zinc-950 */
+  --surface:              #18181b;   /* zinc-900 cards */
+  --surface-alt:          #27272a;   /* zinc-800 */
+  --surface-tint:         #27272a;
+  --border:               #27272a;   /* zinc-800 */
+  --border-soft:          #1f1f23;
 
-  --text:                 #e6edf3;
-  --text-muted:           #8b949e;
-  --text-inverted:        #0d1117;
+  --text:                 #fafafa;
+  --text-muted:           #a1a1aa;   /* zinc-400 */
+  --text-inverted:        #18181b;
 
-  --accent:               #4493f8;
-  --accent-soft:          #1d2742;
-  --accent-strong:        #79b8ff;
+  --accent:               #818cf8;   /* indigo-400 (contrast on dark) */
+  --accent-soft:          #1e1b4b;   /* indigo-950 */
+  --accent-strong:        #a5b4fc;
 
-  --success:              #56d364;
-  --success-bg:           #1b3a26;
-  --warn:                 #d8a657;
+  --success:              #4ade80;
+  --success-bg:           #052e16;
+  --warn:                 #fbbf24;
   --warn-bg:              #3a2e16;
-  --danger:               #f85149;
+  --danger:               #f87171;
   --danger-bg:            #3a1818;
-  --danger-button:        #da3633;
-  --danger-banner:        #b62324;
+  --danger-button:        #dc2626;
+  --danger-banner:        #b91c1c;
 
-  --sidebar-bg:           #010409;
-  --sidebar-fg:           #c9d1d9;
-  --sidebar-active:       #161b22;
-  --sidebar-active-fg:    #ffffff;
+  --sidebar-bg:           #09090b;
+  --sidebar-fg:           #a1a1aa;
+  --sidebar-active:       #27272a;
+  --sidebar-active-fg:    #fafafa;
 
-  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.3);
-  --shadow-hover: 0 1px 4px rgba(68, 147, 248, 0.35);
-  --shadow-modal: 0 12px 32px rgba(0, 0, 0, 0.5);
-  --shadow-toast: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-card:  0 1px 2px 0 rgba(0, 0, 0, 0.30);
+  --shadow-hover: 0 1px 3px 0 rgba(0, 0, 0, 0.40);
+  --shadow-modal: 0 10px 38px -10px rgba(0, 0, 0, 0.60);
+  --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.50);
 }
 
 /* No-preference-stored fallback: respect the OS setting. The
@@ -122,30 +120,30 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     color-scheme: dark;
-    --bg:                   #0d1117;
-    --surface:              #161b22;
-    --surface-alt:          #1c2129;
-    --surface-tint:         #21262d;
-    --border:               #30363d;
-    --border-soft:          #21262d;
-    --text:                 #e6edf3;
-    --text-muted:           #8b949e;
-    --text-inverted:        #0d1117;
-    --accent:               #4493f8;
-    --accent-soft:          #1d2742;
-    --accent-strong:        #79b8ff;
-    --success:              #56d364;
-    --success-bg:           #1b3a26;
-    --warn:                 #d8a657;
+    --bg:                   #09090b;
+    --surface:              #18181b;
+    --surface-alt:          #27272a;
+    --surface-tint:         #27272a;
+    --border:               #27272a;
+    --border-soft:          #1f1f23;
+    --text:                 #fafafa;
+    --text-muted:           #a1a1aa;
+    --text-inverted:        #18181b;
+    --accent:               #818cf8;
+    --accent-soft:          #1e1b4b;
+    --accent-strong:        #a5b4fc;
+    --success:              #4ade80;
+    --success-bg:           #052e16;
+    --warn:                 #fbbf24;
     --warn-bg:              #3a2e16;
-    --danger:               #f85149;
+    --danger:               #f87171;
     --danger-bg:            #3a1818;
-    --danger-button:        #da3633;
-    --danger-banner:        #b62324;
-    --sidebar-bg:           #010409;
-    --sidebar-fg:           #c9d1d9;
-    --sidebar-active:       #161b22;
-    --sidebar-active-fg:    #ffffff;
+    --danger-button:        #dc2626;
+    --danger-banner:        #b91c1c;
+    --sidebar-bg:           #09090b;
+    --sidebar-fg:           #a1a1aa;
+    --sidebar-active:       #27272a;
+    --sidebar-active-fg:    #fafafa;
   }
 }
 
@@ -1187,3 +1185,128 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
 .flow-steps li { margin: 0.2rem 0; }
 .flow-flags { margin: 0.25rem 0 0.5rem 1.25rem; }
 .flow-flags li { margin: 0.2rem 0; }
+
+/* ════════════════════════════════════════════════════════════════════
+ * shadcn-vue refinement layer (PR-165 UX overhaul).
+ *
+ * The token values at the top already restyle every page to the shadcn
+ * palette; this layer adds the component polish — bordered light sidebar,
+ * shadcn buttons/inputs/cards/tables/badges, focus rings, typography and
+ * breathing room. Specific class selectors only, so the specialized
+ * widgets (theme/locale/mic/notif buttons) keep their own styling.
+ * ════════════════════════════════════════════════════════════════════ */
+
+body.app { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; line-height: 1.55; }
+.content { padding: var(--sp-8); max-width: 1200px; }
+@media (max-width: 768px) { .content { padding: var(--sp-5) var(--sp-4); padding-top: 3.5rem; } }
+h1 { font-size: 1.5rem; font-weight: 650; letter-spacing: -0.02em; line-height: 1.25; }
+h2 { font-size: 1.2rem; font-weight: 650; letter-spacing: -0.01em; }
+h3 { font-size: 1rem; font-weight: 600; }
+.page-head { margin-bottom: var(--sp-6); }
+
+/* Light sidebar → bordered panel with shadcn nav rows. */
+.sidebar { border-right: 1px solid var(--border); gap: 2px; }
+.sidebar nav { gap: 2px; }
+.sidebar nav a {
+  font-size: 0.875rem; font-weight: 500; padding: 0.45rem 0.6rem;
+  display: flex; align-items: center; border-radius: var(--radius-md);
+}
+.sidebar nav a.active { background: var(--accent-soft); color: var(--accent-strong); font-weight: 600; }
+.sidebar nav a:hover:not(.active) { background: var(--surface-alt); color: var(--text); }
+.nav-section {
+  font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.07em;
+  font-weight: 600; color: var(--text-muted); margin: var(--sp-4) 0.6rem var(--sp-1);
+}
+.logout-form { border-top: 1px solid var(--border); padding-top: var(--sp-3); margin-top: var(--sp-3); }
+.logout-form button {
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  font-weight: 500; font-size: 0.85rem; border-radius: var(--radius-md); padding: 0.4rem;
+}
+.logout-form button:hover { background: var(--surface-alt); }
+
+/* Generic card + reuse for the existing card-like blocks. */
+.card {
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--surface); box-shadow: var(--shadow-card); padding: var(--sp-5);
+}
+
+/* shadcn buttons — solid primary, outline secondary, destructive. */
+button.primary, a.primary, .login-form button, .mini-btn, input[type=submit].primary {
+  background: var(--accent); color: #fff; border: 1px solid transparent;
+  border-radius: var(--radius-md); padding: 0.5rem 0.9rem; font-weight: 500;
+  font-size: 0.875rem; cursor: pointer; line-height: 1.2;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast), filter var(--transition-fast);
+}
+button.primary:hover, a.primary:hover, .login-form button:hover, .mini-btn:hover { background: var(--accent-strong); filter: none; }
+button.danger {
+  background: var(--danger-button); color: #fff; border: 1px solid transparent;
+  border-radius: var(--radius-md); padding: 0.5rem 0.9rem; font-weight: 500; font-size: 0.875rem;
+}
+button.danger:hover { filter: brightness(0.94); }
+.btn-outline {
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius-md); padding: 0.5rem 0.9rem; font-weight: 500; font-size: 0.875rem; cursor: pointer;
+}
+.btn-outline:hover { background: var(--surface-alt); }
+
+/* shadcn inputs + focus ring. */
+input[type=text], input[type=password], input[type=search], input[type=email],
+input[type=number], input[type=url], textarea, select, .login-form input {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--radius-md); padding: 0.5rem 0.7rem; font-size: 0.875rem; font-family: inherit;
+}
+input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* Tables → bordered, rounded, quiet header. */
+table.data { border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; font-size: 0.875rem; }
+table.data th {
+  background: var(--surface-alt); color: var(--text-muted); font-weight: 600;
+  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em;
+}
+table.data tr:last-child td { border-bottom: 0; }
+table.data tbody tr:hover td { background: var(--surface-alt); }
+
+/* Badge → shadcn pill. */
+.badge {
+  display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.72rem; font-weight: 600;
+  padding: 0.12rem 0.55rem; border-radius: var(--radius-pill);
+  background: var(--surface-alt); color: var(--text-muted); border: 1px solid var(--border-soft);
+}
+
+/* shadcn focus ring (offset double ring). */
+:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent); border-radius: var(--radius-sm); }
+.sidebar nav a:focus-visible { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
+
+pre.code, .code-block { border-radius: var(--radius-md); }
+
+/* Ask answer card — human-first presentation (PR-165). */
+.ask-answer { margin-top: var(--sp-4); }
+.ask-text {
+  font-size: 1.02rem; line-height: 1.62; margin: 0 0 var(--sp-3); color: var(--text);
+}
+.ask-text code {
+  background: var(--surface-alt); padding: 0.05rem 0.35rem;
+  border-radius: var(--radius-sm); font-size: 0.9em; font-family: var(--font-mono);
+}
+.ask-meta { display: flex; gap: var(--sp-2); align-items: center; margin-bottom: var(--sp-3); flex-wrap: wrap; }
+.ask-kind {
+  font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--accent-strong); background: var(--accent-soft);
+  padding: 0.12rem 0.5rem; border-radius: var(--radius-pill);
+}
+.ask-loc { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-muted); }
+.ask-da { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; margin-top: var(--sp-2); }
+.ask-da-label {
+  font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-muted); margin-right: 0.2rem;
+}
+.chip {
+  display: inline-flex; align-items: center; font-family: var(--font-mono); font-size: 0.78rem;
+  background: var(--surface-alt); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 0.1rem 0.45rem; color: var(--text);
+}
+.ask-matches { padding-left: 0; margin: var(--sp-2) 0 0; }
+.ask-matches li { margin: 0.35rem 0; list-style: none; }
+.ask-kind-sm { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }

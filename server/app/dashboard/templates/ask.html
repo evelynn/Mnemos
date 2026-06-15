@@ -82,6 +82,25 @@
 <script>
 const escapeHtml = MnemosUI.escapeHtml;
 
+// Render a tiny safe subset of markdown (**bold**, `code`) for the answer.
+function mdLite(s) {
+  let h = escapeHtml(s || "");
+  h = h.replace(/`([^`]+)`/g, "<code>$1</code>");
+  h = h.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  return h;
+}
+
+// "ts:src/.../page.tsx:AuditLog@16:1" → { file: "src/.../page.tsx", line: "16" }
+// so a human sees a location, never the raw key.
+function parseSymbolId(id) {
+  const s = String(id || "");
+  const at = s.split("@");
+  const line = at[1] ? at[1].split(":")[0] : "";
+  const segs = at[0].split(":");
+  const file = segs.length >= 3 ? segs.slice(1, -1).join(":") : (segs[1] || "");
+  return { file: file, line: line };
+}
+
 async function askQuestion(ev) {
   ev.preventDefault();
   const pid = document.getElementById("aq-pid").value.trim();
@@ -115,43 +134,41 @@ async function askQuestion(ev) {
 
 function renderAnswer(d) {
   const result = document.getElementById("aq-result");
-  // Badges: answered / deepened.
+  const a = d.answer;
   const badges = [];
   badges.push(d.answered
-    ? `<span class="badge ok" data-i18n="Answered">Answered</span>`
-    : `<span class="badge warn" data-i18n="No confident answer">No confident answer</span>`);
+    ? `<span class="badge ok" data-i18n="Answer">Answer</span>`
+    : `<span class="badge" data-i18n="Best match">Best match</span>`);
   if (d.deepened) {
     const files = (d.extracted_files || []).map(escapeHtml).join(", ");
-    badges.push(`<span class="badge info" title="${files}" data-i18n="Deepened (analysed on demand)">Deepened (analysed on demand)</span>`);
+    badges.push(`<span class="badge info" title="${files}" data-i18n="Analysed on demand">Analysed on demand</span>`);
   }
   document.getElementById("aq-badges").innerHTML = badges.join(" ");
 
-  // Primary answer card.
-  const a = d.answer;
   const ans = document.getElementById("aq-answer");
   if (a) {
-    const detail = a.detail || {};
-    const summary = detail.summary || (detail.data && detail.data.summary) || "";
-    const sig = (detail.data && detail.data.signature) || (detail.signature) || "";
-    const writes = (a.data_access && a.data_access.writes || []).map(w => escapeHtml(w.entity_id)).join(", ");
-    const reads = (a.data_access && a.data_access.reads || []).map(w => escapeHtml(w.entity_id)).join(", ");
+    const loc = a.file ? (escapeHtml(a.file) + (a.line ? ":" + escapeHtml(String(a.line)) : "")) : "";
+    const sig = a.signature || "";
+    const chips = arr => (arr || []).map(w => `<span class="chip">${escapeHtml(w)}</span>`).join(" ");
+    const writes = chips(a.writes);
+    const reads = chips(a.reads);
     ans.innerHTML = `
       <div class="ask-card">
-        <h3><code>${escapeHtml(a.name || a.symbol_id)}</code>
-          <span class="muted">(${escapeHtml(a.kind || "")})</span>
+        <p class="ask-text">${mdLite(a.text || a.name || "")}
           <button type="button" id="aq-listen" class="listen-btn" hidden
                   aria-label="${MnemosUI.t("Read the answer aloud")}"
                   title="${MnemosUI.t("Read the answer aloud")}">🔊
-            <span data-i18n="Listen">Listen</span></button></h3>
+            <span data-i18n="Listen">Listen</span></button></p>
+        <div class="ask-meta">
+          <span class="ask-kind">${escapeHtml(a.kind || "symbol")}</span>
+          ${loc ? `<span class="ask-loc">${loc}</span>` : ""}
+        </div>
         ${sig ? `<pre class="ask-sig">${escapeHtml(sig)}</pre>` : ""}
-        ${summary ? `<p>${escapeHtml(summary)}</p>` : ""}
-        <p class="muted"><code>${escapeHtml(a.symbol_id)}</code></p>
-        ${writes ? `<p><strong data-i18n="Writes">Writes</strong>: ${writes}</p>` : ""}
-        ${reads ? `<p><strong data-i18n="Reads">Reads</strong>: ${reads}</p>` : ""}
+        ${writes ? `<div class="ask-da"><span class="ask-da-label" data-i18n="Writes">Writes</span>${writes}</div>` : ""}
+        ${reads ? `<div class="ask-da"><span class="ask-da-label" data-i18n="Reads">Reads</span>${reads}</div>` : ""}
       </div>`;
-    // Voice output (PR-156): reveal the listen button when TTS is available
-    // and read the answer (name + summary) aloud on click.
-    const speakText = [a.name, summary].filter(Boolean).join(". ");
+    // Voice output (PR-156): read the prose answer aloud (strip markdown).
+    const speakText = (a.text || a.name || "").replace(/[*`]/g, "");
     const listenBtn = document.getElementById("aq-listen");
     if (listenBtn && speakText) {
       MnemosUI.voiceStatus().then(function (s) {
@@ -162,15 +179,18 @@ function renderAnswer(d) {
       });
     }
   } else {
-    ans.innerHTML = `<p class="muted" data-i18n="No matching symbol — try a different phrasing, or provide a source root so Mnemos can analyse on demand.">No matching symbol — try a different phrasing, or provide a source root so Mnemos can analyse on demand.</p>`;
+    ans.innerHTML = `<p class="muted" data-i18n="No matching symbol — try a different phrasing, or set a Source root under Deepen options so Mnemos can analyse the code on demand.">No matching symbol — try a different phrasing, or set a Source root under Deepen options so Mnemos can analyse the code on demand.</p>`;
   }
 
-  // Other matches.
+  // Related matches — name + location, never the raw id.
   const matches = (d.matches || []).slice(1);
   const wrap = document.getElementById("aq-matches-wrap");
   if (matches.length) {
-    document.getElementById("aq-matches").innerHTML = matches.map(m =>
-      `<li><code>${escapeHtml(m.name || m.symbol_id)}</code> <span class="muted">${escapeHtml(m.kind || "")}</span></li>`).join("");
+    document.getElementById("aq-matches").innerHTML = matches.map(m => {
+      const p = parseSymbolId(m.symbol_id);
+      const where = p.file ? `<span class="muted"> · ${escapeHtml(p.file)}${p.line ? ":" + escapeHtml(p.line) : ""}</span>` : "";
+      return `<li><strong>${escapeHtml(m.name || m.symbol_id)}</strong> <span class="ask-kind-sm">${escapeHtml(m.kind || "")}</span>${where}</li>`;
+    }).join("");
     wrap.hidden = false;
   } else {
     wrap.hidden = true;

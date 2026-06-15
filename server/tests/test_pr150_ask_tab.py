@@ -37,7 +37,7 @@ def test_ask_template_wires_endpoint_and_picker():
     assert "mountProjectPicker" in html, "elegant project selection, not raw UUID only"
     # surfaces the deepen affordance + the answer's data access
     assert "deepen" in html
-    assert "Deepened" in html
+    assert "Analysed on demand" in html
     assert "Writes" in html
 
 

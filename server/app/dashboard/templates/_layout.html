@@ -48,23 +48,30 @@
       </div>
     </div>
     <nav>
+      <div class="nav-section" data-i18n="Explore">Explore</div>
       <a href="/" class="{% if active_tab == 'dashboard' %}active{% endif %}" data-i18n="Dashboard">Dashboard</a>
       <a href="/projects" class="{% if active_tab == 'projects' %}active{% endif %}" data-i18n="Projects">Projects</a>
+      <a href="/ask" class="{% if active_tab == 'ask' %}active{% endif %}" data-i18n="Ask">Ask</a>
+
+      <div class="nav-section" data-i18n="Analysis">Analysis</div>
       <a href="/analysis" class="{% if active_tab == 'analysis' %}active{% endif %}" data-i18n="Analysis">Analysis</a>
       <a href="/data" class="{% if active_tab == 'data' %}active{% endif %}" data-i18n="Data">Data</a>
       <a href="/graph" class="{% if active_tab == 'graph' %}active{% endif %}" data-i18n="Graph">Graph</a>
-      <a href="/ask" class="{% if active_tab == 'ask' %}active{% endif %}" data-i18n="Ask">Ask</a>
-      <a href="/plans" class="{% if active_tab == 'plans' %}active{% endif %}" data-i18n="Plans">Plans</a>
-      <a href="/diffs" class="{% if active_tab == 'diffs' %}active{% endif %}" data-i18n="Diffs">Diffs</a>
       <a href="/findings" class="{% if active_tab == 'findings' %}active{% endif %}" data-i18n="Findings">Findings</a>
       <a href="/report" class="{% if active_tab == 'report' %}active{% endif %}" data-i18n="Report">Report</a>
+
+      <div class="nav-section" data-i18n="Governance">Governance</div>
+      <a href="/plans" class="{% if active_tab == 'plans' %}active{% endif %}" data-i18n="Plans">Plans</a>
+      <a href="/diffs" class="{% if active_tab == 'diffs' %}active{% endif %}" data-i18n="Diffs">Diffs</a>
+
+      <div class="nav-section" data-i18n="System">System</div>
       <a href="/audit" class="{% if active_tab == 'audit' %}active{% endif %}" data-i18n="Audit">Audit</a>
-      <a href="/profile" class="{% if active_tab == 'profile' %}active{% endif %}" data-i18n="Profile">Profile</a>
-      <a href="/settings" class="{% if active_tab == 'settings' %}active{% endif %}" data-i18n="Settings">Settings</a>
       <a href="/health" class="{% if active_tab == 'health' %}active{% endif %}" data-i18n="Health">Health</a>
+      <a href="/settings" class="{% if active_tab == 'settings' %}active{% endif %}" data-i18n="Settings">Settings</a>
+      <a href="/profile" class="{% if active_tab == 'profile' %}active{% endif %}" data-i18n="Profile">Profile</a>
       <a href="/docs" class="{% if active_tab == 'docs' %}active{% endif %}" data-i18n="Docs">Docs</a>
       {% if user.role == 'admin' %}
-      <div class="nav-section muted" data-i18n="Admin">Admin</div>
+      <div class="nav-section" data-i18n="Admin">Admin</div>
       <a href="/users" class="{% if active_tab == 'users' %}active{% endif %}" data-i18n="Users">Users</a>
       <a href="/organizations" class="{% if active_tab == 'organizations' %}active{% endif %}" data-i18n="Organizations">Organizations</a>
       <a href="/sso" class="{% if active_tab == 'sso' %}active{% endif %}" data-i18n="SSO / OIDC">SSO / OIDC</a>

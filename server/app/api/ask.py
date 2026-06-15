@@ -79,6 +79,56 @@ class AskRequest(BaseModel):
     max_file_bytes: int = Field(default=60_000, ge=1, le=400_000)
 
 
+def _short_path(file: str | None) -> str | None:
+    """A human-readable, repo-relative path. Absolute worker paths are
+    noise — start from ``src/`` or ``app/`` when present, else basename."""
+    if not file:
+        return None
+    f = file.replace("\\", "/")
+    for marker in ("/src/", "/app/"):
+        i = f.find(marker)
+        if i != -1:
+            return f[i + 1 :]
+    return f.rsplit("/", 1)[-1]
+
+
+def _entity_name(entity_id: str | None) -> str:
+    """``data.users`` / ``data:orders`` → ``users`` / ``orders``."""
+    s = str(entity_id or "")
+    for p in ("data.", "data:"):
+        if s.startswith(p):
+            return s[len(p) :]
+    return s
+
+
+def _answer_text(
+    name: str | None, kind: str | None, file: str | None, line: int | None,
+    callers: int, callees: int, reads: list[str], writes: list[str],
+    summary: str | None,
+) -> str:
+    """A plain-language answer assembled from graph facts — works with no
+    LLM (local mode), so the operator always gets a readable sentence
+    instead of a bare symbol id."""
+    nm = name or "This symbol"
+    kd = kind or "symbol"
+    a_an = "an" if kd[:1].lower() in "aeiou" else "a"
+    where = ""
+    if file:
+        where = f" in `{file}`" + (f" (line {line})" if line else "")
+    parts = [f"**{nm}** is {a_an} {kd}{where}."]
+    if summary:
+        parts.append(summary.rstrip(".") + ".")
+    if callers:
+        parts.append(f"It is called from {callers} place{'s' if callers != 1 else ''}.")
+    if callees:
+        parts.append(f"It calls {callees} other symbol{'s' if callees != 1 else ''}.")
+    if writes:
+        parts.append(f"It **writes** to {', '.join(writes)}.")
+    if reads:
+        parts.append(f"It **reads** from {', '.join(reads)}.")
+    return " ".join(parts)
+
+
 async def _build_answer(
     db: AsyncSession, project_id: uuid.UUID, hits: list[dict]
 ) -> dict | None:
@@ -95,10 +145,42 @@ async def _build_answer(
     )
     sym = await get_symbol(db, project_id=project_id, symbol_id=best["symbol_id"])
     da = await get_data_access(db, project_id=project_id, symbol_id=best["symbol_id"])
+
+    sym_data = ((sym or {}).get("symbol") or {}).get("data") or {}
+    loc = sym_data.get("location") or {}
+    file = _short_path(loc.get("file"))
+    line = loc.get("line")
+    summary = (sym or {}).get("l1_summary")
+    # Local mode (no LLM) writes a placeholder L1 like "[stub L1] <id>
+    # summarised from N evidence rows" — that is not a real summary, so
+    # keep it out of the human answer.
+    if summary and summary.lstrip().startswith("[stub"):
+        summary = None
+    neighbors = (sym or {}).get("neighbors") or {}
+    callers = int(neighbors.get("callers_count") or 0)
+    callees = int(neighbors.get("callees_count") or 0)
+    writes = [_entity_name(w.get("entity_id")) for w in da.get("writes", [])]
+    reads = [_entity_name(w.get("entity_id")) for w in da.get("reads", [])]
+    # The node ``kind`` is always "Symbol"; the analyser's specific kind
+    # (function / interface / method / class) lives in ``data`` and reads
+    # far more naturally in the answer.
+    real_kind = sym_data.get("kind") or best.get("kind")
     return {
         "symbol_id": best["symbol_id"],
         "name": best.get("name"),
-        "kind": best.get("kind"),
+        "kind": real_kind,
+        "file": file,
+        "line": line,
+        "signature": sym_data.get("signature"),
+        "summary": summary,
+        "callers_count": callers,
+        "callees_count": callees,
+        "reads": reads,
+        "writes": writes,
+        "text": _answer_text(
+            best.get("name"), real_kind, file, line,
+            callers, callees, reads, writes, summary,
+        ),
         "detail": sym,
         "data_access": {"reads": da.get("reads", []), "writes": da.get("writes", [])},
     }
