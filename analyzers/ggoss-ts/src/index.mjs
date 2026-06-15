@@ -448,6 +448,60 @@ const _HTTP_DECORATORS = new Set([
   "Get", "Post", "Put", "Delete", "Patch", "Options", "Head", "All",
 ]);
 
+// Next.js App Router: a file ``app/**/route.{ts,tsx,js,mjs}`` that exports a
+// function named after an HTTP method (``export async function POST``) serves
+// that method at the URL derived from its directory. Previously ggoss-ts saw
+// the client ``fetch('/api/..')`` (CALLS) but never the server handler
+// (EXPOSES), so the contract had no exposer and duplicate-endpoint detection /
+// OTLP runtime reconcile could not work for Next.js apps.
+const _NEXTJS_METHODS = new Set([
+  "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS",
+]);
+
+function _nextjsRoutePath(fileName) {
+  const norm = fileName.replace(/\\/g, "/");
+  if (/\/app\/route\.(?:ts|tsx|js|mjs)$/.test(norm)) return "/";
+  const m = norm.match(/\/app\/(.+)\/route\.(?:ts|tsx|js|mjs)$/);
+  if (!m) return null;
+  const segs = m[1]
+    .split("/")
+    .filter(Boolean)
+    // Route groups ``(group)`` and parallel/intercepting routes carry no URL.
+    .filter((s) => !(s.startsWith("(") && s.endsWith(")")) && !s.startsWith("@"))
+    // Dynamic segments ``[id]`` / ``[...slug]`` → ``{id}`` / ``{slug}``.
+    .map((s) => s.replace(/^\[\.{3}(.+)\]$/, "{$1}").replace(/^\[(.+)\]$/, "{$1}"));
+  return "/" + segs.join("/");
+}
+
+function _exportedHttpHandler(node) {
+  const exported = (node.modifiers || []).some(
+    (m) => m.kind === ts.SyntaxKind.ExportKeyword,
+  );
+  if (!exported) return null;
+  // export [async] function GET(...) {}
+  if (
+    node.kind === ts.SyntaxKind.FunctionDeclaration &&
+    node.name &&
+    _NEXTJS_METHODS.has(node.name.text)
+  ) {
+    return node.name.text;
+  }
+  // export const GET = (...) => {}
+  if (node.kind === ts.SyntaxKind.VariableStatement) {
+    for (const d of node.declarationList.declarations) {
+      if (
+        d.name &&
+        d.name.kind === ts.SyntaxKind.Identifier &&
+        _NEXTJS_METHODS.has(d.name.text) &&
+        d.initializer
+      ) {
+        return d.name.text;
+      }
+    }
+  }
+  return null;
+}
+
 function _decorators(node) {
   if (typeof ts.getDecorators === "function") {
     return ts.getDecorators(node) || [];
@@ -522,6 +576,21 @@ function cmdContracts(target, outPath) {
 
   for (const sf of program.getSourceFiles()) {
     if (sf.isDeclarationFile || sf.fileName.includes("node_modules")) continue;
+
+    // Next.js App Router route handlers — detected per-file from the path +
+    // exported HTTP-method functions, not via the AST verb/decorator visit.
+    const nextRoute = _nextjsRoutePath(sf.fileName);
+    if (nextRoute !== null) {
+      for (const stmt of sf.statements) {
+        const method = _exportedHttpHandler(stmt);
+        if (method) {
+          emitHttpContract(
+            out, sf, stmt, method, nextRoute, "EXPOSES", "ts_nextjs_route",
+          );
+        }
+      }
+    }
+
     // ``prefix`` carries a NestJS @Controller('x') route prefix down
     // into the class's methods.
     const visit = (node, prefix) => {

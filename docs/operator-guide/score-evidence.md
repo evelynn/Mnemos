@@ -247,3 +247,22 @@ not-integration 1570 pass / 19 사전존재 Windows-환경=PR-162 동일집합·
 
 근본/잔존(정직): `set`은 ggoss-ts SQL 파서 버그가 근본(ingest 필터는 증상 차단) → analyzer 라운드
 후보. EXPOSES 엣지 부재(PR-164)는 미해결.
+
+## 자율 라운드 PR-164 (dogfood — Next.js route handler EXPOSES 엣지)
+
+PR-162/163 dogfood의 마지막 코드-격차. 분석 그래프 EXPOSES **0건**이라 duplicate_endpoint + OTLP
+reconcile가 TS에서 무발화였다.
+
+| PR | 영역 | 발견 (dogfood 실측) | 점수 |
+|----|------|--------------------|------|
+| 164 | OTLP runtime correlation | ggoss-ts가 NestJS/Express/fetch만 감지하고 **Next.js App Router**(`app/**/route.ts`의 `export function GET/POST`)는 미감지 → contract에 server EXPOSES 없음. 파일경로→URL 도출(route group 제거, `[id]`→`{id}`)로 메서드당 contract+EXPOSES 방출. dogfood 재실행: EXPOSES **0→143** | 86→87 |
+
+검증: dogfood EXPOSES 0→143 실측 + 단위테스트(Next.js 감지/dynamic/route-group/arrow/비-route 무시).
+게이트 GREEN(ruff 0, pytest not-integration 1574 pass / 19 사전존재 Windows-환경=PR-163 동일집합·회귀 0,
+실분석기 pr76/75/87 통과, mypy 불변).
+
+갱신 가중평균: OTLP 0.03×(+0.1) → +0.003 → 약 **91.4/100**(구조적 unblock, 가중 기여 소).
+
+**dogfood 검증 아크 완료**: PR-162(정확 카운트)·163(도메인-only)·164(server EXPOSES)로 dogfood가 드러낸
+코드-격차 3건 종결. 잔존은 환경의존(라이브 OTel/docker) 또는 설계(보안·인가 finding 룰 — dogfood 실제
+IDOR는 Claude가 잡고 Mnemos는 못 잡음).
