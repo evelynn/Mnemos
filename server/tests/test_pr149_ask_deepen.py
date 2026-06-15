@@ -28,14 +28,17 @@ def test_terms_and_confidence():
 
     terms = _terms("Where is handle_create_order and what DB does it write?")
     assert "handle_create_order" in terms or "handle" in terms
-    # confident only when a hit id/name actually contains a term
-    hits = [{"symbol_id": "py:backend/orders.py::handle_create_order", "name": "handle_create_order"}]
+    # confident only when a code-symbol hit clears the search-score
+    # threshold (real search_symbols hits always carry a "score").
+    hits = [{"symbol_id": "py:backend/orders.py::handle_create_order",
+             "name": "handle_create_order", "score": 9.0}]
     assert _is_confident(hits, terms) is True
-    assert _is_confident([{"symbol_id": "py:x::zzz", "name": "zzz"}], terms) is False
+    # a weakly-scored hit is not a confident answer
+    assert _is_confident([{"symbol_id": "py:x::zzz", "name": "zzz", "score": 0.5}], terms) is False
     assert _is_confident([], terms) is False
     # a DataEntity table lexically hitting "order" must NOT count as a
-    # confident answer to "where is the order ... handler" → forces deepen
-    assert _is_confident([{"symbol_id": "data:orders", "name": "orders"}], terms) is False
+    # confident answer — even at a high score — → forces deepen
+    assert _is_confident([{"symbol_id": "data:orders", "name": "orders", "score": 9.0}], terms) is False
 
 
 def test_candidate_ranker_prefers_matching_file(tmp_path):

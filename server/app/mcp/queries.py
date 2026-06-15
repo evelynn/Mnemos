@@ -19,46 +19,107 @@ from app.models.graph import Edge, Node
 
 _TOKEN = re.compile(r"[A-Za-z0-9]+")
 
+# Grammatical function words + interrogatives that carry no search
+# intent. Dropping them is what lets a natural-language question
+# ("how does authentication work") rank on its content word
+# ("authentication") instead of on "work" incidentally substring-
+# matching "...Workbench". Verbs that double as method names
+# (get/show/find/list/read/write/use) are deliberately KEPT.
+_STOPWORDS = frozenset({
+    "the", "a", "an", "of", "to", "in", "on", "at", "for", "with", "and",
+    "or", "is", "are", "was", "were", "be", "been", "am", "being",
+    "do", "does", "did", "doing", "how", "what", "where", "which", "who",
+    "whom", "why", "when", "this", "that", "these", "those", "it", "its",
+    "as", "by", "from", "into", "about", "me", "my", "mine", "i", "you",
+    "your", "we", "our", "us", "they", "them", "their", "can", "could",
+    "will", "would", "shall", "should", "may", "might", "must", "here",
+    "there", "so", "but", "if", "then", "than", "such", "via", "per",
+    "work", "works", "working",
+})
+
+# Split identifiers/paths into word tokens: camelCase, PascalCase,
+# snake_case, kebab, and path separators. ``api-auth.ts`` → [api, auth,
+# ts]; ``getUserById`` → [get, user, by, id].
+_CAMEL = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
+
+
+def _name_tokens(s: str | None) -> set[str]:
+    out: set[str] = set()
+    for chunk in re.split(r"[^A-Za-z0-9]+", s or ""):
+        for tok in _CAMEL.findall(chunk):
+            out.add(tok.lower())
+    return out
+
+
+def _prefix_match(term: str, tokens: set[str]) -> bool:
+    """A term shares a stem with a word token — the token starts with
+    the term (≥ 3 chars: "log"→"logs", "get"→"getUser"), or the term
+    starts with the token (≥ 4 chars: "authentication"→"auth"). This is
+    the concept half: it finds ``auth`` in ``AuthError`` for an
+    "authentication" query WITHOUT the false mid-word hits plain
+    substring produces ("flow" inside "overflow")."""
+    for tok in tokens:
+        if len(term) >= 3 and tok.startswith(term):
+            return True
+        if len(tok) >= 4 and term.startswith(tok):
+            return True
+    return False
+
 
 def _tokenize(query: str | None) -> list[str]:
-    """Split a free-text query into lowercased alphanumeric terms.
+    """Split a free-text query into lowercased alphanumeric content
+    terms (stopwords removed).
 
     A symbol search for "payment retry" must find ``retryPayment`` —
     the old substring match needed the literal phrase. Tokenising lets
-    each term match independently.
+    each term match independently; dropping stopwords keeps a
+    natural-language question from ranking on filler words.
     """
-    return [t.lower() for t in _TOKEN.findall(query or "")]
+    return [
+        t for t in (m.lower() for m in _TOKEN.findall(query or ""))
+        if t not in _STOPWORDS
+    ]
 
 
 def _score_symbol(
-    terms: list[str], name: str | None, sym_id: str, signature: str | None
+    terms: list[str],
+    name: str | None,
+    sym_id: str,
+    signature: str | None,
+    path: str | None = None,
 ) -> float:
     """Lexical relevance of a symbol to the query terms.
 
-    Term-coverage scoring weighted by field — a hit in the name ranks
-    well above one in the id or signature, an exact name match highest.
-    Returns 0 when no term matched. This is the BM25-ish lexical half
-    of spec §11.3's search; the vector half needs an embedding model.
+    Term-coverage scoring weighted by field — an exact name match ranks
+    highest, then a name substring, then a stem/token match (the
+    concept half: auth↔authentication), then the file path, then id and
+    signature. Returns 0 when no term matched. BM25-ish lexical half of
+    spec §11.3's search; the vector half needs an embedding model.
     """
     if not terms:
         return 0.0
     name_l = (name or "").lower()
-    id_l = (sym_id or "").lower()
     sig_l = (signature or "").lower()
+    name_tokens = _name_tokens(name)
+    aux_tokens = _name_tokens(path) | _name_tokens(sym_id)
     score = 0.0
     matched = 0
     for t in terms:
-        if t in name_l:
-            score += 3.0
-            if name_l == t:
-                score += 2.0
-            matched += 1
-        elif t in id_l:
+        if name_l == t:                                  # whole name
+            score += 5.0
+        elif t in name_tokens:                           # exact word in name
+            score += 4.0
+        elif _prefix_match(t, name_tokens):              # stem of a name word
+            score += 2.5
+        elif t in aux_tokens or _prefix_match(t, aux_tokens):  # file path / id word
             score += 1.5
-            matched += 1
+        elif t in name_l:    # mid-word substring — weak; alone it stays
+            score += 1.0     # below the confident threshold (surfaces as a candidate)
         elif t in sig_l:
             score += 0.5
-            matched += 1
+        else:
+            continue
+        matched += 1
     # Every term matched somewhere — a strong signal.
     if matched == len(terms):
         score += 1.0
@@ -86,14 +147,20 @@ async def search_symbols(
         # Spec §11.3 filter — scope the search to a single component.
         stmt = stmt.where(Node.data["component_id"].astext == component_id)
     if terms:
-        # Candidate set — any term matching id / name / signature. The
-        # ranking below (not SQL) decides the order.
+        # Candidate set — any term matching id / name / signature, plus
+        # a 4-char stem for longer concept words so "authentication"
+        # reaches the ``auth`` in ``AuthError`` / ``api-auth.ts`` that a
+        # full substring match misses. The ranking below (not SQL) orders.
         conds = []
         for t in terms:
             like = f"%{t}%"
             conds.append(Node.id.ilike(like))
             conds.append(Node.data["name"].astext.ilike(like))
             conds.append(Node.data["signature"].astext.ilike(like))
+            if len(t) >= 6:
+                stem = f"%{t[:4]}%"
+                conds.append(Node.id.ilike(stem))
+                conds.append(Node.data["name"].astext.ilike(stem))
         stmt = stmt.where(or_(*conds))
     # Cap the candidate scan so a huge graph stays bounded.
     rows = (await session.execute(stmt.limit(2000))).scalars().all()
@@ -101,7 +168,10 @@ async def search_symbols(
     scored: list[tuple[float, Node]] = []
     for r in rows:
         d = r.data or {}
-        s = _score_symbol(terms, d.get("name"), r.id, d.get("signature"))
+        s = _score_symbol(
+            terms, d.get("name"), r.id, d.get("signature"),
+            (d.get("location") or {}).get("file"),
+        )
         if terms and s <= 0:
             continue
         scored.append((s, r))

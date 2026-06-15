@@ -1327,3 +1327,7 @@ pre.code, .code-block { border-radius: var(--radius-md); }
 .ask-matches { padding-left: 0; margin: var(--sp-2) 0 0; }
 .ask-matches li { margin: 0.35rem 0; list-style: none; }
 .ask-kind-sm { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+/* Not-confident answer: a clear disclaimer + a muted/amber framing so a
+   closest-guess isn't mistaken for a definitive answer (PR-169). */
+.ask-tentative { margin: 0 0 var(--sp-2); font-size: 0.85rem; }
+.ask-card-tentative { border-left: 3px solid var(--warn); padding-left: var(--sp-3); }

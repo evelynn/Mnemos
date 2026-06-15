@@ -152,8 +152,10 @@ function renderAnswer(d) {
     const chips = arr => (arr || []).map(w => `<span class="chip">${escapeHtml(w)}</span>`).join(" ");
     const writes = chips(a.writes);
     const reads = chips(a.reads);
-    ans.innerHTML = `
-      <div class="ask-card">
+    const tentative = d.answered ? "" :
+      `<p class="muted ask-tentative" data-i18n="No symbol confidently answers this — showing the closest match. Try naming a specific function or file, or set a Source root to analyse on demand.">No symbol confidently answers this — showing the closest match. Try naming a specific function or file, or set a Source root to analyse on demand.</p>`;
+    ans.innerHTML = tentative + `
+      <div class="ask-card${d.answered ? "" : " ask-card-tentative"}">
         <p class="ask-text">${mdLite(a.text || a.name || "")}
           <button type="button" id="aq-listen" class="listen-btn" hidden
                   aria-label="${MnemosUI.t("Read the answer aloud")}"

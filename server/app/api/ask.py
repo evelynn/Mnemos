@@ -16,7 +16,6 @@ answer, extract them via the Claude Code subscription, then re-answer.
 
 from __future__ import annotations
 
-import re
 import uuid
 from pathlib import Path
 
@@ -35,7 +34,7 @@ from app.extractor.agent_extract import (
     is_agent_sdk_available,
     to_envelopes,
 )
-from app.mcp.queries import get_data_access, get_symbol, search_symbols
+from app.mcp.queries import _tokenize, get_data_access, get_symbol, search_symbols
 from app.orchestrator.jobs import _record_payload
 
 router = APIRouter(
@@ -45,26 +44,39 @@ router = APIRouter(
 )
 
 
+# A graph answer counts as confident only at this search score — a
+# name (3.0/5.0), or a stem/concept hit (2.5) once the all-terms-matched
+# bonus is added. Below it (file-path 1.5, id 1.2, signature 0.5 only)
+# the match is too loose to assert "X is the answer", so the UI presents
+# candidates instead of a definitive answer — and the deepen path may fire.
+_CONFIDENT_SCORE = 3.0
+
+
 def _terms(question: str) -> list[str]:
-    return [t for t in re.split(r"[^a-zA-Z0-9_]+", question.lower()) if len(t) >= 3]
+    # Stopword-filtered content terms (shared with the search ranker) so
+    # "how does authentication work" reduces to ["authentication"], not
+    # filler that incidentally matches a symbol.
+    return _tokenize(question)
 
 
 def _is_confident(hits: list[dict], terms: list[str]) -> bool:
-    """A graph answer is confident only when a returned *code Symbol*
-    (not a DataEntity / Contract) has a name matching a question term.
+    """Confident only when a returned *code Symbol* (not a
+    DataEntity / Contract) clears ``_CONFIDENT_SCORE`` — a genuine
+    name/stem/path-backed match, not a stopword or signature brush.
 
     A bare table match — e.g. "order creation handler" lexically hitting
     the ``data:orders`` table — must NOT suppress deepening, or the
     platform would answer "here's the orders table" to "where is the
-    handler". Restricting confidence to Symbol nodes is what makes the
-    insufficient→deepen path fire for code questions whose implementing
-    symbol wasn't extracted yet."""
+    handler". Restricting confidence to well-scored Symbol nodes is what
+    keeps a vague question from getting a confident wrong answer and what
+    makes the insufficient→deepen path fire."""
+    if not terms:
+        return False
     for h in hits[:5]:
         sid = str(h.get("symbol_id", ""))
         if sid.startswith("data:") or sid.startswith("contract:"):
             continue
-        name = str(h.get("name") or "").lower()
-        if any(t in name or t in sid.lower() for t in terms):
+        if float(h.get("score") or 0.0) >= _CONFIDENT_SCORE:
             return True
     return False
 

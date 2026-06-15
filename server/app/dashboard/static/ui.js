@@ -1970,6 +1970,10 @@
       "그래프가 답하지 못하면 필요 시 추가로 분석",
     "Answer":
       "답변",
+    "Best match":
+      "가장 가까운 항목",
+    "No symbol confidently answers this — showing the closest match. Try naming a specific function or file, or set a Source root to analyse on demand.":
+      "이 질문에 확실히 답하는 심볼이 없습니다 — 가장 가까운 항목을 보여줍니다. 특정 함수나 파일 이름으로 묻거나, 심화 옵션에서 소스 루트를 설정해 즉석 분석하세요.",
     "Answered":
       "답변됨",
     "Answering…":
