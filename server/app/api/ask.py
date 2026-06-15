@@ -34,7 +34,14 @@ from app.extractor.agent_extract import (
     is_agent_sdk_available,
     to_envelopes,
 )
-from app.mcp.queries import _tokenize, get_data_access, get_symbol, search_symbols
+from app.mcp.queries import (
+    _name_tokens,
+    _prefix_match,
+    _tokenize,
+    get_data_access,
+    get_symbol,
+    search_symbols,
+)
 from app.orchestrator.jobs import _record_payload
 
 router = APIRouter(
@@ -59,24 +66,50 @@ def _terms(question: str) -> list[str]:
     return _tokenize(question)
 
 
+def _name_coverage(name: str | None, terms: list[str]) -> int:
+    """How many of the question's content terms actually hit this
+    symbol's *name* (exact word, shared stem, or substring)."""
+    name_l = (name or "").lower()
+    toks = _name_tokens(name)
+    return sum(
+        1 for t in terms
+        if t in toks or _prefix_match(t, toks) or t in name_l
+    )
+
+
 def _is_confident(hits: list[dict], terms: list[str]) -> bool:
     """Confident only when a returned *code Symbol* (not a
-    DataEntity / Contract) clears ``_CONFIDENT_SCORE`` — a genuine
-    name/stem/path-backed match, not a stopword or signature brush.
+    DataEntity / Contract) clears ``_CONFIDENT_SCORE`` AND genuinely
+    covers the question.
 
-    A bare table match — e.g. "order creation handler" lexically hitting
-    the ``data:orders`` table — must NOT suppress deepening, or the
-    platform would answer "here's the orders table" to "where is the
-    handler". Restricting confidence to well-scored Symbol nodes is what
-    keeps a vague question from getting a confident wrong answer and what
-    makes the insufficient→deepen path fire."""
+    Two guards:
+    - A bare table match — e.g. "order creation handler" lexically hitting
+      the ``data:orders`` table — must NOT suppress deepening, so
+      DataEntity/Contract nodes never count (keeps the deepen path firing).
+    - A multi-term question must have **>1** of its content terms hit the
+      symbol name. Without this, a lone word-match on an unrelated
+      multi-word name poses as a confident answer — "search index" →
+      ``statusIndex`` (only "index" matched), "errors logged" →
+      ``useBindingErrors`` (only "errors"). Such partial matches still
+      surface as the tentative "closest match", just not as a definitive
+      answer."""
     if not terms:
         return False
     for h in hits[:5]:
         sid = str(h.get("symbol_id", ""))
         if sid.startswith("data:") or sid.startswith("contract:"):
             continue
-        if float(h.get("score") or 0.0) >= _CONFIDENT_SCORE:
+        score = float(h.get("score") or 0.0)
+        if score < _CONFIDENT_SCORE:
+            continue
+        if len(terms) < 2 or _name_coverage(h.get("name"), terms) >= 2:
+            return True
+        # Only one term hit a multi-term question. Stay confident *only*
+        # if that hit is the operator typing the symbol's whole compound
+        # name (score 5.0 + ≥2 word tokens) — a deliberate identifier like
+        # "saveCache" — not one word of an unrelated or common-word name
+        # ("index" in statusIndex, "connection" in Connection).
+        if score >= 5.0 and len(_name_tokens(h.get("name"))) >= 2:
             return True
     return False
 
