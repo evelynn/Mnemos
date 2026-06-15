@@ -60,6 +60,42 @@ async def _set_run_status(
     await session.commit()
 
 
+# Names a SQL analyzer surfaces as "tables" from raw queries but that are not
+# part of a project's domain data model: system catalogs (schema introspection)
+# and parser artifacts. A dogfood run on a real Next.js app extracted
+# sqlite_master, pg_namespace, the Oracle data dictionary, the DUAL
+# pseudo-table, and ``set`` (from ``UPDATE x SET ...``) as data entities,
+# inflating and polluting the data map. These never denote domain tables, so
+# they are dropped at ingest. Conservatively scoped — ambiguous bare words
+# (tables/columns/views) are intentionally NOT listed to avoid dropping a real
+# domain table of that name.
+_SYSTEM_DATA_ENTITY_NAMES: frozenset[str] = frozenset(
+    {
+        "set", "dual",  # SQL keyword artifact / Oracle pseudo-table
+        "sqlite_master", "sqlite_sequence", "sqlite_stat1", "sqlite_temp_master",
+        "information_schema", "schemata",
+        "pg_namespace", "pg_class", "pg_attribute", "pg_type", "pg_index",
+        "performance_schema", "sys",
+        "user_tables", "user_tab_columns", "user_tab_cols", "user_views",
+        "user_objects", "user_constraints", "all_tables", "all_tab_columns",
+    }
+)
+_SYSTEM_DATA_ENTITY_PREFIXES: tuple[str, ...] = (
+    "sqlite_", "pg_", "dba_", "v$", "gv$", "user_tab", "all_tab",
+)
+
+
+def _is_system_data_entity(name: str | None) -> bool:
+    """True for SQL system catalogs / pseudo-tables that are not part of the
+    project's domain data model and should not become DataEntity nodes."""
+    n = (name or "").strip().lower()
+    if not n:
+        return False
+    if n in _SYSTEM_DATA_ENTITY_NAMES:
+        return True
+    return n.startswith(_SYSTEM_DATA_ENTITY_PREFIXES)
+
+
 async def _record_payload(
     session: AsyncSession,
     *,
@@ -113,6 +149,10 @@ async def _record_payload(
         node_id = data.get("id")
         if not node_id:
             return
+        # Skip SQL system catalogs / pseudo-tables (schema-introspection
+        # targets, ``UPDATE..SET`` parser artifacts) — not domain data.
+        if _is_system_data_entity(data.get("name") or node_id):
+            return
         await upsert_node(
             session,
             project_id=project_id,
@@ -132,6 +172,12 @@ async def _record_payload(
         if tgt.startswith("http.") and tgt.count(".") >= 2:
             method, _, rest = tgt.removeprefix("http.").partition(".")
             tgt = http_contract_id(method, rest)
+        # Drop READS/WRITES edges to a SQL system catalog / pseudo-table so the
+        # data map stays domain-only (matches the DataEntity node filter).
+        if kind in ("READS", "WRITES") and _is_system_data_entity(
+            tgt.removeprefix("data.")
+        ):
+            return
         await upsert_edge(
             session,
             project_id=project_id,

@@ -230,3 +230,20 @@ mutation 내장(totals=3 vs inventory=1). 게이트 GREEN(ruff 0, mypy 68 불변
 남은 dogfood 후속(검증됨): DataEntity 시스템카탈로그/키워드 FP 필터(sqlite_master/dual/set 등,
 PR-163 후보); ggoss-ts EXPOSES 엣지 부재로 duplicate_endpoint+OTLP reconcile TS 무발화(PR-164);
 finding taxonomy에 보안·인가·로직 룰 부재(0 findings, 설계 논의).
+
+## 자율 라운드 PR-163 (dogfood — DataEntity 시스템 카탈로그 FP 필터)
+
+PR-162 dogfood 후속. distinct DataEntity 34개 중 ~8개가 도메인 아닌 노이즈(SQL 시스템 카탈로그 +
+`UPDATE..SET` 파서 아티팩트)임을 provenance까지 실측.
+
+| PR | 영역 | 발견 (dogfood provenance) | 점수 |
+|----|------|--------------------------|------|
+| 163 | 그래프 데이터 품질 | sqlite_master/pg_namespace/schemata/user_tables 등 시스템 카탈로그(drivers.ts:introspect)와 `set`(UPDATE..SET 오파싱)이 DataEntity로 추출. ingest 보수적 denylist로 노드+READS/WRITES 엣지 drop(모호어 tables/columns는 제외). dogfood 재실행: distinct DataEntity **34→26**, FP 8종 제거, 도메인 테이블 전부 보존 | 89→90 |
+
+검증: dogfood 재실행 실측 + 단위/통합 테스트. 게이트 GREEN(ruff 0, mypy 68 불변, pytest
+not-integration 1570 pass / 19 사전존재 Windows-환경=PR-162 동일집합·회귀 0).
+
+갱신 가중평균: 그래프품질 0.08×(+0.1) → +0.008 → 약 **91.4/100**.
+
+근본/잔존(정직): `set`은 ggoss-ts SQL 파서 버그가 근본(ingest 필터는 증상 차단) → analyzer 라운드
+후보. EXPOSES 엣지 부재(PR-164)는 미해결.
