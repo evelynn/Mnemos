@@ -25,9 +25,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.ask import _entity_name, _short_path
+from app.models.graph import Node
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
 from app.auth.org_scope import require_project_org
@@ -45,16 +47,20 @@ router = APIRouter(
 )
 
 _SYSTEM = (
-    "You are Mnemos, a senior software analyst embedded in a code-knowledge "
-    "platform. Answer the operator's question about the ANALYSED project using "
-    "the provided analysis context (symbols, data access, call graph) and the "
-    "source-code excerpts. You can: explain what a function does, propose SQL / "
-    "query optimisations, discuss how to modify code with trade-offs, trace a "
-    "process across layers, and draft short reports. Cite file:line for "
-    "concrete claims. If the context is insufficient to answer, say what is "
-    "missing rather than inventing — never fabricate symbols, tables, or file "
-    "paths that are not in the context. Reply in the operator's language "
-    "(Korean if they wrote Korean). Use concise, well-structured markdown."
+    "You are Mnemos, a senior software analyst embedded in a SOURCE-CODE "
+    "ANALYSIS platform. Answer the operator's question about the ANALYSED "
+    "project strictly from the provided analysis context: a project overview "
+    "(the API endpoints and data tables), the most relevant symbols (with data "
+    "access and call counts), and source-code excerpts. For HIGH-LEVEL "
+    "questions — the project's purpose, architecture, or process/request "
+    "flow — reason from the API endpoints and data tables in the overview "
+    "(group the endpoints by area to describe what the system does and how a "
+    "request flows through it). For SPECIFIC questions explain functions, "
+    "propose SQL/query optimisations, discuss code changes with trade-offs, or "
+    "draft reports, citing file:line. Never invent endpoints, tables, symbols, "
+    "or paths that are not in the context; if something is genuinely missing, "
+    "say so. Reply in the operator's language (Korean if they wrote Korean). "
+    "Use concise, well-structured markdown."
 )
 
 
@@ -80,6 +86,56 @@ def _resolve_source_root(given: str | None) -> str | None:
     if root and Path(root).is_dir():
         return root
     return None
+
+
+async def _project_overview(
+    db: AsyncSession, project_id: uuid.UUID, *,
+    max_contracts: int = 60, max_entities: int = 40,
+) -> dict:
+    """The project's shape from the analysis — counts, the API surface
+    (HTTP endpoints / contracts) and the data tables. This is what lets
+    the chat answer high-level questions ("what is this project's
+    purpose / process flow?") that no single symbol match can."""
+    counts = dict(
+        (await db.execute(
+            select(Node.kind, func.count()).where(
+                Node.project_id == project_id, Node.valid_to.is_(None)
+            ).group_by(Node.kind)
+        )).all()
+    )
+
+    async def _names(kind: str, limit: int) -> list[str]:
+        rows = (await db.execute(
+            select(Node).where(
+                Node.project_id == project_id, Node.valid_to.is_(None),
+                Node.kind == kind,
+            ).order_by(Node.id).limit(limit)
+        )).scalars().all()
+        return [str((r.data or {}).get("name") or r.id) for r in rows]
+
+    return {
+        "counts": counts,
+        "contracts": await _names("Contract", max_contracts),
+        "entities": await _names("DataEntity", max_entities),
+    }
+
+
+def _render_overview(ov: dict) -> str:
+    c = ov.get("counts") or {}
+    lines = [
+        f"- Graph: {c.get('Symbol', 0)} code symbols, "
+        f"{c.get('Contract', 0)} API endpoints, "
+        f"{c.get('DataEntity', 0)} data tables, "
+        f"{c.get('Component', 0)} components."
+    ]
+    if ov.get("contracts"):
+        lines.append("- API endpoints (the system's external surface — read "
+                     "these to infer the project's purpose and request flow):")
+        lines.append("  " + "; ".join(ov["contracts"]))
+    if ov.get("entities"):
+        lines.append("- Data tables (the persisted domain model): "
+                     + ", ".join(ov["entities"]))
+    return "\n".join(lines)
 
 
 def _read_code(source_root: str, file: str | None, line: int | None,
@@ -179,10 +235,14 @@ def _build_prompt(history: list[ChatMessage], context: str, question: str) -> st
             f"{m.role}: {m.content}" for m in history
         ) + "\n\n"
     return (
-        f"{convo}## Analysis context (most relevant symbols)\n{context}\n\n"
+        f"{convo}# Analysis context for the selected project\n{context}\n\n"
         f"## Operator's question\n{question}\n\n"
-        "Answer using the context above. Cite file:line. If something the "
-        "question needs is not in the context, say so explicitly."
+        "Answer using the analysis context above (project overview + relevant "
+        "symbols + code). For a high-level question (purpose, architecture, "
+        "process flow) ground the answer in the API endpoints and data tables; "
+        "for a specific question use the relevant symbols and code, citing "
+        "file:line. If something the question genuinely needs is absent from "
+        "the context, say so — never invent endpoints, tables, or paths."
     )
 
 
@@ -346,8 +406,13 @@ async def chat(
         )
         hits = _merge_hits(hits, extra, body.top_k)
     source_root = _resolve_source_root(body.source_root)
+    overview = await _project_overview(db, project_id)
     ctx = await _build_context(db, project_id, hits, source_root)
-    prompt = _build_prompt(body.history, _render_context(ctx), body.message)
+    context_md = (
+        "## Project overview\n" + _render_overview(overview)
+        + "\n\n## Most relevant symbols for this question\n" + _render_context(ctx)
+    )
+    prompt = _build_prompt(body.history, context_md, body.message)
 
     reply = await chat_via_agent_sdk(
         system=_SYSTEM, prompt=prompt, timeout_s=body.timeout_s
