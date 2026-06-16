@@ -653,7 +653,10 @@
     opts = opts || {};
     if (typeof host === "string") host = document.querySelector(host);
     if (!host) return Promise.resolve(null);
-    var preset = currentProjectFromUrl();
+    // Preset from the URL ``?project=`` OR the globally-selected project
+    // (mnemos_last_project) so picking a project once carries across every
+    // page without re-selecting on each screen (PR-173 global selection).
+    var preset = _currentProjectContext();
     var name = host.getAttribute("name") || "project_id";
     var hostId = host.id || "project-picker";
     var required = host.hasAttribute("required");
@@ -690,7 +693,12 @@
       // <label> ``for=`` references survive.
       if (host.parentNode) host.parentNode.replaceChild(sel, host);
 
-      if (opts.autoSubmit && preset && formEl) {
+      if (preset && formEl && opts.autoSubmit !== false) {
+        // Auto-load whenever a project is preset (from the URL or the
+        // global selection) so the operator picks a project once and
+        // every page shows its data without a second click (PR-173).
+        // Pages whose form needs more than a project (e.g. Ask needs a
+        // question) pass ``autoSubmit: false`` to opt out.
         // Defer one tick so caller's load() handler is registered
         // before we trigger it.
         setTimeout(function () {
@@ -2824,6 +2832,7 @@
     voiceStatus: voiceStatus,
     speak: speak,
     currentProjectFromUrl: currentProjectFromUrl,
+    currentProject: _currentProjectContext,
     notify: notify,
     readNotifications: readNotifications,
     clearNotifications: clearNotifications,

@@ -47,6 +47,11 @@
         </div>
       </div>
     </div>
+    <div class="global-project">
+      <label class="gp-label" for="global-project" data-i18n="Project">Project</label>
+      <select id="global-project" class="mnemos-project-picker"
+              aria-label="Active project (applies to every screen)"></select>
+    </div>
     {% set _analysis_tabs = ['analysis', 'data', 'graph', 'findings', 'report'] %}
     {% set _more_tabs = ['plans', 'diffs', 'audit', 'health', 'settings', 'profile', 'docs', 'users', 'organizations', 'sso', 'gdpr'] %}
     <nav>
@@ -253,6 +258,43 @@
         });
       })(groups[i]);
     }
+  });
+
+  // PR-173 — global project selection. Pick a project once here and every
+  // per-project screen (and the chat) reads it; no re-picking per page.
+  // Populates from /api/v1/projects, marks the active one, and on change
+  // remembers it + reloads (dropping any ?project= so the page's picker
+  // presets from the remembered project and auto-loads).
+  document.addEventListener("DOMContentLoaded", function () {
+    var sel = document.getElementById("global-project");
+    if (!sel || !window.MnemosUI) return;
+    var active = (MnemosUI.currentProject && MnemosUI.currentProject()) || "";
+    fetch("/api/v1/projects", { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (projects) {
+        var ph = document.createElement("option");
+        ph.value = "";
+        ph.textContent = MnemosUI.t("Select a project");
+        sel.appendChild(ph);
+        (projects || []).forEach(function (p) {
+          var o = document.createElement("option");
+          o.value = p.id;
+          o.textContent = p.name;
+          if (p.id === active) o.selected = true;
+          sel.appendChild(o);
+        });
+      })
+      .catch(function () {});
+    sel.addEventListener("change", function () {
+      var id = sel.value;
+      if (!id) return;
+      if (MnemosUI.rememberProject) MnemosUI.rememberProject(id);
+      if (window.location.search) {
+        window.location.href = window.location.pathname;
+      } else {
+        window.location.reload();
+      }
+    });
   });
 </script>
 {% endblock %}

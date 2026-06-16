@@ -1234,6 +1234,15 @@ h3 { font-size: 1rem; font-weight: 600; }
 .nav-group:not(.open) > .nav-group-items { display: none; }
 .nav-group-items { display: flex; flex-direction: column; gap: 2px; }
 .nav-group-items a { padding-left: 1.1rem; }
+
+/* PR-173 — global project selector at the sidebar top. */
+.global-project { padding: var(--sp-3) 0.6rem var(--sp-1); }
+.global-project .gp-label {
+  display: block; font-size: 0.68rem; text-transform: uppercase;
+  letter-spacing: 0.07em; font-weight: 600; color: var(--text-muted);
+  margin-bottom: 0.3rem;
+}
+.global-project select { width: 100%; font-size: 0.85rem; }
 .logout-form { border-top: 1px solid var(--border); padding-top: var(--sp-3); margin-top: var(--sp-3); }
 .logout-form button {
   background: var(--surface); color: var(--text); border: 1px solid var(--border);

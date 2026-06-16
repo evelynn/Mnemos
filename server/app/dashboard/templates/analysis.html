@@ -452,6 +452,6 @@ async function loadLatency(ev) {
 
 // PR-137 — project picker. The page already handles ``?project=`` in
 // the onboarding section above; picker just kills the UUID copy-paste.
-MnemosUI.mountProjectPicker("#rpid", { autoSubmit: false });
+MnemosUI.mountProjectPicker("#rpid", { autoSubmit: true });
 </script>
 {% endblock %}
