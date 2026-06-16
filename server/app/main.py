@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api import analysis as analysis_api
 from app.api import artifacts as artifacts_api
 from app.api import ask as ask_api
+from app.api import chat as chat_api
 from app.api import audit as audit_api
 from app.api import auth as auth_api
 from app.api import break_glass as break_glass_api
@@ -127,6 +128,7 @@ def create_app() -> FastAPI:
     app.include_router(findings_api.router)
     app.include_router(flow_api.router)
     app.include_router(ask_api.router)
+    app.include_router(chat_api.router)
     app.include_router(voice_api.router)
     app.include_router(plans_api.router)
     app.include_router(diffs_api.router)

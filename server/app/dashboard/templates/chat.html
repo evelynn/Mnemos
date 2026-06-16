@@ -1,0 +1,189 @@
+{% extends "_layout.html" %}
+{% block title %}Chat — Mnemos{% endblock %}
+{% block content %}
+<header class="page-head"><h1 data-i18n="Chat">Chat</h1></header>
+
+<p class="muted" data-i18n="chat-blurb">
+  Ask anything about the selected project's analysis — what a function does,
+  how to optimise a query, how to approach a change, how a process flows, or
+  draft a short report. Answers are grounded in the symbols, data access,
+  call graph, and source code.
+</p>
+
+<div id="chat-no-project" class="muted" hidden data-i18n="Select a project at the top of the sidebar to start chatting.">
+  Select a project at the top of the sidebar to start chatting.
+</div>
+
+<div id="chat-wrap" class="chat-wrap" hidden>
+  <div id="chat-log" class="chat-log" aria-live="polite"></div>
+  <form id="chat-form" class="chat-form">
+    <textarea id="chat-input" rows="2" required
+              data-i18n-placeholder="Ask about this project… (Shift+Enter for a new line)"
+              placeholder="Ask about this project… (Shift+Enter for a new line)"></textarea>
+    <button type="submit" class="primary" id="chat-send" data-i18n="Send">Send</button>
+  </form>
+  <p class="muted chat-hint">
+    <span data-i18n="Powered by your Claude subscription — each message uses quota.">Powered by your Claude subscription — each message uses quota.</span>
+    <button type="button" id="chat-clear" class="link-btn" data-i18n="Clear conversation">Clear conversation</button>
+  </p>
+</div>
+
+<style>
+.chat-wrap { display: flex; flex-direction: column; gap: var(--sp-3); margin-top: var(--sp-3); }
+.chat-log { display: flex; flex-direction: column; gap: var(--sp-3); min-height: 200px; }
+.chat-msg { max-width: 860px; padding: var(--sp-3) var(--sp-4); border-radius: var(--radius-lg); }
+.chat-msg.user { align-self: flex-end; background: var(--accent-soft); color: var(--accent-strong); }
+.chat-msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--border); }
+.chat-msg.pending { align-self: flex-start; color: var(--text-muted); font-style: italic; }
+.chat-msg .ctx { margin-top: var(--sp-2); font-size: 0.78rem; color: var(--text-muted); }
+.chat-msg .ctx code { background: var(--surface-alt); padding: 0.02rem 0.3rem; border-radius: var(--radius-sm); }
+.chat-md p { margin: 0 0 0.6rem; }
+.chat-md h2 { font-size: 1.05rem; margin: 0.8rem 0 0.4rem; }
+.chat-md h3 { font-size: 0.95rem; margin: 0.7rem 0 0.3rem; }
+.chat-md pre { background: var(--surface-alt); padding: 0.6rem 0.8rem; border-radius: var(--radius-md); overflow-x: auto; font-size: 0.82rem; }
+.chat-md code { font-family: var(--font-mono); font-size: 0.88em; }
+.chat-md pre code { background: none; }
+.chat-md ul, .chat-md ol { margin: 0.2rem 0 0.6rem 1.1rem; }
+.chat-md li { margin: 0.15rem 0; }
+.chat-form { display: flex; gap: var(--sp-2); align-items: flex-end; }
+.chat-form textarea { flex: 1; resize: vertical; }
+.chat-hint { display: flex; gap: var(--sp-3); align-items: center; font-size: 0.8rem; }
+</style>
+
+<script>
+// PR-174 — conversational AI over the analysis. Scoped to the globally
+// selected project (PR-173). History is kept client-side and sent with
+// each turn so the one-shot /chat endpoint stays conversational.
+(function () {
+  var pid = (window.MnemosUI && MnemosUI.currentProject && MnemosUI.currentProject()) || "";
+  var wrap = document.getElementById("chat-wrap");
+  var noProj = document.getElementById("chat-no-project");
+  if (!pid) { noProj.hidden = false; return; }
+  wrap.hidden = false;
+
+  var log = document.getElementById("chat-log");
+  var form = document.getElementById("chat-form");
+  var input = document.getElementById("chat-input");
+  var sendBtn = document.getElementById("chat-send");
+  var history = [];   // [{role, content}]
+
+  // Minimal, safe markdown → HTML (escape first, then a few inlines +
+  // fenced code + headings + lists). We control nothing about the LLM
+  // output, so escaping is mandatory before any tag insertion.
+  function mdToHtml(md) {
+    var esc = function (s) {
+      return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    };
+    var lines = (md || "").split("\n");
+    var out = [], inCode = false, inList = false;
+    var inline = function (s) {
+      s = esc(s);
+      s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+      s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      return s;
+    };
+    var closeList = function () { if (inList) { out.push("</ul>"); inList = false; } };
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i];
+      if (ln.indexOf("```") === 0) {
+        closeList();
+        if (inCode) { out.push("</code></pre>"); inCode = false; }
+        else { out.push("<pre><code>"); inCode = true; }
+        continue;
+      }
+      if (inCode) { out.push(esc(ln)); continue; }
+      var h = ln.match(/^(#{1,6})\s+(.*)$/);
+      if (h) { closeList(); out.push("<h" + h[1].length + ">" + inline(h[2]) + "</h" + h[1].length + ">"); continue; }
+      if (/^\s*[-*]\s+/.test(ln)) {
+        if (!inList) { out.push("<ul>"); inList = true; }
+        out.push("<li>" + inline(ln.replace(/^\s*[-*]\s+/, "")) + "</li>");
+        continue;
+      }
+      closeList();
+      if (ln.trim() === "") { out.push(""); continue; }
+      out.push("<p>" + inline(ln) + "</p>");
+    }
+    if (inCode) out.push("</code></pre>");
+    closeList();
+    return out.join("\n");
+  }
+
+  function addMsg(role, html, cls) {
+    var el = document.createElement("div");
+    el.className = "chat-msg " + (cls || role);
+    el.innerHTML = html;
+    log.appendChild(el);
+    el.scrollIntoView({ behavior: "smooth", block: "end" });
+    return el;
+  }
+
+  function ctxLine(ctx) {
+    if (!ctx || !ctx.length) return "";
+    var items = ctx.slice(0, 6).map(function (c) {
+      // Symbol names/paths come from the analysed repo — escape them.
+      var loc = c.file ? escapeHtml(c.file + (c.line ? ":" + c.line : "")) : "";
+      return "<code>" + escapeHtml(c.name || "?") + "</code>" + (loc ? " " + loc : "");
+    });
+    return '<div class="ctx">' + MnemosUI.t("Context") + ": " + items.join(" · ") + "</div>";
+  }
+
+  async function send(message) {
+    addMsg("user", "<div class=\"chat-md\">" + mdToHtml(message) + "</div>");
+    history.push({ role: "user", content: message });
+    var pending = addMsg("assistant", MnemosUI.t("Thinking…"), "pending");
+    sendBtn.disabled = true;
+    try {
+      // window.fetch is auto-patched (ui.js) to attach the CSRF token.
+      var r = await fetch("/api/v1/projects/" + pid + "/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ message: message, history: history.slice(0, -1) }),
+      });
+      if (!r.ok) {
+        var detail = "";
+        try { detail = (await r.json()).detail; } catch (_) {}
+        pending.className = "chat-msg assistant";
+        if (r.status === 503) {
+          pending.innerHTML = '<div class="chat-md">' + mdToHtml(
+            MnemosUI.t("The AI assistant is unavailable (no LLM configured). Use the Ask tab for offline symbol search.")) + "</div>";
+        } else {
+          pending.innerHTML = '<div class="chat-md">' + mdToHtml(
+            MnemosUI.t("Request failed") + (detail ? ": " + detail : "")) + "</div>";
+        }
+        return;
+      }
+      var data = await r.json();
+      pending.className = "chat-msg assistant";
+      pending.innerHTML = '<div class="chat-md">' + mdToHtml(data.reply) + "</div>" + ctxLine(data.context);
+      history.push({ role: "assistant", content: data.reply });
+    } catch (e) {
+      pending.className = "chat-msg assistant";
+      pending.innerHTML = '<div class="chat-md">' + mdToHtml(MnemosUI.t("Request failed")) + "</div>";
+    } finally {
+      sendBtn.disabled = false;
+      pending.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }
+
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var msg = input.value.trim();
+    if (!msg) return;
+    input.value = "";
+    send(msg);
+  });
+  // Enter sends, Shift+Enter newlines.
+  input.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  document.getElementById("chat-clear").addEventListener("click", function () {
+    history = [];
+    log.innerHTML = "";
+  });
+})();
+</script>
+{% endblock %}

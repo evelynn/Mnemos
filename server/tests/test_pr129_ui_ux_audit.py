@@ -224,7 +224,7 @@ _KNOWN_ROUTES = {
     "/findings", "/audit", "/settings", "/profile", "/users",
     "/organizations", "/sso", "/gdpr", "/graph", "/report",
     "/health", "/docs", "/login", "/logout", "/forgot", "/reset",
-    "/invite", "/ask",
+    "/invite", "/ask", "/chat",
 }
 
 
@@ -268,6 +268,9 @@ def test_innerhtml_usage_known_safe_patterns():
     audited_safe = {
         "dashboard.html", "diffs.html", "graph.html", "report.html",
         "forgot.html", "docs.html", "ask.html",
+        # chat.html (PR-174) — mdToHtml escapes the LLM reply before any
+        # tag insertion; ctxLine escapeHtml's the symbol name/path.
+        "chat.html",
     }
     actual = set()
     for tpl_name in _LEAF_TEMPLATES:
