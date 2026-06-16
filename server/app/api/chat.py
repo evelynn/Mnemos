@@ -232,6 +232,97 @@ async def chat_via_agent_sdk(
     return text or None
 
 
+# Korean (and other non-ASCII) code concepts → the English keywords that
+# actually appear in source. The lexical ranker only matches ASCII tokens,
+# so ``"인증은 어떻게 동작해?"`` tokenises to nothing and never reaches the
+# ``auth`` code. Mapping the concept words in is instant (no extra LLM call,
+# which on the local subscription cold-starts for 60-150s) and matched by
+# substring since Korean is agglutinative ("인증은"/"인증을" both contain
+# "인증"). Extend freely — uncovered concepts just fall back to the lexical
+# hits and the model answers what it can.
+_KO_CONCEPTS: dict[str, list[str]] = {
+    "인증": ["auth", "authentication", "login", "session", "token"],
+    "로그인": ["login", "signin", "auth", "session"],
+    "로그아웃": ["logout", "signout", "session"],
+    "권한": ["permission", "role", "rbac", "authorize", "access", "guard"],
+    "비밀번호": ["password", "credential", "hash", "auth"],
+    "토큰": ["token", "jwt", "session", "auth"],
+    "세션": ["session", "cookie", "auth"],
+    "보안": ["security", "secure", "sanitize", "auth"],
+    "암호화": ["encrypt", "crypto", "hash", "cipher"],
+    "결제": ["payment", "pay", "billing", "checkout", "transaction"],
+    "주문": ["order", "checkout", "cart"],
+    "데이터베이스": ["database", "db", "query", "sql", "connection"],
+    "디비": ["database", "db", "query", "sql"],
+    "쿼리": ["query", "sql", "select", "search"],
+    "캐시": ["cache", "redis"],
+    "업로드": ["upload", "file", "multipart", "attachment"],
+    "다운로드": ["download", "export", "file"],
+    "검색": ["search", "query", "index", "find", "filter"],
+    "알림": ["notification", "notify", "alert", "push"],
+    "이메일": ["email", "mail", "smtp", "send"],
+    "메일": ["email", "mail", "smtp"],
+    "사용자": ["user", "account", "profile", "member"],
+    "유저": ["user", "account", "profile"],
+    "회원": ["user", "member", "account", "signup", "register"],
+    "프로필": ["profile", "user", "account"],
+    "에러": ["error", "exception", "handler"],
+    "오류": ["error", "exception", "handler"],
+    "예외": ["exception", "error", "catch"],
+    "로그": ["log", "logging", "audit"],
+    "감사": ["audit", "log"],
+    "설정": ["config", "setting", "setup", "option"],
+    "큐": ["queue", "job", "worker", "task"],
+    "작업": ["job", "task", "worker", "queue"],
+    "스케줄": ["schedule", "cron", "job", "timer"],
+    "예약": ["schedule", "reservation", "booking"],
+    "라우트": ["route", "router", "endpoint", "handler"],
+    "엔드포인트": ["endpoint", "route", "api", "handler"],
+    "미들웨어": ["middleware", "interceptor", "guard"],
+    "모델": ["model", "schema", "entity"],
+    "스키마": ["schema", "model", "validate"],
+    "검증": ["validate", "validation", "verify", "check"],
+    "유효성": ["validate", "validation", "schema"],
+    "리포트": ["report", "summary", "export"],
+    "보고서": ["report", "summary"],
+    "그래프": ["graph", "node", "edge", "chart"],
+    "차트": ["chart", "graph", "plot"],
+    "파일": ["file", "upload", "storage"],
+    "이미지": ["image", "photo", "upload", "thumbnail"],
+    "프로세스": ["process", "flow", "pipeline", "workflow"],
+    "흐름": ["flow", "process", "pipeline"],
+    "최적화": ["optimize", "performance", "cache", "index"],
+    "성능": ["performance", "optimize", "latency"],
+}
+
+
+def _expand_terms(question: str) -> list[str]:
+    """English search keywords for the concept words in the question."""
+    q = question.lower()
+    kws: list[str] = []
+    for ko, en in _KO_CONCEPTS.items():
+        if ko in q:
+            for k in en:
+                if k not in kws:
+                    kws.append(k)
+    return kws[:10]
+
+
+def _merge_hits(a: list[dict], b: list[dict], top_k: int) -> list[dict]:
+    """Union two hit lists by symbol id, keeping the higher score."""
+    by_id: dict[str, dict] = {}
+    for h in (a or []) + (b or []):
+        sid = str(h.get("symbol_id", ""))
+        if not sid:
+            continue
+        cur = by_id.get(sid)
+        if cur is None or float(h.get("score") or 0) > float(cur.get("score") or 0):
+            by_id[sid] = h
+    return sorted(
+        by_id.values(), key=lambda h: float(h.get("score") or 0), reverse=True
+    )[:top_k]
+
+
 @router.post("/chat", dependencies=[Depends(require_operator)])
 async def chat(
     project_id: uuid.UUID,
@@ -245,6 +336,15 @@ async def chat(
     hits = await search_symbols(
         db, project_id=project_id, query=body.message, top_k=body.top_k
     )
+    # A Korean/concept question barely tokenises to English, so the lexical
+    # ranker misses the relevant code. Map concept words to English keywords
+    # and search again, merging by best score.
+    expanded = _expand_terms(body.message)
+    if expanded:
+        extra = await search_symbols(
+            db, project_id=project_id, query=" ".join(expanded), top_k=body.top_k
+        )
+        hits = _merge_hits(hits, extra, body.top_k)
     source_root = _resolve_source_root(body.source_root)
     ctx = await _build_context(db, project_id, hits, source_root)
     prompt = _build_prompt(body.history, _render_context(ctx), body.message)
@@ -260,7 +360,8 @@ async def chat(
         action="qa.chat",
         target=body.message[:120],
         project_id=project_id,
-        details={"symbols": [c.get("name") for c in ctx], "code": bool(source_root)},
+        details={"symbols": [c.get("name") for c in ctx], "code": bool(source_root),
+                 "expanded": expanded},
     )
 
     return {
@@ -271,4 +372,5 @@ async def chat(
             for c in ctx
         ],
         "used_code": bool(source_root),
+        "expanded": expanded,
     }
