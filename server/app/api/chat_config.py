@@ -25,6 +25,7 @@ from app.api.llm_providers import (
     PROVIDER_LABELS,
     PROVIDER_ORDER,
     SECRET_KIND,
+    SECRET_PREFIX,
     SETTING_KEY,
     SUGGESTED_MODELS,
     default_provider,
@@ -49,8 +50,10 @@ class ProviderConfigUpdate(BaseModel):
     base_url: str | None = Field(default=None, max_length=400)
 
 
-def _status(provider: str, cfg: dict[str, dict]) -> dict:
+def _status(provider: str, cfg: dict[str, dict], by_label: dict | None = None) -> dict:
     c = cfg.get(provider) or {}
+    sec = (by_label or {}).get(secret_label(provider))
+    msg = sec.last_test_result if sec else None
     return {
         "id": provider,
         "label": PROVIDER_LABELS[provider],
@@ -62,6 +65,13 @@ def _status(provider: str, cfg: dict[str, dict]) -> dict:
         # claudecode can run on the local subscription with no key.
         "needs_key": provider != "claudecode",
         "suggested_models": SUGGESTED_MODELS.get(provider, []),
+        # Persisted last-test outcome (drives the status dot). OK-prefixed
+        # messages mean success (see llm_providers.test_provider).
+        "last_tested_at": (
+            sec.last_tested_at.isoformat() if sec and sec.last_tested_at else None
+        ),
+        "last_test_ok": (msg.startswith("OK") if msg else None),
+        "last_test_message": msg,
     }
 
 
@@ -71,10 +81,14 @@ async def get_provider_config(
     db: AsyncSession = Depends(get_session),
 ) -> dict:
     """Per-provider config status for the Settings UI. Never returns a
-    stored API key — only ``has_key``."""
+    stored API key — only ``has_key`` and the last-test outcome."""
     cfg = await resolve_config(db)
+    secs = (
+        await db.execute(select(Secret).where(Secret.label.like(SECRET_PREFIX + "%")))
+    ).scalars().all()
+    by_label = {s.label: s for s in secs}
     return {
-        "providers": [_status(pid, cfg) for pid in PROVIDER_ORDER],
+        "providers": [_status(pid, cfg, by_label) for pid in PROVIDER_ORDER],
         "default": default_provider(cfg),
     }
 

@@ -140,6 +140,25 @@ async def test_atlas_base_url_persisted(sqlite_session, monkeypatch):
     assert lp.is_provider_available("atlas", cfg) is True
 
 
+def test_status_dot_reflects_last_test():
+    # The Settings dot derives connected/failed from the persisted
+    # last_test_result string (OK-prefixed == success). Pure, no DB.
+    cfg = {pid: {"api_key": None, "model": None, "base_url": None}
+           for pid in lp.PROVIDER_ORDER}
+    cfg["openai"]["api_key"] = "k"
+
+    class _Sec:
+        last_tested_at = None
+        last_test_result = "OK — 5 models"
+
+    by_label = {lp.secret_label("openai"): _Sec()}
+    assert cc._status("openai", cfg, by_label)["last_test_ok"] is True
+    _Sec.last_test_result = "HTTP 401"
+    assert cc._status("openai", cfg, by_label)["last_test_ok"] is False
+    # No secret row → untested (None, not False).
+    assert cc._status("gemini", cfg, {})["last_test_ok"] is None
+
+
 @pytest.mark.asyncio
 async def test_put_unknown_provider_404(sqlite_session):
     with pytest.raises(HTTPException) as ei:

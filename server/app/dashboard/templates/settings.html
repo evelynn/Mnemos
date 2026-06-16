@@ -54,10 +54,20 @@
 #ai-providers .provider-card label { display: block; margin: var(--sp-2) 0; }
 #ai-providers .provider-card input { width: 100%; max-width: 480px; }
 #ai-providers .provider-actions { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; margin-top: var(--sp-2); }
-#ai-providers .provider-badge { font-size: 0.72rem; padding: 0.1rem 0.5rem; border-radius: var(--radius-sm); background: var(--surface-alt); color: var(--text-muted); }
-#ai-providers .provider-badge.ok { background: var(--accent-soft); color: var(--accent-strong); }
-#ai-providers .provider-result.ok { color: #16794a; }
-#ai-providers .provider-result.error { color: #b42318; }
+#ai-providers .provider-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+#ai-providers .provider-dot.ok { background: #16794a; }
+#ai-providers .provider-dot.err { background: #b42318; }
+#ai-providers .provider-dot.warn { background: #b54708; }
+#ai-providers .provider-dot.off { background: var(--text-muted); opacity: 0.45; }
+#ai-providers .provider-status-text { font-size: 0.76rem; color: var(--text-muted); font-weight: 400; margin-left: auto; }
+#ai-providers .key-row { display: flex; gap: 0.4rem; align-items: center; max-width: 480px; }
+#ai-providers .key-row input { flex: 1; }
+#ai-providers .key-toggle { border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: var(--radius-sm); padding: 0.25rem 0.55rem; cursor: pointer; line-height: 1; }
+#ai-providers .provider-keyhint { font-size: 0.74rem; margin: 0.15rem 0 0; }
+#ai-providers .provider-result-box { margin-top: var(--sp-2); padding: 0.4rem 0.7rem; border-radius: var(--radius-sm); font-size: 0.82rem; border: 1px solid transparent; }
+#ai-providers .provider-result-box.muted { color: var(--text-muted); }
+#ai-providers .provider-result-box.ok { background: #ecfdf3; border-color: #abefc6; color: #067647; }
+#ai-providers .provider-result-box.err { background: #fef3f2; border-color: #fecdca; color: #b42318; }
 </style>
 
 <section id="project-dbs">
@@ -452,10 +462,17 @@ function _modelOptions(models) {
   return (models || []).map(m => `<option value="${escapeHtml(m)}"></option>`).join("");
 }
 
+// Status dot: connected (green) / key error (red) / configured-untested
+// (amber) / unconfigured (muted). Reflects the persisted last-test result.
+function _statusDot(p) {
+  if (!p.available) return { cls: "off", text: MnemosUI.t("Not configured") };
+  if (p.last_test_ok === true) return { cls: "ok", text: MnemosUI.t("Connected") };
+  if (p.last_test_ok === false) return { cls: "err", text: MnemosUI.t("Key error — re-check") };
+  return { cls: "warn", text: MnemosUI.t("Configured (test recommended)") };
+}
+
 function renderProviderCard(p) {
-  const badge = p.available
-    ? `<span class="provider-badge ok" data-i18n="Configured">${MnemosUI.t("Configured")}</span>`
-    : `<span class="provider-badge" data-i18n="Not configured">${MnemosUI.t("Not configured")}</span>`;
+  const st = _statusDot(p);
   const keyPlaceholder = p.has_key
     ? MnemosUI.t("key stored — type to replace")
     : MnemosUI.t("paste API key");
@@ -470,9 +487,13 @@ function renderProviderCard(p) {
     ? `<button type="button" class="danger" onclick="clearProviderKey('${p.id}')" data-i18n="Clear key">Clear key</button>`
     : "";
   return `<div class="provider-card" data-provider="${p.id}">
-    <h3>${escapeHtml(p.label)} ${badge}</h3>
+    <h3><span class="provider-dot ${st.cls}" aria-hidden="true"></span>${escapeHtml(p.label)}<span class="provider-status-text">${escapeHtml(st.text)}</span></h3>
     <label><span data-i18n="API key">API key</span>
-      <input type="password" id="pk-${p.id}" autocomplete="new-password" placeholder="${escapeHtml(keyPlaceholder)}" /></label>
+      <span class="key-row">
+        <input type="password" id="pk-${p.id}" autocomplete="new-password" placeholder="${escapeHtml(keyPlaceholder)}" />
+        <button type="button" class="key-toggle" onclick="toggleKey('${p.id}')" title="${escapeHtml(MnemosUI.t("Show/hide key"))}" aria-label="${escapeHtml(MnemosUI.t("Show/hide key"))}">&#128065;</button>
+      </span></label>
+    <p class="muted provider-keyhint" data-i18n="Stored encrypted; not shown again after saving.">Stored encrypted; not shown again after saving.</p>
     ${baseRow}
     <label><span data-i18n="Model">Model</span>
       <input type="text" id="pm-${p.id}" list="ml-${p.id}" value="${escapeHtml(p.model || "")}" autocomplete="off" />
@@ -483,8 +504,13 @@ function renderProviderCard(p) {
       ${clearBtn}
       ${keyHint}
     </div>
-    <p id="pr-${p.id}" class="muted provider-result"></p>
+    <div id="pr-${p.id}" class="provider-result-box" hidden></div>
   </div>`;
+}
+
+function toggleKey(id) {
+  const el = document.getElementById("pk-" + id);
+  if (el) el.type = el.type === "password" ? "text" : "password";
 }
 
 async function saveProvider(id) {
@@ -519,22 +545,30 @@ async function clearProviderKey(id) {
 
 async function testProvider(id) {
   const out = document.getElementById("pr-" + id);
-  if (out) { out.textContent = MnemosUI.t("Testing…"); out.className = "provider-result muted"; }
+  if (out) { out.hidden = false; out.className = "provider-result-box muted"; out.textContent = MnemosUI.t("Testing…"); }
   const r = await fetch("/api/v1/chat/provider-config/" + id + "/test", { method: "POST" });
   let data = {};
   try { data = await r.json(); } catch (_) {}
   if (!r.ok) {
-    if (out) { out.textContent = MnemosUI.t("Test failed") + (data.detail ? ": " + data.detail : ""); out.className = "provider-result error"; }
+    if (out) { out.className = "provider-result-box err"; out.textContent = "✗ " + MnemosUI.t("Test failed") + (data.detail ? ": " + data.detail : ""); }
     return;
   }
   if (out) {
+    out.className = "provider-result-box " + (data.ok ? "ok" : "err");
     out.textContent = (data.ok ? "✓ " : "✗ ") + (data.message || "");
-    out.className = "provider-result " + (data.ok ? "ok" : "error");
   }
   // Refresh the model datalist with the account's live models.
   if (data.models && data.models.length) {
     const dl = document.getElementById("ml-" + id);
     if (dl) dl.innerHTML = _modelOptions(data.models);
+  }
+  // Update the status dot in place (the server persists this too).
+  const card = document.querySelector('.provider-card[data-provider="' + id + '"]');
+  if (card) {
+    const dot = card.querySelector(".provider-dot");
+    const txt = card.querySelector(".provider-status-text");
+    if (dot) dot.className = "provider-dot " + (data.ok ? "ok" : "err");
+    if (txt) txt.textContent = data.ok ? MnemosUI.t("Connected") : MnemosUI.t("Key error — re-check");
   }
 }
 

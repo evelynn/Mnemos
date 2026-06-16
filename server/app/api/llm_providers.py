@@ -399,7 +399,7 @@ async def test_provider(
         if provider == "claudecode":
             if not key:
                 if is_agent_sdk_available():
-                    return {"ok": True, "message": "using local subscription",
+                    return {"ok": True, "message": "OK — local subscription",
                             "models": []}
                 return {"ok": False,
                         "message": "no API key and no local subscription",
