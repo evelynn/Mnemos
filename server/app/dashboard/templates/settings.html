@@ -34,6 +34,32 @@
   {% endif %}
 </section>
 
+<section id="ai-providers">
+  <h2 data-i18n="AI providers (Chat)">AI providers (Chat)</h2>
+  <p class="muted" data-i18n="ai-providers-blurb">
+    Configure the AIs the Chat tab can use. API keys are encrypted at rest
+    and never shown again. The operator picks a provider per conversation;
+    "Test connection" validates the key and loads the account's current models.
+  </p>
+  {% if user.role == 'admin' %}
+  <div id="ai-providers-box"><p class="muted" data-i18n="Loading…">Loading…</p></div>
+  {% else %}
+  <p class="muted"><em data-i18n="AI provider configuration is admin-only.">AI provider configuration is admin-only.</em></p>
+  {% endif %}
+</section>
+
+<style>
+#ai-providers .provider-card { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--sp-3) var(--sp-4); margin: var(--sp-3) 0; }
+#ai-providers .provider-card h3 { margin: 0 0 var(--sp-2); font-size: 1rem; display: flex; align-items: center; gap: var(--sp-2); }
+#ai-providers .provider-card label { display: block; margin: var(--sp-2) 0; }
+#ai-providers .provider-card input { width: 100%; max-width: 480px; }
+#ai-providers .provider-actions { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; margin-top: var(--sp-2); }
+#ai-providers .provider-badge { font-size: 0.72rem; padding: 0.1rem 0.5rem; border-radius: var(--radius-sm); background: var(--surface-alt); color: var(--text-muted); }
+#ai-providers .provider-badge.ok { background: var(--accent-soft); color: var(--accent-strong); }
+#ai-providers .provider-result.ok { color: #16794a; }
+#ai-providers .provider-result.error { color: #b42318; }
+</style>
+
 <section id="project-dbs">
   <h2 data-i18n="Project databases">Project databases</h2>
   <p class="muted" data-i18n="Per-project DB bindings carry sensitive_tables, masking_rules, allow_awr, and maintenance_windows (spec §12.2). The platform refuses to bind a credential that the analyzer's db_probe verb cannot prove is read-only.">
@@ -406,5 +432,116 @@ async function loadProjectDbs() {
   box.innerHTML = chunks.join("");
   MnemosUI.applyI18n(box);
 }
+
+// ----------------------------------------------------------------------
+// AI providers (Chat) — PR-179. Configure keys/models in the GUI. Keys
+// are stored encrypted and never returned; "Test connection" validates
+// the key and loads the account's live model list into the datalist.
+// ----------------------------------------------------------------------
+async function loadAiProviders() {
+  const box = document.getElementById("ai-providers-box");
+  if (!box) return;
+  const r = await fetch("/api/v1/chat/provider-config");
+  if (!r.ok) { box.innerHTML = `<p class="error">HTTP ${r.status}</p>`; return; }
+  const data = await r.json();
+  box.innerHTML = (data.providers || []).map(renderProviderCard).join("");
+  MnemosUI.applyI18n(box);
+}
+
+function _modelOptions(models) {
+  return (models || []).map(m => `<option value="${escapeHtml(m)}"></option>`).join("");
+}
+
+function renderProviderCard(p) {
+  const badge = p.available
+    ? `<span class="provider-badge ok" data-i18n="Configured">${MnemosUI.t("Configured")}</span>`
+    : `<span class="provider-badge" data-i18n="Not configured">${MnemosUI.t("Not configured")}</span>`;
+  const keyPlaceholder = p.has_key
+    ? MnemosUI.t("key stored — type to replace")
+    : MnemosUI.t("paste API key");
+  const baseRow = p.needs_base_url
+    ? `<label><span data-i18n="Base URL">Base URL</span>
+         <input type="text" id="pb-${p.id}" value="${escapeHtml(p.base_url || "")}" placeholder="https://…/v1" /></label>`
+    : "";
+  const keyHint = (!p.needs_key)
+    ? `<span class="muted" data-i18n="No key needed — uses the local Claude subscription.">No key needed — uses the local Claude subscription.</span>`
+    : "";
+  const clearBtn = p.has_key
+    ? `<button type="button" class="danger" onclick="clearProviderKey('${p.id}')" data-i18n="Clear key">Clear key</button>`
+    : "";
+  return `<div class="provider-card" data-provider="${p.id}">
+    <h3>${escapeHtml(p.label)} ${badge}</h3>
+    <label><span data-i18n="API key">API key</span>
+      <input type="password" id="pk-${p.id}" autocomplete="new-password" placeholder="${escapeHtml(keyPlaceholder)}" /></label>
+    ${baseRow}
+    <label><span data-i18n="Model">Model</span>
+      <input type="text" id="pm-${p.id}" list="ml-${p.id}" value="${escapeHtml(p.model || "")}" autocomplete="off" />
+      <datalist id="ml-${p.id}">${_modelOptions(p.suggested_models)}</datalist></label>
+    <div class="provider-actions">
+      <button type="button" class="primary" onclick="saveProvider('${p.id}')" data-i18n="Save">Save</button>
+      <button type="button" onclick="testProvider('${p.id}')" data-i18n="Test connection">Test connection</button>
+      ${clearBtn}
+      ${keyHint}
+    </div>
+    <p id="pr-${p.id}" class="muted provider-result"></p>
+  </div>`;
+}
+
+async function saveProvider(id) {
+  const keyEl = document.getElementById("pk-" + id);
+  const modelEl = document.getElementById("pm-" + id);
+  const baseEl = document.getElementById("pb-" + id);
+  const body = { model: modelEl ? modelEl.value : null };
+  if (baseEl) body.base_url = baseEl.value;
+  if (keyEl && keyEl.value) body.api_key = keyEl.value;
+  const r = await fetch("/api/v1/chat/provider-config/" + id, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) { await MnemosUI.showError(MnemosUI.t("Save failed"), r); return; }
+  if (keyEl) keyEl.value = "";
+  MnemosUI.showToast(MnemosUI.t("Provider saved."), "success");
+  loadAiProviders();
+}
+
+async function clearProviderKey(id) {
+  if (!confirm(MnemosUI.t("Remove the stored API key for this provider?"))) return;
+  const r = await fetch("/api/v1/chat/provider-config/" + id, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ clear_key: true }),
+  });
+  if (!r.ok) { await MnemosUI.showError(MnemosUI.t("Save failed"), r); return; }
+  MnemosUI.showToast(MnemosUI.t("Key removed."), "success");
+  loadAiProviders();
+}
+
+async function testProvider(id) {
+  const out = document.getElementById("pr-" + id);
+  if (out) { out.textContent = MnemosUI.t("Testing…"); out.className = "provider-result muted"; }
+  const r = await fetch("/api/v1/chat/provider-config/" + id + "/test", { method: "POST" });
+  let data = {};
+  try { data = await r.json(); } catch (_) {}
+  if (!r.ok) {
+    if (out) { out.textContent = MnemosUI.t("Test failed") + (data.detail ? ": " + data.detail : ""); out.className = "provider-result error"; }
+    return;
+  }
+  if (out) {
+    out.textContent = (data.ok ? "✓ " : "✗ ") + (data.message || "");
+    out.className = "provider-result " + (data.ok ? "ok" : "error");
+  }
+  // Refresh the model datalist with the account's live models.
+  if (data.models && data.models.length) {
+    const dl = document.getElementById("ml-" + id);
+    if (dl) dl.innerHTML = _modelOptions(data.models);
+  }
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  if (document.getElementById("ai-providers-box")) {
+    loadAiProviders();
+  }
+});
 </script>
 {% endblock %}

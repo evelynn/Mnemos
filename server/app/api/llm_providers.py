@@ -1,20 +1,21 @@
-"""PR-178 — multi-provider LLM backend for the Chat tab.
+"""PR-178/179 — multi-provider LLM backend for the Chat tab.
 
 The operator picks which AI answers a chat message: OpenAI, Gemini, Claude
-Code (subscription/API), or Atlas (hansol ai). Each provider is configured
-by env vars and called over HTTP (httpx) — no provider SDKs are required
-except ``anthropic`` (already a dependency) for the Claude direct-API path::
+Code (subscription/API), or Atlas (hansol ai). Each provider's config —
+API key, model, and (for Atlas) base URL — is resolved per request from
+two sources, DB first then env:
 
-  openai      OPENAI_API_KEY      OPENAI_MODEL  (default gpt-4o)
-  gemini      GEMINI_API_KEY      GEMINI_MODEL  (default gemini-2.0-flash)
-  atlas       ATLAS_API_KEY + ATLAS_BASE_URL    ATLAS_MODEL  (OpenAI-compatible)
-  claudecode  ANTHROPIC_API_KEY (fast direct API) else local
-              claude_agent_sdk subscription      MNEMOS_CHAT_MODEL
+  1. Settings UI (PR-179): keys in the encrypted ``Secret`` table
+     (label ``chat-provider:<suffix>``), models / base_url in the global
+     ``PlatformSetting`` row ``chat_providers``.
+  2. Env fallback: OPENAI_API_KEY/OPENAI_MODEL, GEMINI_API_KEY/GEMINI_MODEL,
+     ATLAS_API_KEY/ATLAS_BASE_URL/ATLAS_MODEL, ANTHROPIC_API_KEY/MNEMOS_CHAT_MODEL.
 
-``provider_chat(provider, system=, prompt=, timeout_s=)`` dispatches and
-returns the markdown reply or ``None`` (never raises).
-``available_providers()`` reports which providers are configured so the UI
-only offers usable ones; ``default_provider()`` is the initial selection.
+``resolve_config(db)`` returns ``{provider: {api_key, model, base_url}}``;
+the availability/dispatch helpers take that config (they never read env or
+DB themselves, which keeps them pure and testable). Calls go over HTTP
+(httpx) — no provider SDKs except ``anthropic`` for the Claude direct API.
+``provider_chat`` returns the markdown reply or ``None`` (never raises).
 """
 
 from __future__ import annotations
@@ -24,12 +25,58 @@ import logging
 import os
 
 import httpx
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extractor.agent_sdk import is_agent_sdk_available
+from app.models.auth import PlatformSetting, Secret
+from app.safety.crypto import decrypt
 
 log = logging.getLogger("mnemos.chat.providers")
 
 _MAX_TOKENS = 3000
+
+# Where the Settings UI persists provider config.
+SETTING_KEY = "chat_providers"          # PlatformSetting row (models/base_url)
+SECRET_PREFIX = "chat-provider:"        # Secret label prefix (API keys)
+SECRET_KIND = "llm_api_key"
+
+PROVIDER_ORDER = ["claudecode", "openai", "gemini", "atlas"]
+PROVIDER_LABELS = {
+    "claudecode": "Claude Code (구독/API)",
+    "openai": "OpenAI",
+    "gemini": "Gemini",
+    "atlas": "Atlas (hansol ai)",
+}
+# provider id → the Secret label suffix that holds its API key.
+_KEY_SUFFIX = {
+    "openai": "openai",
+    "gemini": "gemini",
+    "atlas": "atlas",
+    "claudecode": "anthropic",
+}
+_DEFAULT_MODEL = {
+    "openai": "gpt-4o",
+    "gemini": "gemini-2.5-flash",
+    "atlas": "",
+    "claudecode": "claude-sonnet-4-6",
+}
+# Current models offered in the Settings dropdowns (Context7-sourced, 2026).
+# The free-text field and the live "test" model fetch both override these,
+# so a stale entry here never blocks a newer model.
+SUGGESTED_MODELS = {
+    "openai": ["gpt-4o", "gpt-4o-mini", "gpt-5.4", "o3"],
+    "gemini": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.5-flash",
+               "gemini-2.0-flash"],
+    "claudecode": ["claude-sonnet-4-6", "claude-opus-4-8",
+                   "claude-haiku-4-5-20251001"],
+    "atlas": [],
+}
+
+
+def secret_label(provider: str) -> str:
+    """The ``Secret.label`` that stores ``provider``'s API key."""
+    return SECRET_PREFIX + _KEY_SUFFIX[provider]
 
 
 def _env(key: str) -> str | None:
@@ -37,7 +84,101 @@ def _env(key: str) -> str | None:
     return v.strip() if v and v.strip() else None
 
 
-# ── OpenAI-compatible (OpenAI + Atlas/hansol-ai) ──────────────────────
+# ── Config resolution (DB over env) ───────────────────────────────────
+async def resolve_config(db: AsyncSession) -> dict[str, dict]:
+    """Per-provider ``{api_key, model, base_url}`` — Settings UI (DB) wins
+    over env, with a sensible default model when neither sets one."""
+    cfg: dict[str, dict] = {
+        pid: {"api_key": None, "model": None, "base_url": None}
+        for pid in PROVIDER_ORDER
+    }
+    cfg["openai"].update(
+        api_key=_env("OPENAI_API_KEY"), model=_env("OPENAI_MODEL"),
+        base_url="https://api.openai.com/v1",
+    )
+    cfg["gemini"].update(
+        api_key=_env("GEMINI_API_KEY"), model=_env("GEMINI_MODEL"),
+    )
+    cfg["atlas"].update(
+        api_key=_env("ATLAS_API_KEY"), model=_env("ATLAS_MODEL"),
+        base_url=_env("ATLAS_BASE_URL"),
+    )
+    cfg["claudecode"].update(
+        api_key=_env("ANTHROPIC_API_KEY"), model=_env("MNEMOS_CHAT_MODEL"),
+    )
+
+    # PlatformSetting: model + base_url overrides.
+    ps = (
+        await db.execute(
+            select(PlatformSetting).where(PlatformSetting.key == SETTING_KEY)
+        )
+    ).scalar_one_or_none()
+    saved = (ps.value if ps else None) or {}
+    for pid in PROVIDER_ORDER:
+        s = saved.get(pid) or {}
+        if s.get("model"):
+            cfg[pid]["model"] = s["model"]
+        if pid == "atlas" and s.get("base_url"):
+            cfg[pid]["base_url"] = s["base_url"]
+
+    # Secret: API-key overrides (encrypted at rest).
+    by_suffix = {v: k for k, v in _KEY_SUFFIX.items()}
+    secrets = (
+        await db.execute(
+            select(Secret).where(Secret.label.like(SECRET_PREFIX + "%"))
+        )
+    ).scalars().all()
+    for sec in secrets:
+        pid = by_suffix.get(sec.label[len(SECRET_PREFIX):])
+        if not pid:
+            continue
+        try:
+            key = decrypt(sec.ciphertext, sec.iv)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("provider key decrypt failed (%s): %s",
+                        sec.label, exc.__class__.__name__)
+            continue
+        if key and key.strip():
+            cfg[pid]["api_key"] = key.strip()
+
+    for pid in PROVIDER_ORDER:
+        if not cfg[pid]["model"]:
+            cfg[pid]["model"] = _DEFAULT_MODEL.get(pid) or None
+    return cfg
+
+
+# ── Availability + selection (operate on a resolved config) ───────────
+def is_provider_available(provider: str, cfg: dict[str, dict]) -> bool:
+    c = cfg.get(provider) or {}
+    if provider == "claudecode":
+        return bool(c.get("api_key")) or is_agent_sdk_available()
+    if provider == "atlas":
+        return bool(c.get("api_key") and c.get("base_url"))
+    if provider in ("openai", "gemini"):
+        return bool(c.get("api_key"))
+    return False
+
+
+def available_providers(cfg: dict[str, dict]) -> list[dict]:
+    return [
+        {"id": pid, "label": PROVIDER_LABELS[pid],
+         "available": is_provider_available(pid, cfg)}
+        for pid in PROVIDER_ORDER
+    ]
+
+
+def any_provider_available(cfg: dict[str, dict]) -> bool:
+    return any(is_provider_available(pid, cfg) for pid in PROVIDER_ORDER)
+
+
+def default_provider(cfg: dict[str, dict]) -> str:
+    for pid in PROVIDER_ORDER:
+        if is_provider_available(pid, cfg):
+            return pid
+    return "claudecode"
+
+
+# ── HTTP calls ────────────────────────────────────────────────────────
 async def _openai_compatible(
     *, base_url: str, api_key: str, model: str,
     system: str, prompt: str, timeout_s: int,
@@ -65,10 +206,11 @@ async def _openai_compatible(
         return (choices[0].get("message", {}).get("content") or "").strip() or None
 
 
-# ── Gemini (Google Generative Language REST) ──────────────────────────
 async def _gemini_generate(
     *, api_key: str, model: str, system: str, prompt: str, timeout_s: int,
 ) -> str | None:
+    # Auth via the x-goog-api-key header (current docs) — never the ?key=
+    # query param, so the key never lands in a URL/log.
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model}:generateContent"
@@ -76,7 +218,7 @@ async def _gemini_generate(
     async with httpx.AsyncClient(timeout=timeout_s) as client:
         r = await client.post(
             url,
-            params={"key": api_key},
+            headers={"x-goog-api-key": api_key},
             json={
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -91,21 +233,17 @@ async def _gemini_generate(
         return "".join(p.get("text", "") for p in parts).strip() or None
 
 
-# ── Claude (fast direct API, else local subscription) ─────────────────
-async def _claude_api(*, system: str, prompt: str, timeout_s: int) -> str | None:
-    """Direct Anthropic API — returns in ~10-30s when ANTHROPIC_API_KEY is
-    set (far faster and steadier than spawning the Claude Code subprocess
-    per request)."""
-    key = _env("ANTHROPIC_API_KEY")
-    if not key:
-        return None
+async def _claude_api(
+    *, api_key: str, model: str | None, system: str, prompt: str, timeout_s: int,
+) -> str | None:
+    """Direct Anthropic API — ~10-30s, far faster than the subprocess."""
     try:
         import anthropic  # noqa: PLC0415
 
-        client = anthropic.AsyncAnthropic(api_key=key)
+        client = anthropic.AsyncAnthropic(api_key=api_key)
         resp = await asyncio.wait_for(
             client.messages.create(
-                model=os.environ.get("MNEMOS_CHAT_MODEL", "claude-sonnet-4-6"),
+                model=model or "claude-sonnet-4-6",
                 system=system,
                 max_tokens=_MAX_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
@@ -167,121 +305,44 @@ async def _claude_subscription(
     return "\n".join(out).strip() or None
 
 
-async def _claude_call(*, system: str, prompt: str, timeout_s: int) -> str | None:
-    reply = await _claude_api(system=system, prompt=prompt, timeout_s=timeout_s)
-    if reply is not None:
-        return reply
-    return await _claude_subscription(
-        system=system, prompt=prompt, timeout_s=timeout_s
-    )
-
-
-# ── Per-provider availability + dispatch ──────────────────────────────
-def _openai_available() -> bool:
-    return bool(_env("OPENAI_API_KEY"))
-
-
-async def _openai_call(*, system: str, prompt: str, timeout_s: int) -> str | None:
-    return await _openai_compatible(
-        base_url="https://api.openai.com/v1",
-        api_key=_env("OPENAI_API_KEY") or "",
-        model=os.environ.get("OPENAI_MODEL") or "gpt-4o",
-        system=system, prompt=prompt, timeout_s=timeout_s,
-    )
-
-
-def _atlas_available() -> bool:
-    return bool(_env("ATLAS_API_KEY") and _env("ATLAS_BASE_URL"))
-
-
-async def _atlas_call(*, system: str, prompt: str, timeout_s: int) -> str | None:
-    return await _openai_compatible(
-        base_url=_env("ATLAS_BASE_URL") or "",
-        api_key=_env("ATLAS_API_KEY") or "",
-        model=os.environ.get("ATLAS_MODEL") or "atlas",
-        system=system, prompt=prompt, timeout_s=timeout_s,
-    )
-
-
-def _gemini_available() -> bool:
-    return bool(_env("GEMINI_API_KEY"))
-
-
-async def _gemini_call(*, system: str, prompt: str, timeout_s: int) -> str | None:
-    return await _gemini_generate(
-        api_key=_env("GEMINI_API_KEY") or "",
-        model=os.environ.get("GEMINI_MODEL") or "gemini-2.0-flash",
-        system=system, prompt=prompt, timeout_s=timeout_s,
-    )
-
-
-def _claude_available() -> bool:
-    return bool(_env("ANTHROPIC_API_KEY")) or is_agent_sdk_available()
-
-
-# id → {label, available, call}. Order = the UI's order. ``claudecode``
-# leads because it works with the operator's Claude Code subscription with
-# no extra key.
-_PROVIDERS: dict[str, dict] = {
-    "claudecode": {
-        "label": "Claude Code (구독/API)",
-        "available": _claude_available,
-        "call": _claude_call,
-    },
-    "openai": {
-        "label": "OpenAI",
-        "available": _openai_available,
-        "call": _openai_call,
-    },
-    "gemini": {
-        "label": "Gemini",
-        "available": _gemini_available,
-        "call": _gemini_call,
-    },
-    "atlas": {
-        "label": "Atlas (hansol ai)",
-        "available": _atlas_available,
-        "call": _atlas_call,
-    },
-}
-
-
-def available_providers() -> list[dict]:
-    """Every provider with a boolean ``available`` (its config present)."""
-    return [
-        {"id": pid, "label": p["label"], "available": p["available"]()}
-        for pid, p in _PROVIDERS.items()
-    ]
-
-
-def any_provider_available() -> bool:
-    return any(p["available"]() for p in _PROVIDERS.values())
-
-
-def is_provider_available(provider: str) -> bool:
-    p = _PROVIDERS.get(provider)
-    return bool(p and p["available"]())
-
-
-def default_provider() -> str:
-    """First configured provider — the UI's initial selection."""
-    for pid, p in _PROVIDERS.items():
-        if p["available"]():
-            return pid
-    return "claudecode"
-
-
 async def provider_chat(
-    provider: str, *, system: str, prompt: str, timeout_s: int = 180,
+    provider: str, cfg: dict[str, dict], *,
+    system: str, prompt: str, timeout_s: int = 180,
 ) -> str | None:
-    """Dispatch a one-shot answer to ``provider``. Returns the markdown
-    reply, or ``None`` on any failure (config, HTTP, timeout) — never
-    raises. The reason is logged for the operator."""
-    p = _PROVIDERS.get(provider)
-    if p is None:
-        return None
+    """Dispatch a one-shot answer to ``provider`` using the resolved
+    config. Returns markdown, or ``None`` on any failure (logged)."""
+    c = cfg.get(provider) or {}
     try:
-        return await p["call"](system=system, prompt=prompt, timeout_s=timeout_s)
+        if provider == "openai":
+            return await _openai_compatible(
+                base_url=c.get("base_url") or "https://api.openai.com/v1",
+                api_key=c.get("api_key") or "", model=c.get("model") or "gpt-4o",
+                system=system, prompt=prompt, timeout_s=timeout_s,
+            )
+        if provider == "atlas":
+            return await _openai_compatible(
+                base_url=c.get("base_url") or "", api_key=c.get("api_key") or "",
+                model=c.get("model") or "", system=system, prompt=prompt,
+                timeout_s=timeout_s,
+            )
+        if provider == "gemini":
+            return await _gemini_generate(
+                api_key=c.get("api_key") or "",
+                model=c.get("model") or "gemini-2.5-flash",
+                system=system, prompt=prompt, timeout_s=timeout_s,
+            )
+        if provider == "claudecode":
+            if c.get("api_key"):
+                reply = await _claude_api(
+                    api_key=c["api_key"], model=c.get("model"),
+                    system=system, prompt=prompt, timeout_s=timeout_s,
+                )
+                if reply is not None:
+                    return reply
+            return await _claude_subscription(
+                system=system, prompt=prompt, timeout_s=timeout_s
+            )
+        return None
     except httpx.HTTPStatusError as exc:
         log.warning("chat provider %s HTTP %s: %s", provider,
                     exc.response.status_code, exc.response.text[:200])
@@ -290,3 +351,73 @@ async def provider_chat(
         log.warning("chat provider %s failed: %s: %s", provider,
                     exc.__class__.__name__, exc)
         return None
+
+
+# ── Live connection test + model discovery ────────────────────────────
+async def test_provider(
+    provider: str, cfg: dict[str, dict], *, timeout_s: int = 15,
+) -> dict:
+    """Validate the provider's key/base_url with a cheap models-list call.
+    Returns ``{ok, message, models}`` — ``models`` lets the Settings UI
+    refresh its dropdown with what the account can actually use."""
+    c = cfg.get(provider) or {}
+    key = c.get("api_key")
+    try:
+        if provider in ("openai", "atlas"):
+            base = c.get("base_url") or (
+                "https://api.openai.com/v1" if provider == "openai" else ""
+            )
+            if not base or not key:
+                return {"ok": False, "message": "missing key or base_url",
+                        "models": []}
+            async with httpx.AsyncClient(timeout=timeout_s) as cl:
+                r = await cl.get(base.rstrip("/") + "/models",
+                                 headers={"Authorization": f"Bearer {key}"})
+                r.raise_for_status()
+                models = [m.get("id") for m in (r.json().get("data") or [])
+                          if m.get("id")]
+            return {"ok": True, "message": f"OK — {len(models)} models",
+                    "models": sorted(models)}
+
+        if provider == "gemini":
+            if not key:
+                return {"ok": False, "message": "missing key", "models": []}
+            async with httpx.AsyncClient(timeout=timeout_s) as cl:
+                r = await cl.get(
+                    "https://generativelanguage.googleapis.com/v1beta/models",
+                    headers={"x-goog-api-key": key},
+                )
+                r.raise_for_status()
+                models = [
+                    (m.get("name") or "").removeprefix("models/")
+                    for m in (r.json().get("models") or [])
+                    if "generateContent" in (m.get("supportedGenerationMethods") or [])
+                ]
+            return {"ok": True, "message": f"OK — {len(models)} models",
+                    "models": sorted(m for m in models if m)}
+
+        if provider == "claudecode":
+            if not key:
+                if is_agent_sdk_available():
+                    return {"ok": True, "message": "using local subscription",
+                            "models": []}
+                return {"ok": False,
+                        "message": "no API key and no local subscription",
+                        "models": []}
+            async with httpx.AsyncClient(timeout=timeout_s) as cl:
+                r = await cl.get(
+                    "https://api.anthropic.com/v1/models",
+                    headers={"x-api-key": key,
+                             "anthropic-version": "2023-06-01"},
+                )
+                r.raise_for_status()
+                models = [m.get("id") for m in (r.json().get("data") or [])
+                          if m.get("id")]
+            return {"ok": True, "message": f"OK — {len(models)} models",
+                    "models": sorted(models)}
+    except httpx.HTTPStatusError as exc:
+        return {"ok": False, "message": f"HTTP {exc.response.status_code}",
+                "models": []}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": exc.__class__.__name__, "models": []}
+    return {"ok": False, "message": "unknown provider", "models": []}

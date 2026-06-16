@@ -34,6 +34,7 @@ from app.api.llm_providers import (
     default_provider,
     is_provider_available,
     provider_chat,
+    resolve_config,
 )
 from app.models.graph import Node
 from app.audit.logger import record as audit_record
@@ -57,10 +58,14 @@ meta_router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
 
 
 @meta_router.get("/providers")
-async def list_chat_providers(user: CurrentUser) -> dict:
+async def list_chat_providers(
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_session),
+) -> dict:
     """The selectable AI providers and whether each is configured — the
     Chat tab populates its selector from this."""
-    return {"providers": available_providers(), "default": default_provider()}
+    cfg = await resolve_config(db)
+    return {"providers": available_providers(cfg), "default": default_provider(cfg)}
 
 _SYSTEM = (
     "You are Mnemos, a senior software analyst embedded in a SOURCE-CODE "
@@ -365,10 +370,11 @@ async def chat(
     user: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> dict:
-    if not any_provider_available():
+    cfg = await resolve_config(db)
+    if not any_provider_available(cfg):
         raise HTTPException(status_code=503, detail="llm_unavailable")
-    provider = body.provider or default_provider()
-    if not is_provider_available(provider):
+    provider = body.provider or default_provider(cfg)
+    if not is_provider_available(provider, cfg):
         raise HTTPException(
             status_code=400, detail=f"provider_not_configured:{provider}"
         )
@@ -395,7 +401,7 @@ async def chat(
     prompt = _build_prompt(body.history, context_md, body.message)
 
     reply = await provider_chat(
-        provider, system=_SYSTEM, prompt=prompt, timeout_s=body.timeout_s
+        provider, cfg, system=_SYSTEM, prompt=prompt, timeout_s=body.timeout_s
     )
     if reply is None:
         raise HTTPException(status_code=503, detail="llm_call_failed")
