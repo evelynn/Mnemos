@@ -15,6 +15,11 @@
 </div>
 
 <div id="chat-wrap" class="chat-wrap" hidden>
+  <div class="chat-toolbar">
+    <label for="chat-provider" data-i18n="AI provider">AI provider</label>
+    <select id="chat-provider" class="chat-provider" aria-label="AI provider"></select>
+    <span id="chat-provider-note" class="muted chat-provider-note"></span>
+  </div>
   <div id="chat-log" class="chat-log" aria-live="polite"></div>
   <form id="chat-form" class="chat-form">
     <textarea id="chat-input" rows="2" required
@@ -23,13 +28,17 @@
     <button type="submit" class="primary" id="chat-send" data-i18n="Send">Send</button>
   </form>
   <p class="muted chat-hint">
-    <span data-i18n="Powered by your Claude subscription — each message uses quota.">Powered by your Claude subscription — each message uses quota.</span>
+    <span data-i18n="Each message calls the AI you selected above.">Each message calls the AI you selected above.</span>
     <button type="button" id="chat-clear" class="link-btn" data-i18n="Clear conversation">Clear conversation</button>
   </p>
 </div>
 
 <style>
 .chat-wrap { display: flex; flex-direction: column; gap: var(--sp-3); margin-top: var(--sp-3); }
+.chat-toolbar { display: flex; gap: var(--sp-2); align-items: center; font-size: 0.85rem; }
+.chat-toolbar label { color: var(--text-muted); }
+.chat-provider { padding: 0.25rem 0.5rem; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+.chat-provider-note { font-size: 0.8rem; }
 .chat-log { display: flex; flex-direction: column; gap: var(--sp-3); min-height: 200px; }
 .chat-msg { max-width: 860px; padding: var(--sp-3) var(--sp-4); border-radius: var(--radius-lg); }
 .chat-msg.user { align-self: flex-end; background: var(--accent-soft); color: var(--accent-strong); }
@@ -65,7 +74,46 @@
   var form = document.getElementById("chat-form");
   var input = document.getElementById("chat-input");
   var sendBtn = document.getElementById("chat-send");
+  var providerSel = document.getElementById("chat-provider");
+  var providerNote = document.getElementById("chat-provider-note");
+  var PROVIDER_KEY = "mnemos_chat_provider";
   var history = [];   // [{role, content}]
+
+  function currentProvider() {
+    return providerSel && providerSel.value ? providerSel.value : "";
+  }
+
+  // PR-178 — the operator picks which AI answers (Claude Code subscription /
+  // OpenAI / Gemini / Atlas). Populate from the server, which reports which
+  // are configured; remember the choice and disable the unconfigured ones.
+  async function loadProviders() {
+    try {
+      var r = await fetch("/api/v1/chat/providers", { credentials: "same-origin" });
+      if (!r.ok) return;
+      var data = await r.json();
+      var list = data.providers || [];
+      var saved = "";
+      try { saved = localStorage.getItem(PROVIDER_KEY) || ""; } catch (_) {}
+      providerSel.innerHTML = "";
+      list.forEach(function (p) {
+        var opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = p.label + (p.available ? "" : " " + MnemosUI.t("(not configured)"));
+        opt.disabled = !p.available;
+        providerSel.appendChild(opt);
+      });
+      var savedOk = list.some(function (p) { return p.id === saved && p.available; });
+      providerSel.value = savedOk ? saved : (data.default || "");
+      providerNote.textContent = list.some(function (p) { return p.available; })
+        ? "" : MnemosUI.t("No AI is configured on the server yet.");
+    } catch (_) {}
+  }
+
+  providerSel.addEventListener("change", function () {
+    try { localStorage.setItem(PROVIDER_KEY, providerSel.value); } catch (_) {}
+  });
+
+  loadProviders();
 
   // Minimal, safe markdown → HTML (escape first, then a few inlines +
   // fenced code + headings + lists). We control nothing about the LLM
@@ -138,7 +186,7 @@
         method: "POST",
         headers: { "content-type": "application/json" },
         credentials: "same-origin",
-        body: JSON.stringify({ message: message, history: history.slice(0, -1) }),
+        body: JSON.stringify({ message: message, history: history.slice(0, -1), provider: currentProvider() }),
       });
       if (!r.ok) {
         var detail = "";
@@ -147,6 +195,9 @@
         if (r.status === 503) {
           pending.innerHTML = '<div class="chat-md">' + mdToHtml(
             MnemosUI.t("The AI assistant is unavailable (no LLM configured). Use the Ask tab for offline symbol search.")) + "</div>";
+        } else if (r.status === 400 && (detail || "").indexOf("provider_not_configured") === 0) {
+          pending.innerHTML = '<div class="chat-md">' + mdToHtml(
+            MnemosUI.t("That AI isn't configured on the server. Pick another provider or set its API key.")) + "</div>";
         } else {
           pending.innerHTML = '<div class="chat-md">' + mdToHtml(
             MnemosUI.t("Request failed") + (detail ? ": " + detail : "")) + "</div>";

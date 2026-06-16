@@ -17,7 +17,6 @@ free-form markdown. With no LLM available it returns 503 — the lexical
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import uuid
@@ -29,13 +28,19 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.ask import _entity_name, _short_path
+from app.api.llm_providers import (
+    any_provider_available,
+    available_providers,
+    default_provider,
+    is_provider_available,
+    provider_chat,
+)
 from app.models.graph import Node
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
 from app.auth.org_scope import require_project_org
 from app.auth.rbac import require_operator
 from app.db import get_session
-from app.extractor.agent_sdk import is_agent_sdk_available
 from app.mcp.queries import get_data_access, get_symbol, search_symbols
 
 log = logging.getLogger("mnemos.chat")
@@ -45,6 +50,17 @@ router = APIRouter(
     tags=["chat"],
     dependencies=[Depends(require_project_org())],
 )
+
+# Provider listing is project-independent (it reports which AIs are
+# configured), so it lives on its own un-prefixed router.
+meta_router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
+
+
+@meta_router.get("/providers")
+async def list_chat_providers(user: CurrentUser) -> dict:
+    """The selectable AI providers and whether each is configured — the
+    Chat tab populates its selector from this."""
+    return {"providers": available_providers(), "default": default_provider()}
 
 _SYSTEM = (
     "You are Mnemos, a senior software analyst embedded in a SOURCE-CODE "
@@ -72,6 +88,11 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     history: list[ChatMessage] = Field(default_factory=list, max_length=20)
+    provider: str | None = Field(
+        default=None, max_length=32,
+        description="AI provider id (openai/gemini/claudecode/atlas); "
+                    "None = first configured",
+    )
     source_root: str | None = Field(
         default=None, description="Repo root; enables source-code context"
     )
@@ -246,95 +267,6 @@ def _build_prompt(history: list[ChatMessage], context: str, question: str) -> st
     )
 
 
-def _llm_available() -> bool:
-    """Either the fast direct API (ANTHROPIC_API_KEY) or the local Claude
-    Code subscription can serve the chat."""
-    return bool(os.environ.get("ANTHROPIC_API_KEY")) or is_agent_sdk_available()
-
-
-async def _chat_via_api(system: str, prompt: str, timeout_s: int) -> str | None:
-    """Direct Anthropic API — returns in ~10-30s. Used when
-    ANTHROPIC_API_KEY is set (far faster and more reliable than spawning
-    the Claude Code subprocess per request)."""
-    key = os.environ.get("ANTHROPIC_API_KEY")
-    if not key:
-        return None
-    try:
-        import anthropic  # noqa: PLC0415
-
-        client = anthropic.AsyncAnthropic(api_key=key)
-        resp = await asyncio.wait_for(
-            client.messages.create(
-                model=os.environ.get("MNEMOS_CHAT_MODEL", "claude-sonnet-4-6"),
-                system=system,
-                max_tokens=3000,
-                messages=[{"role": "user", "content": prompt}],
-            ),
-            timeout=timeout_s,
-        )
-        parts = [
-            getattr(b, "text", "") for b in resp.content
-            if getattr(b, "type", "") == "text"
-        ]
-        return "\n".join(parts).strip() or None
-    except Exception as exc:  # noqa: BLE001
-        log.warning("chat: anthropic API failed (%s); trying subscription",
-                    exc.__class__.__name__)
-        return None
-
-
-async def _chat_via_subscription(system: str, prompt: str, timeout_s: int) -> str | None:
-    """Local Claude Code subscription — no API key, but ~60-180s/call."""
-    if not is_agent_sdk_available():
-        return None
-    try:
-        from claude_agent_sdk import (  # noqa: PLC0415
-            AssistantMessage,
-            ClaudeAgentOptions,
-            TextBlock,
-            query,
-        )
-    except ImportError:
-        return None
-
-    opts = ClaudeAgentOptions(
-        allowed_tools=[],
-        disallowed_tools=["Bash", "Edit", "Write", "Read", "Task"],
-        system_prompt=system,
-        max_turns=1,
-        permission_mode="default",
-        cwd=os.environ.get("MNEMOS_AGENT_SDK_CWD", "/tmp"),
-    )
-    out: list[str] = []
-
-    async def _drain() -> None:
-        async for msg in query(prompt=prompt, options=opts):
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        out.append(block.text)
-
-    try:
-        await asyncio.wait_for(_drain(), timeout=timeout_s)
-    except TimeoutError:
-        log.warning("chat: subscription LLM timed out after %ds", timeout_s)
-        return None
-    except Exception as exc:  # noqa: BLE001
-        log.warning("chat: %s: %s", exc.__class__.__name__, exc)
-        return None
-    return "\n".join(out).strip() or None
-
-
-async def _chat_llm(*, system: str, prompt: str, timeout_s: int = 180) -> str | None:
-    """One-shot conversational answer. Prefers the fast direct API
-    (ANTHROPIC_API_KEY); falls back to the local subscription. Returns the
-    markdown reply, or None on failure (never raises)."""
-    reply = await _chat_via_api(system, prompt, timeout_s)
-    if reply is not None:
-        return reply
-    return await _chat_via_subscription(system, prompt, timeout_s)
-
-
 # Korean (and other non-ASCII) code concepts → the English keywords that
 # actually appear in source. The lexical ranker only matches ASCII tokens,
 # so ``"인증은 어떻게 동작해?"`` tokenises to nothing and never reaches the
@@ -433,8 +365,13 @@ async def chat(
     user: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> dict:
-    if not _llm_available():
+    if not any_provider_available():
         raise HTTPException(status_code=503, detail="llm_unavailable")
+    provider = body.provider or default_provider()
+    if not is_provider_available(provider):
+        raise HTTPException(
+            status_code=400, detail=f"provider_not_configured:{provider}"
+        )
 
     hits = await search_symbols(
         db, project_id=project_id, query=body.message, top_k=body.top_k
@@ -457,8 +394,8 @@ async def chat(
     )
     prompt = _build_prompt(body.history, context_md, body.message)
 
-    reply = await _chat_llm(
-        system=_SYSTEM, prompt=prompt, timeout_s=body.timeout_s
+    reply = await provider_chat(
+        provider, system=_SYSTEM, prompt=prompt, timeout_s=body.timeout_s
     )
     if reply is None:
         raise HTTPException(status_code=503, detail="llm_call_failed")
@@ -469,11 +406,12 @@ async def chat(
         target=body.message[:120],
         project_id=project_id,
         details={"symbols": [c.get("name") for c in ctx], "code": bool(source_root),
-                 "expanded": expanded},
+                 "provider": provider, "expanded": expanded},
     )
 
     return {
         "reply": reply,
+        "provider": provider,
         "context": [
             {"name": c.get("name"), "kind": c.get("kind"),
              "file": c.get("file"), "line": c.get("line")}

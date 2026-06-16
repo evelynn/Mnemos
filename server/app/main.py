@@ -129,6 +129,7 @@ def create_app() -> FastAPI:
     app.include_router(flow_api.router)
     app.include_router(ask_api.router)
     app.include_router(chat_api.router)
+    app.include_router(chat_api.meta_router)
     app.include_router(voice_api.router)
     app.include_router(plans_api.router)
     app.include_router(diffs_api.router)
