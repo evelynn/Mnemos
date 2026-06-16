@@ -70,7 +70,7 @@ class ChatRequest(BaseModel):
         default=None, description="Repo root; enables source-code context"
     )
     top_k: int = Field(default=6, ge=1, le=12)
-    timeout_s: int = Field(default=120, ge=10, le=240)
+    timeout_s: int = Field(default=180, ge=10, le=300)
 
 
 def _resolve_source_root(given: str | None) -> str | None:
