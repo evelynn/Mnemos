@@ -246,11 +246,45 @@ def _build_prompt(history: list[ChatMessage], context: str, question: str) -> st
     )
 
 
-async def chat_via_agent_sdk(
-    *, system: str, prompt: str, timeout_s: int = 120
-) -> str | None:
-    """One-shot conversational Claude call via the local subscription.
-    Returns the markdown reply, or None on any failure (never raises)."""
+def _llm_available() -> bool:
+    """Either the fast direct API (ANTHROPIC_API_KEY) or the local Claude
+    Code subscription can serve the chat."""
+    return bool(os.environ.get("ANTHROPIC_API_KEY")) or is_agent_sdk_available()
+
+
+async def _chat_via_api(system: str, prompt: str, timeout_s: int) -> str | None:
+    """Direct Anthropic API — returns in ~10-30s. Used when
+    ANTHROPIC_API_KEY is set (far faster and more reliable than spawning
+    the Claude Code subprocess per request)."""
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return None
+    try:
+        import anthropic  # noqa: PLC0415
+
+        client = anthropic.AsyncAnthropic(api_key=key)
+        resp = await asyncio.wait_for(
+            client.messages.create(
+                model=os.environ.get("MNEMOS_CHAT_MODEL", "claude-sonnet-4-6"),
+                system=system,
+                max_tokens=3000,
+                messages=[{"role": "user", "content": prompt}],
+            ),
+            timeout=timeout_s,
+        )
+        parts = [
+            getattr(b, "text", "") for b in resp.content
+            if getattr(b, "type", "") == "text"
+        ]
+        return "\n".join(parts).strip() or None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("chat: anthropic API failed (%s); trying subscription",
+                    exc.__class__.__name__)
+        return None
+
+
+async def _chat_via_subscription(system: str, prompt: str, timeout_s: int) -> str | None:
+    """Local Claude Code subscription — no API key, but ~60-180s/call."""
     if not is_agent_sdk_available():
         return None
     try:
@@ -283,13 +317,22 @@ async def chat_via_agent_sdk(
     try:
         await asyncio.wait_for(_drain(), timeout=timeout_s)
     except TimeoutError:
-        log.warning("chat: agent SDK timed out after %ds", timeout_s)
+        log.warning("chat: subscription LLM timed out after %ds", timeout_s)
         return None
     except Exception as exc:  # noqa: BLE001
         log.warning("chat: %s: %s", exc.__class__.__name__, exc)
         return None
-    text = "\n".join(out).strip()
-    return text or None
+    return "\n".join(out).strip() or None
+
+
+async def _chat_llm(*, system: str, prompt: str, timeout_s: int = 180) -> str | None:
+    """One-shot conversational answer. Prefers the fast direct API
+    (ANTHROPIC_API_KEY); falls back to the local subscription. Returns the
+    markdown reply, or None on failure (never raises)."""
+    reply = await _chat_via_api(system, prompt, timeout_s)
+    if reply is not None:
+        return reply
+    return await _chat_via_subscription(system, prompt, timeout_s)
 
 
 # Korean (and other non-ASCII) code concepts → the English keywords that
@@ -390,7 +433,7 @@ async def chat(
     user: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> dict:
-    if not is_agent_sdk_available():
+    if not _llm_available():
         raise HTTPException(status_code=503, detail="llm_unavailable")
 
     hits = await search_symbols(
@@ -414,7 +457,7 @@ async def chat(
     )
     prompt = _build_prompt(body.history, context_md, body.message)
 
-    reply = await chat_via_agent_sdk(
+    reply = await _chat_llm(
         system=_SYSTEM, prompt=prompt, timeout_s=body.timeout_s
     )
     if reply is None:
