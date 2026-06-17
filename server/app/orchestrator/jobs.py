@@ -27,7 +27,7 @@ from app.extractor.runner import summarise_l1, summarise_l2, summarise_l3
 from app.merge.contract_id import http_contract_id
 from app.merge.findings import run_all as rebuild_findings
 from app.merge.runtime import reconcile_observations
-from app.merge.writer import upsert_edge, upsert_node
+from app.merge.writer import prune_graph_history, upsert_edge, upsert_node
 from app.models.graph import AnalysisRun, Edge, Node
 from app.models.projects import Project
 from app.orchestrator.progress import ProgressBus
@@ -777,10 +777,16 @@ async def run_ingest(
 
         completed = datetime.now(tz=timezone.utc)
         async with SessionLocal() as session:
+            # Prune superseded graph history so re-analysis doesn't grow the
+            # DB without bound (PR-184); the current graph is never touched.
+            pruned = await prune_graph_history(session, project_id=project_id)
+            await session.commit()
             # Headline stats = distinct current graph, not raw ingest-record
             # counts. ``totals`` double-counts any entity referenced from
             # several sites; overlay the true distinct node/edge counts.
             final_stats = {**totals, **await _graph_inventory(session, project_id)}
+            if pruned["nodes"] or pruned["edges"]:
+                final_stats["history_pruned"] = pruned
             await _set_run_status(
                 session,
                 run_id,

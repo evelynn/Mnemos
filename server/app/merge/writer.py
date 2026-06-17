@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import and_, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.graph import Edge, Node, NodeSource
+from app.models.graph import Edge, Node
 
 
 async def upsert_node(
@@ -51,18 +50,12 @@ async def upsert_node(
             valid_from=now,
         )
     )
-
-    stmt = pg_insert(NodeSource).values(
-        node_id=node_id,
-        project_id=project_id,
-        source_name=source_name,
-        raw_data=data,
-        contributed_at=now,
-    )
-    stmt = stmt.on_conflict_do_nothing(
-        index_elements=["node_id", "project_id", "source_name", "contributed_at"]
-    )
-    await session.execute(stmt)
+    # NodeSource.raw_data used to store a full copy of ``data`` per node for
+    # multi-source provenance — but nothing reads it, and it doubled graph
+    # storage (84 MB of dead duplicate of nodes.data on a large repo, PR-184).
+    # The source that contributed a node is already on ``Node.created_by``, so
+    # the redundant write is dropped. (The table is kept for a future merge
+    # that genuinely needs per-source raw payloads.)
 
 
 async def upsert_edge(
@@ -107,3 +100,32 @@ async def upsert_edge(
             valid_from=now,
         )
     )
+
+
+async def prune_graph_history(
+    session: AsyncSession, *, project_id: uuid.UUID, keep_days: int = 7
+) -> dict[str, int]:
+    """Delete superseded (``valid_to`` set) node/edge rows older than
+    ``keep_days``. The current graph (``valid_to IS NULL``) is never touched.
+
+    Re-analysis supersedes rows instead of overwriting them (bitemporal
+    history), which grows the DB without bound across runs. Nothing reads
+    deep history — recent-diff queries only look back a little — so a short
+    retention window keeps those working while bounding growth (PR-184).
+    """
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=max(0, keep_days))
+    n = await session.execute(
+        delete(Node).where(
+            Node.project_id == project_id,
+            Node.valid_to.is_not(None),
+            Node.valid_to < cutoff,
+        )
+    )
+    e = await session.execute(
+        delete(Edge).where(
+            Edge.project_id == project_id,
+            Edge.valid_to.is_not(None),
+            Edge.valid_to < cutoff,
+        )
+    )
+    return {"nodes": n.rowcount or 0, "edges": e.rowcount or 0}
