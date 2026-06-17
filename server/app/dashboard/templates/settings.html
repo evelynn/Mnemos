@@ -473,39 +473,64 @@ function _statusDot(p) {
 
 function renderProviderCard(p) {
   const st = _statusDot(p);
+  const isClaude = p.id === "claudecode";
+  const mode = p.mode || "subscription";
+  const subMode = isClaude && mode === "subscription";
   const keyPlaceholder = p.has_key
     ? MnemosUI.t("key stored — type to replace")
     : MnemosUI.t("paste API key");
+  // Claude defaults to the local Claude Code subscription; "API key" mode
+  // switches it to the direct Anthropic API.
+  const modeRow = isClaude
+    ? `<label><span data-i18n="Method">Method</span>
+         <select id="pmode-${p.id}" class="chat-provider" onchange="onClaudeModeChange('${p.id}')">
+           <option value="subscription"${mode === "subscription" ? " selected" : ""} data-i18n="Subscription (Claude Code)">Subscription (Claude Code)</option>
+           <option value="api"${mode === "api" ? " selected" : ""} data-i18n="API key">API key</option>
+         </select></label>
+       <p id="subnote-${p.id}" class="muted provider-keyhint"${subMode ? "" : " hidden"} data-i18n="Uses this machine's Claude Code subscription — no API key needed.">Uses this machine's Claude Code subscription — no API key needed.</p>`
+    : "";
   const baseRow = p.needs_base_url
     ? `<label><span data-i18n="Base URL">Base URL</span>
          <input type="text" id="pb-${p.id}" value="${escapeHtml(p.base_url || "")}" placeholder="https://…/v1" /></label>`
-    : "";
-  const keyHint = (!p.needs_key)
-    ? `<span class="muted" data-i18n="No key needed — uses the local Claude subscription.">No key needed — uses the local Claude subscription.</span>`
     : "";
   const clearBtn = p.has_key
     ? `<button type="button" class="danger" onclick="clearProviderKey('${p.id}')" data-i18n="Clear key">Clear key</button>`
     : "";
   return `<div class="provider-card" data-provider="${p.id}">
     <h3><span class="provider-dot ${st.cls}" aria-hidden="true"></span>${escapeHtml(p.label)}<span class="provider-status-text">${escapeHtml(st.text)}</span></h3>
-    <label><span data-i18n="API key">API key</span>
-      <span class="key-row">
-        <input type="password" id="pk-${p.id}" autocomplete="new-password" placeholder="${escapeHtml(keyPlaceholder)}" />
-        <button type="button" class="key-toggle" onclick="toggleKey('${p.id}')" title="${escapeHtml(MnemosUI.t("Show/hide key"))}" aria-label="${escapeHtml(MnemosUI.t("Show/hide key"))}">&#128065;</button>
-      </span></label>
-    <p class="muted provider-keyhint" data-i18n="Stored encrypted; not shown again after saving.">Stored encrypted; not shown again after saving.</p>
+    ${modeRow}
+    <div id="keywrap-${p.id}"${subMode ? " hidden" : ""}>
+      <label><span data-i18n="API key">API key</span>
+        <span class="key-row">
+          <input type="password" id="pk-${p.id}" autocomplete="new-password" placeholder="${escapeHtml(keyPlaceholder)}" />
+          <button type="button" class="key-toggle" onclick="toggleKey('${p.id}')" title="${escapeHtml(MnemosUI.t("Show/hide key"))}" aria-label="${escapeHtml(MnemosUI.t("Show/hide key"))}">&#128065;</button>
+        </span></label>
+      <p class="muted provider-keyhint" data-i18n="Stored encrypted; not shown again after saving.">Stored encrypted; not shown again after saving.</p>
+    </div>
     ${baseRow}
-    <label><span data-i18n="Model">Model</span>
-      <input type="text" id="pm-${p.id}" list="ml-${p.id}" value="${escapeHtml(p.model || "")}" autocomplete="off" />
-      <datalist id="ml-${p.id}">${_modelOptions(p.suggested_models)}</datalist></label>
+    ${p.id === "atlas"
+      ? `<label><span data-i18n="Agent ID">Agent ID</span>
+           <input type="text" id="pa-${p.id}" value="${escapeHtml(p.agent_id || "")}" placeholder="27138cb9-1a03-…" autocomplete="off" /></label>`
+      : `<label><span data-i18n="Model">Model</span>
+           <input type="text" id="pm-${p.id}" list="ml-${p.id}" value="${escapeHtml(p.model || "")}" autocomplete="off" />
+           <datalist id="ml-${p.id}">${_modelOptions(p.suggested_models)}</datalist></label>`}
     <div class="provider-actions">
       <button type="button" class="primary" onclick="saveProvider('${p.id}')" data-i18n="Save">Save</button>
       <button type="button" onclick="testProvider('${p.id}')" data-i18n="Test connection">Test connection</button>
       ${clearBtn}
-      ${keyHint}
     </div>
     <div id="pr-${p.id}" class="provider-result-box" hidden></div>
   </div>`;
+}
+
+function onClaudeModeChange(id) {
+  const sel = document.getElementById("pmode-" + id);
+  if (!sel) return;
+  const sub = sel.value === "subscription";
+  const wrap = document.getElementById("keywrap-" + id);
+  const note = document.getElementById("subnote-" + id);
+  if (wrap) wrap.hidden = sub;
+  if (note) note.hidden = !sub;
 }
 
 function toggleKey(id) {
@@ -517,8 +542,12 @@ async function saveProvider(id) {
   const keyEl = document.getElementById("pk-" + id);
   const modelEl = document.getElementById("pm-" + id);
   const baseEl = document.getElementById("pb-" + id);
+  const modeEl = document.getElementById("pmode-" + id);
+  const agentEl = document.getElementById("pa-" + id);
   const body = { model: modelEl ? modelEl.value : null };
   if (baseEl) body.base_url = baseEl.value;
+  if (modeEl) body.mode = modeEl.value;
+  if (agentEl) body.agent_id = agentEl.value;
   if (keyEl && keyEl.value) body.api_key = keyEl.value;
   const r = await fetch("/api/v1/chat/provider-config/" + id, {
     method: "PUT",

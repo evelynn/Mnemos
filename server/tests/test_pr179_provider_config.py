@@ -124,20 +124,38 @@ async def test_clear_key_removes_it(sqlite_session, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_atlas_base_url_persisted(sqlite_session, monkeypatch):
+async def test_atlas_config_persisted(sqlite_session, monkeypatch):
     monkeypatch.delenv("ATLAS_BASE_URL", raising=False)
     monkeypatch.delenv("ATLAS_API_KEY", raising=False)
+    monkeypatch.delenv("ATLAS_AGENT_ID", raising=False)
     await cc.put_provider_config(
         "atlas",
         cc.ProviderConfigUpdate(
-            api_key="a-key", base_url="https://atlas.hansol/v1", model="atlas-1"
+            api_key="a-key", base_url="https://atlas.hansol/api/v1/public",
+            agent_id="agent-xyz",
         ),
         user=_StubUser(), db=sqlite_session,
     )
     cfg = await lp.resolve_config(sqlite_session)
-    assert cfg["atlas"]["base_url"] == "https://atlas.hansol/v1"
-    assert cfg["atlas"]["model"] == "atlas-1"
+    assert cfg["atlas"]["base_url"] == "https://atlas.hansol/api/v1/public"
+    assert cfg["atlas"]["agent_id"] == "agent-xyz"
     assert lp.is_provider_available("atlas", cfg) is True
+
+    # Without an agent ID, Atlas is not usable even with a key.
+    await cc.put_provider_config(
+        "atlas", cc.ProviderConfigUpdate(agent_id=""),
+        user=_StubUser(), db=sqlite_session,
+    )
+    cfg2 = await lp.resolve_config(sqlite_session)
+    assert lp.is_provider_available("atlas", cfg2) is False
+
+
+@pytest.mark.asyncio
+async def test_atlas_default_base_url(sqlite_session, monkeypatch):
+    # With nothing set, Atlas base URL defaults to the hansol public endpoint.
+    monkeypatch.delenv("ATLAS_BASE_URL", raising=False)
+    cfg = await lp.resolve_config(sqlite_session)
+    assert cfg["atlas"]["base_url"] == "https://ai-atlas.hansol.net/api/v1/public"
 
 
 def test_status_dot_reflects_last_test():

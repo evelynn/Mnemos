@@ -1,15 +1,16 @@
 """PR-178/179 — multi-provider LLM backend for the Chat tab.
 
 The operator picks which AI answers a chat message: OpenAI, Gemini, Claude
-Code (subscription/API), or Atlas (hansol ai). Each provider's config —
-API key, model, and (for Atlas) base URL — is resolved per request from
-two sources, DB first then env:
+Code, or Atlas (hansol ai). Claude runs on the local Claude Code
+subscription by default (no key); Atlas is the hansol agent API (key +
+agent ID, two-step session call). Each provider's config is resolved per
+request from two sources, DB first then env:
 
   1. Settings UI (PR-179): keys in the encrypted ``Secret`` table
-     (label ``chat-provider:<suffix>``), models / base_url in the global
-     ``PlatformSetting`` row ``chat_providers``.
+     (label ``chat-provider:<suffix>``), models / agent / base_url / mode in
+     the global ``PlatformSetting`` row ``chat_providers``.
   2. Env fallback: OPENAI_API_KEY/OPENAI_MODEL, GEMINI_API_KEY/GEMINI_MODEL,
-     ATLAS_API_KEY/ATLAS_BASE_URL/ATLAS_MODEL, ANTHROPIC_API_KEY/MNEMOS_CHAT_MODEL.
+     ATLAS_API_KEY/ATLAS_AGENT_ID/ATLAS_BASE_URL, ANTHROPIC_API_KEY/MNEMOS_CHAT_MODEL.
 
 ``resolve_config(db)`` returns ``{provider: {api_key, model, base_url}}``;
 the availability/dispatch helpers take that config (they never read env or
@@ -100,8 +101,9 @@ async def resolve_config(db: AsyncSession) -> dict[str, dict]:
         api_key=_env("GEMINI_API_KEY"), model=_env("GEMINI_MODEL"),
     )
     cfg["atlas"].update(
-        api_key=_env("ATLAS_API_KEY"), model=_env("ATLAS_MODEL"),
-        base_url=_env("ATLAS_BASE_URL"),
+        api_key=_env("ATLAS_API_KEY"),
+        agent_id=_env("ATLAS_AGENT_ID"),
+        base_url=_env("ATLAS_BASE_URL") or "https://ai-atlas.hansol.net/api/v1/public",
     )
     cfg["claudecode"].update(
         api_key=_env("ANTHROPIC_API_KEY"), model=_env("MNEMOS_CHAT_MODEL"),
@@ -120,6 +122,13 @@ async def resolve_config(db: AsyncSession) -> dict[str, dict]:
             cfg[pid]["model"] = s["model"]
         if pid == "atlas" and s.get("base_url"):
             cfg[pid]["base_url"] = s["base_url"]
+        if pid == "atlas" and s.get("agent_id"):
+            cfg[pid]["agent_id"] = s["agent_id"]
+    # Claude runs on the local Claude Code subscription by default; "api"
+    # switches it to the direct Anthropic API (which needs a key).
+    cfg["claudecode"]["mode"] = (
+        (saved.get("claudecode") or {}).get("mode") or "subscription"
+    )
 
     # Secret: API-key overrides (encrypted at rest).
     by_suffix = {v: k for k, v in _KEY_SUFFIX.items()}
@@ -153,7 +162,7 @@ def is_provider_available(provider: str, cfg: dict[str, dict]) -> bool:
     if provider == "claudecode":
         return bool(c.get("api_key")) or is_agent_sdk_available()
     if provider == "atlas":
-        return bool(c.get("api_key") and c.get("base_url"))
+        return bool(c.get("api_key") and c.get("agent_id") and c.get("base_url"))
     if provider in ("openai", "gemini"):
         return bool(c.get("api_key"))
     return False
@@ -231,6 +240,34 @@ async def _gemini_generate(
             return None
         parts = (cands[0].get("content") or {}).get("parts") or []
         return "".join(p.get("text", "") for p in parts).strip() or None
+
+
+async def _atlas_chat(
+    *, base_url: str, api_key: str, agent_id: str,
+    system: str, prompt: str, timeout_s: int,
+) -> str | None:
+    """AI-ATLAS public agent API (hansol). Two steps: create a session, then
+    post the message; the reply is ``response.message``. Atlas has no system
+    role (the agent's behaviour is configured on the Atlas side), so the
+    system text is prepended to the message. Auth = ``x-api-key`` header."""
+    base = base_url.rstrip("/")
+    headers = {"x-api-key": api_key, "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=timeout_s) as client:
+        s = await client.post(
+            f"{base}/agents/{agent_id}/sessions",
+            headers=headers, json={"title": "Mnemos"},
+        )
+        s.raise_for_status()
+        session_id = s.json().get("id")
+        if not session_id:
+            return None
+        message = f"{system}\n\n{prompt}" if system else prompt
+        r = await client.post(
+            f"{base}/agents/{agent_id}/sessions/{session_id}/messages",
+            headers=headers, json={"message": message},
+        )
+        r.raise_for_status()
+        return (r.json().get("message") or "").strip() or None
 
 
 async def _claude_api(
@@ -320,9 +357,9 @@ async def provider_chat(
                 system=system, prompt=prompt, timeout_s=timeout_s,
             )
         if provider == "atlas":
-            return await _openai_compatible(
+            return await _atlas_chat(
                 base_url=c.get("base_url") or "", api_key=c.get("api_key") or "",
-                model=c.get("model") or "", system=system, prompt=prompt,
+                agent_id=c.get("agent_id") or "", system=system, prompt=prompt,
                 timeout_s=timeout_s,
             )
         if provider == "gemini":
@@ -332,16 +369,32 @@ async def provider_chat(
                 system=system, prompt=prompt, timeout_s=timeout_s,
             )
         if provider == "claudecode":
-            if c.get("api_key"):
+            mode = c.get("mode") or "subscription"
+            key = c.get("api_key")
+            if mode == "api" and key:
                 reply = await _claude_api(
-                    api_key=c["api_key"], model=c.get("model"),
+                    api_key=key, model=c.get("model"),
                     system=system, prompt=prompt, timeout_s=timeout_s,
                 )
                 if reply is not None:
                     return reply
-            return await _claude_subscription(
+                # API failed → fall back to the subscription so chat still works.
+                return await _claude_subscription(
+                    system=system, prompt=prompt, timeout_s=timeout_s
+                )
+            # Subscription mode (default): use the local Claude Code login.
+            reply = await _claude_subscription(
                 system=system, prompt=prompt, timeout_s=timeout_s
             )
+            if reply is not None:
+                return reply
+            # Subscription unavailable → use an API key if one is configured.
+            if key:
+                return await _claude_api(
+                    api_key=key, model=c.get("model"),
+                    system=system, prompt=prompt, timeout_s=timeout_s,
+                )
+            return None
         return None
     except httpx.HTTPStatusError as exc:
         log.warning("chat provider %s HTTP %s: %s", provider,
@@ -363,13 +416,10 @@ async def test_provider(
     c = cfg.get(provider) or {}
     key = c.get("api_key")
     try:
-        if provider in ("openai", "atlas"):
-            base = c.get("base_url") or (
-                "https://api.openai.com/v1" if provider == "openai" else ""
-            )
-            if not base or not key:
-                return {"ok": False, "message": "missing key or base_url",
-                        "models": []}
+        if provider == "openai":
+            base = c.get("base_url") or "https://api.openai.com/v1"
+            if not key:
+                return {"ok": False, "message": "missing key", "models": []}
             async with httpx.AsyncClient(timeout=timeout_s) as cl:
                 r = await cl.get(base.rstrip("/") + "/models",
                                  headers={"Authorization": f"Bearer {key}"})
@@ -378,6 +428,24 @@ async def test_provider(
                           if m.get("id")]
             return {"ok": True, "message": f"OK — {len(models)} models",
                     "models": sorted(models)}
+
+        if provider == "atlas":
+            base = c.get("base_url")
+            agent = c.get("agent_id")
+            if not (base and key and agent):
+                return {"ok": False,
+                        "message": "missing key / agent ID / base URL",
+                        "models": []}
+            # Creating a session validates the key + agent + base URL.
+            async with httpx.AsyncClient(timeout=timeout_s) as cl:
+                r = await cl.post(
+                    base.rstrip("/") + f"/agents/{agent}/sessions",
+                    headers={"x-api-key": key, "Content-Type": "application/json"},
+                    json={"title": "Mnemos connection test"},
+                )
+                r.raise_for_status()
+                name = r.json().get("agent_name") or agent
+            return {"ok": True, "message": f"OK — agent: {name}", "models": []}
 
         if provider == "gemini":
             if not key:
@@ -397,13 +465,25 @@ async def test_provider(
                     "models": sorted(m for m in models if m)}
 
         if provider == "claudecode":
-            if not key:
-                if is_agent_sdk_available():
-                    return {"ok": True, "message": "OK — local subscription",
+            mode = c.get("mode") or "subscription"
+            if mode == "subscription" or not key:
+                if not is_agent_sdk_available():
+                    return {"ok": False,
+                            "message": "Claude Code subscription not detected "
+                                       "(run Mnemos inside Claude Code)",
                             "models": []}
+                # Real round-trip — proves the subscription actually answers,
+                # not just that the SDK is importable.
+                reply = await _claude_subscription(
+                    system="You are a connection test. Reply with exactly: OK",
+                    prompt="Reply with the single word OK.",
+                    timeout_s=max(60, min(timeout_s, 120)),
+                )
+                if reply:
+                    return {"ok": True,
+                            "message": "OK — Claude 구독 응답 확인", "models": []}
                 return {"ok": False,
-                        "message": "no API key and no local subscription",
-                        "models": []}
+                        "message": "구독 호출 실패 또는 시간 초과", "models": []}
             async with httpx.AsyncClient(timeout=timeout_s) as cl:
                 r = await cl.get(
                     "https://api.anthropic.com/v1/models",

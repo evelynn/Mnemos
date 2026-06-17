@@ -44,9 +44,13 @@ def test_gemini_available_with_key():
     assert lp.is_provider_available("gemini", _cfg(gemini={"api_key": "g"})) is True
 
 
-def test_atlas_needs_both_key_and_base_url():
+def test_atlas_needs_key_agent_and_base_url():
+    # Atlas (hansol agent API) needs an API key, an agent ID, and a base URL.
     assert lp.is_provider_available("atlas", _cfg(atlas={"api_key": "a"})) is False
-    cfg = _cfg(atlas={"api_key": "a", "base_url": "https://atlas.hansol/v1"})
+    assert lp.is_provider_available(
+        "atlas", _cfg(atlas={"api_key": "a", "base_url": "https://x/v1"})
+    ) is False  # agent ID missing
+    cfg = _cfg(atlas={"api_key": "a", "agent_id": "ag-1", "base_url": "https://x/v1"})
     assert lp.is_provider_available("atlas", cfg) is True
 
 

@@ -37,6 +37,7 @@ from app.api.llm_providers import (
 from app.audit.logger import record as audit_record
 from app.auth.rbac import require_admin
 from app.db import get_session
+from app.extractor.agent_sdk import is_agent_sdk_available
 from app.models.auth import PlatformSetting, Secret, User
 from app.safety.crypto import encrypt
 
@@ -48,6 +49,8 @@ class ProviderConfigUpdate(BaseModel):
     clear_key: bool = False
     model: str | None = Field(default=None, max_length=120)
     base_url: str | None = Field(default=None, max_length=400)
+    mode: str | None = Field(default=None, max_length=20)
+    agent_id: str | None = Field(default=None, max_length=100)
 
 
 def _status(provider: str, cfg: dict[str, dict], by_label: dict | None = None) -> dict:
@@ -60,10 +63,15 @@ def _status(provider: str, cfg: dict[str, dict], by_label: dict | None = None) -
         "has_key": bool(c.get("api_key")),
         "model": c.get("model"),
         "base_url": c.get("base_url"),
+        "agent_id": c.get("agent_id"),
         "available": is_provider_available(provider, cfg),
         "needs_base_url": provider == "atlas",
-        # claudecode can run on the local subscription with no key.
-        "needs_key": provider != "claudecode",
+        "needs_agent_id": provider == "atlas",
+        # claudecode needs a key only in explicit "api" mode; the default
+        # "subscription" mode uses the local Claude Code login (no key).
+        "needs_key": provider != "claudecode" or c.get("mode") == "api",
+        "mode": c.get("mode"),
+        "subscription_available": is_agent_sdk_available(),
         "suggested_models": SUGGESTED_MODELS.get(provider, []),
         # Persisted last-test outcome (drives the status dot). OK-prefixed
         # messages mean success (see llm_providers.test_provider).
@@ -115,6 +123,10 @@ async def put_provider_config(
         pv["model"] = body.model.strip()
     if body.base_url is not None:
         pv["base_url"] = body.base_url.strip()
+    if body.mode is not None:
+        pv["mode"] = body.mode.strip()
+    if body.agent_id is not None:
+        pv["agent_id"] = body.agent_id.strip()
     blob[provider] = pv
     if ps is None:
         db.add(PlatformSetting(key=SETTING_KEY, value=blob))
