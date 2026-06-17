@@ -36,8 +36,16 @@ def test_inrepo_script_gated_by_flag(monkeypatch):
     monkeypatch.setenv("MNEMOS_INREPO_ANALYZERS", "1")
     p = inrepo_script("ggoss-py")
     assert p is not None and p.name == "ggoss_py.py" and p.exists()
-    # only the pure-Python analyzer has an in-repo entrypoint
-    assert inrepo_script("ggoss-ts") is None
+    # ggoss-ts also has an in-repo entrypoint (PR-181), gated on ``node``
+    # being installed since it runs under node, not Python.
+    import shutil
+
+    ts = inrepo_script("ggoss-ts")
+    if shutil.which("node"):
+        assert ts is not None and ts.name == "index.mjs" and ts.exists()
+    else:
+        assert ts is None
+    # analyzers with no in-repo source stay on the Claude fallback path.
     assert inrepo_script("ggoss-csharp") is None
 
 

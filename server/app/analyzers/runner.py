@@ -29,18 +29,46 @@ log = logging.getLogger(__name__)
 # docker-free deployment gets *verified* deterministic Python extraction
 # instead of falling through to the inferred Claude-Code path.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_INREPO_PYTHON_ANALYZERS: dict[str, Path] = {
-    "ggoss-py": _REPO_ROOT / "analyzers" / "ggoss-py" / "src" / "ggoss_py.py",
+# In-repo analyzers runnable WITHOUT Docker: binary → (interpreter, script).
+# ggoss-py needs only this Python's stdlib ``ast``; ggoss-ts runs under
+# ``node`` (PR-153 extended) so a docker-free deploy still gets *verified*
+# deterministic extraction for the two most common backend/frontend stacks
+# instead of falling through to the slower, ``inferred`` Claude-Code path.
+_INREPO_ANALYZERS: dict[str, tuple[str, Path]] = {
+    "ggoss-py": (sys.executable,
+                 _REPO_ROOT / "analyzers" / "ggoss-py" / "src" / "ggoss_py.py"),
+    "ggoss-ts": ("node",
+                 _REPO_ROOT / "analyzers" / "ggoss-ts" / "src" / "index.mjs"),
 }
 
 
-def inrepo_script(binary: str) -> Path | None:
-    """In-repo Python entrypoint for ``binary`` when docker-free in-repo
-    analyzers are enabled and the script is present; else None."""
+def _inrepo_entry(binary: str) -> tuple[str, Path] | None:
+    """(resolved_interpreter, script) for a docker-free in-repo analyzer, or
+    None when the path is disabled, the interpreter is missing (e.g. no
+    ``node``), or the script is absent."""
     if os.environ.get("MNEMOS_INREPO_ANALYZERS") not in ("1", "true", "True"):
         return None
-    p = _INREPO_PYTHON_ANALYZERS.get(binary)
-    return p if (p is not None and p.exists()) else None
+    entry = _INREPO_ANALYZERS.get(binary)
+    if entry is None:
+        return None
+    interp, script = entry
+    if not script.exists():
+        return None
+    resolved = interp if interp == sys.executable else shutil.which(interp)
+    return (resolved, script) if resolved else None
+
+
+def inrepo_command(binary: str) -> list[str] | None:
+    """``[interpreter, script]`` prefix for a docker-free in-repo analyzer."""
+    entry = _inrepo_entry(binary)
+    return [entry[0], str(entry[1])] if entry else None
+
+
+def inrepo_script(binary: str) -> Path | None:
+    """The in-repo script path when the analyzer is runnable docker-free
+    (the registry's availability check uses this)."""
+    entry = _inrepo_entry(binary)
+    return entry[1] if entry else None
 
 
 
@@ -120,10 +148,10 @@ class AnalyzerRunner:
         if resolved_binary is not None:
             args = [resolved_binary, verb, str(path)]
         else:
-            script = inrepo_script(self.binary)
+            cmd = inrepo_command(self.binary)
             args = (
-                [sys.executable, str(script), verb, str(path)]
-                if script is not None
+                [*cmd, verb, str(path)]
+                if cmd is not None
                 else [self.binary, verb, str(path)]
             )
         if extra_args:
