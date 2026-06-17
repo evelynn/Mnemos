@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import ARRAY, DateTime, String, Text, func
+from sqlalchemy import ARRAY, DateTime, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -30,6 +30,11 @@ class Node(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    __table_args__ = (
+        # Overview / priority-ranking queries filter nodes by kind + current.
+        Index("ix_nodes_project_kind", "project_id", "kind", "valid_to"),
+    )
+
 
 class Edge(Base):
     __tablename__ = "edges"
@@ -52,6 +57,18 @@ class Edge(Base):
     created_by: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False)
     valid_to: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        # The supersede UPDATE in upsert_edge filters by this exact tuple;
+        # without the index it full-scans the edges table → O(N^2) on the
+        # calls stage of a large analysis (PR-183).
+        Index("ix_edges_identity", "project_id", "source_id", "target_id",
+              "kind", "valid_to"),
+        # find_callers + in-degree ranking (incoming edges by target).
+        Index("ix_edges_target", "project_id", "target_id", "kind", "valid_to"),
+        # find_callees + neighbour lookup (outgoing edges by source).
+        Index("ix_edges_source", "project_id", "source_id", "valid_to"),
     )
 
 
