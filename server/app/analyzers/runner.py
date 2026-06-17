@@ -59,9 +59,23 @@ def _inrepo_entry(binary: str) -> tuple[str, Path] | None:
 
 
 def inrepo_command(binary: str) -> list[str] | None:
-    """``[interpreter, script]`` prefix for a docker-free in-repo analyzer."""
+    """``[interpreter, <flags>, script]`` prefix for a docker-free in-repo
+    analyzer."""
     entry = _inrepo_entry(binary)
-    return [entry[0], str(entry[1])] if entry else None
+    if entry is None:
+        return None
+    interp, script = entry
+    cmd = [interp]
+    if Path(interp).name.lower().startswith("node"):
+        # node's default old-space (~2 GB) OOMs the TypeScript type-checker on
+        # large repos; ggoss-ts's ``calls`` verb chunks the file set and forces
+        # a GC between chunks (needs --expose-gc) so only one chunk's program is
+        # resident, and the higher ceiling gives each chunk headroom. These
+        # can't go through NODE_OPTIONS — _build_env strips it from the env.
+        cmd.append("--max-old-space-size=6144")
+        cmd.append("--expose-gc")
+    cmd.append(str(script))
+    return cmd
 
 
 def inrepo_script(binary: str) -> Path | None:

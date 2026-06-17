@@ -153,14 +153,10 @@ const _PROGRAM_OPTS = {
   skipLibCheck: true,
 };
 
-function buildProgram(target) {
-  // An analyzer must see *all* the code, not the subset a project's
-  // build tsconfig happens to scope. Real repos make that distinction
-  // bite: astro's root tsconfig is solution-style (project references,
-  // ~0 files), and next.js' root tsconfig ``include``s only its test
-  // suite — trusting either analyses the wrong thing. So the file set
-  // always comes from a directory walk; a tsconfig contributes only
-  // its compilerOptions (jsx / paths / target).
+function buildOptions(target) {
+  // _PROGRAM_OPTS wins for the flags analysis depends on (noEmit, allowJs,
+  // skipLibCheck); a project tsconfig contributes the rest (jsx / paths /
+  // target). A malformed tsconfig is not fatal — the defaults analyse fine.
   let options = { ..._PROGRAM_OPTS };
   const tsconfigPath = path.join(target, "tsconfig.json");
   if (fs.existsSync(tsconfigPath)) {
@@ -169,14 +165,23 @@ function buildProgram(target) {
       const parsed = ts.parseJsonConfigFileContent(
         raw.config || {}, ts.sys, target,
       );
-      // _PROGRAM_OPTS wins for the flags analysis depends on (noEmit,
-      // allowJs, skipLibCheck); the tsconfig keeps jsx / paths / target.
       options = { ...parsed.options, ..._PROGRAM_OPTS };
     } catch {
-      // A malformed tsconfig is not fatal — the defaults analyse fine.
+      // defaults analyse fine
     }
   }
+  return options;
+}
 
+function buildProgram(target) {
+  // An analyzer must see *all* the code, not the subset a project's
+  // build tsconfig happens to scope. Real repos make that distinction
+  // bite: astro's root tsconfig is solution-style (project references,
+  // ~0 files), and next.js' root tsconfig ``include``s only its test
+  // suite — trusting either analyses the wrong thing. So the file set
+  // always comes from a directory walk; a tsconfig contributes only
+  // its compilerOptions (jsx / paths / target).
+  const options = buildOptions(target);
   const files = walkFiles(target, _SOURCE_EXTS);
   try {
     return ts.createProgram({ rootNames: files, options });
@@ -368,13 +373,49 @@ function emitCallEdges(out, sf, caller, callSite, calleeId, calleeName, callerNa
   writeLine(out, envelope("edge", data));
 }
 
-function cmdCalls(target, outPath) {
-  const program = buildProgram(target);
+// A single TS program over a very large repo (10k+ files) makes the
+// type-checker's call resolution (getSymbolAtLocation per call site)
+// exhaust memory and the OS kills the process before it emits anything
+// (openclaw, 16k ts files → 0 CALLS). Above this file count cmdCalls builds
+// one program per directory-grouped chunk so each fits in memory; below it a
+// single program keeps full cross-file resolution. Mirrors pack_by_budget.
+const _CALLS_CHUNK_THRESHOLD = 4000;
+const _CALLS_CHUNK_SIZE = 2500;
+const _normKey = (p) => p.replace(/\\/g, "/").toLowerCase();
+
+function chunkFilesByDir(files, size) {
+  // Group by directory so calls within a module resolve inside one chunk,
+  // then pack groups (sorted, siblings adjacent) into chunks of <= size
+  // files. An oversized directory is split, but its files stay contiguous
+  // so most intra-directory calls still resolve.
+  const byDir = new Map();
+  for (const f of files) {
+    const d = path.dirname(f);
+    if (!byDir.has(d)) byDir.set(d, []);
+    byDir.get(d).push(f);
+  }
+  const chunks = [];
+  let cur = [];
+  for (const dir of [...byDir.keys()].sort()) {
+    for (const f of byDir.get(dir)) {
+      cur.push(f);
+      if (cur.length >= size) { chunks.push(cur); cur = []; }
+    }
+  }
+  if (cur.length) chunks.push(cur);
+  return chunks;
+}
+
+function emitCallsForProgram(program, out, onlyFiles) {
+  // ``onlyFiles`` (a Set of normalised paths) restricts emission to a
+  // chunk's own root files: TS pulls imported files from other chunks into
+  // this program too, and walking them would double-emit. null = emit for
+  // every source file (the single-program path).
   const checker = program.getTypeChecker();
-  const out = openOutput(outPath);
 
   for (const sf of program.getSourceFiles()) {
     if (sf.isDeclarationFile || sf.fileName.includes("node_modules")) continue;
+    if (onlyFiles && !onlyFiles.has(_normKey(sf.fileName))) continue;
     // Each entry: { node, nameForId } — name is what emitCallEdges
     // uses to build the caller symbol id. For FunctionDeclaration /
     // MethodDeclaration, ``node.name.text`` exists; for ArrowFunction
@@ -442,6 +483,43 @@ function cmdCalls(target, outPath) {
       visit(sf);
     } catch (err) {
       reportError(sf.fileName, err.message);
+    }
+  }
+}
+
+function cmdCalls(target, outPath) {
+  const out = openOutput(outPath);
+  const files = walkFiles(target, _SOURCE_EXTS);
+  if (files.length <= _CALLS_CHUNK_THRESHOLD) {
+    // Small/medium repo: one program, full cross-file call resolution.
+    emitCallsForProgram(buildProgram(target), out, null);
+  } else {
+    const chunks = chunkFilesByDir(files, _CALLS_CHUNK_SIZE);
+    reportError(
+      target,
+      `calls: ${files.length} files > ${_CALLS_CHUNK_THRESHOLD}; chunking ` +
+        `into ${chunks.length} programs (cross-chunk calls → extern)`,
+      true,
+    );
+    const options = buildOptions(target);
+    for (const chunk of chunks) {
+      let program;
+      try {
+        program = ts.createProgram({ rootNames: chunk, options });
+      } catch (err) {
+        reportError(target, `calls chunk build failed: ${err.message}`, true);
+        continue;
+      }
+      emitCallsForProgram(program, out, new Set(chunk.map(_normKey)));
+      // Release this chunk's program before building the next — a TS program
+      // over thousands of files holds GBs, and two resident at once OOMs node
+      // (the silent OS kill that left openclaw with only chunk 1). ``--expose-gc``
+      // (set by the runner) makes the reclaim synchronous so peak memory stays
+      // at one chunk, not the whole repo.
+      program = undefined;
+      if (typeof global !== "undefined" && typeof global.gc === "function") {
+        global.gc();
+      }
     }
   }
   if (outPath) out.end();
