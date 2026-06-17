@@ -59,7 +59,12 @@ function openOutput(outPath) {
 const _SOURCE_EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 
 // Generated-output directories — never source, always skipped.
-const _SKIP_DIRS = new Set(["node_modules", "dist", "build", "coverage"]);
+const _SKIP_DIRS = new Set(["node_modules", "dist", "build", "coverage", "out"]);
+
+// Minified / bundled output (e.g. a vendored ``a2ui.bundle.js``) — generated,
+// not source. A single bundle can be tens of thousands of unreadable nodes
+// that swamp the graph, so it is skipped by filename (PR-183 S2).
+const _SKIP_FILE_RE = /\.(min|bundle)\.[cm]?[jt]sx?$/;
 
 // Test / fixture directory names. Normally analysed like any other
 // code, but excluded on the crash-retry path: a compiler-style repo
@@ -83,7 +88,10 @@ function walkFiles(dir, exts, opts = {}, collected = []) {
     if (opts.skipTests && _TEST_DIRS.has(e.name)) continue;
     const full = path.join(dir, e.name);
     if (e.isDirectory()) walkFiles(full, exts, opts, collected);
-    else if (exts.some((ext) => e.name.endsWith(ext))) collected.push(full);
+    else if (
+      exts.some((ext) => e.name.endsWith(ext)) && !_SKIP_FILE_RE.test(e.name)
+    )
+      collected.push(full);
   }
   return collected;
 }
