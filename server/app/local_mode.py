@@ -118,6 +118,11 @@ class InlineQueue:
     def __init__(self) -> None:
         self._seen_job_ids: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
+        # Serialize job execution: SQLite (local mode) allows a single
+        # writer, so two concurrent ``run_ingest`` tasks collide on
+        # "database is locked" and one run fails (PR-183 S1). One lock makes
+        # a second large analysis queue behind the first instead of failing.
+        self._run_lock = asyncio.Lock()
 
     async def enqueue_job(
         self,
@@ -155,7 +160,9 @@ class InlineQueue:
 
         ctx: dict[str, Any] = {"progress": ProgressBus()}
         try:
-            await fn(ctx, *args)
+            # One writer at a time — SQLite serialises analyses (PR-183 S1).
+            async with self._run_lock:
+                await fn(ctx, *args)
         except Exception:  # noqa: BLE001
             log.exception("inline_queue: job %s failed", getattr(fn, "__name__", fn))
 
