@@ -17,6 +17,7 @@ free-form markdown. With no LLM available it returns 503 — the lexical
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
@@ -363,6 +364,63 @@ def _merge_hits(a: list[dict], b: list[dict], top_k: int) -> list[dict]:
     )[:top_k]
 
 
+_WEAK_SCORE = 10.0
+
+
+def _has_korean(text: str) -> bool:
+    return any("가" <= c <= "힣" for c in text or "")
+
+
+def _weak_recall(question: str, hits: list[dict]) -> bool:
+    """Should we spend an LLM call to rewrite the query into search terms?
+
+    The lexical tokenizer drops Korean entirely, so a concept question never
+    reaches the right symbol (validated: "도구 호출 차단" → 0 recall, score-0
+    noise). Fire when the question contains Korean, or when even the top lexical
+    hit is weak (the deterministic ranker found nothing solid).
+    """
+    top = float(hits[0].get("score") or 0) if hits else 0.0
+    return _has_korean(question) or top < _WEAK_SCORE
+
+
+async def _llm_search_terms(
+    question: str, overview: dict, provider: str, cfg: dict, timeout_s: int
+) -> list[str]:
+    """LLM → English code-search terms grounded in THIS project.
+
+    The static ``_KO_CONCEPTS`` map can't scale to every concept; the LLM bridges
+    a natural-language (often Korean) question to concrete English identifiers the
+    lexical search can actually match. Returns ``[]`` on any failure so the caller
+    falls back to the lexical hits + static map — never raises into the request.
+    """
+    ov = _render_overview(overview)[:1500]
+    system = (
+        "You turn a user's natural-language question (often Korean) into English "
+        "code-search terms for THIS project. Output ONLY a JSON array of 3-8 short "
+        "terms — concrete identifier fragments (function/class names, domain nouns) "
+        "likely to appear in the source. No prose."
+    )
+    prompt = f"## Project\n{ov}\n\n## Question\n{question}\n\nJSON array:"
+    try:
+        raw = await provider_chat(
+            provider, cfg, system=system, prompt=prompt,
+            timeout_s=min(timeout_s, 90),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("chat: search-term rewrite failed: %s", exc)
+        return []
+    if not raw:
+        return []
+    i, j = raw.find("["), raw.rfind("]")
+    if i >= 0 and j > i:
+        try:
+            arr = json.loads(raw[i : j + 1])
+            return [str(t).strip() for t in arr if str(t).strip()][:8]
+        except (ValueError, TypeError):
+            pass
+    return []
+
+
 @router.post("/chat", dependencies=[Depends(require_operator)])
 async def chat(
     project_id: uuid.UUID,
@@ -379,20 +437,37 @@ async def chat(
             status_code=400, detail=f"provider_not_configured:{provider}"
         )
 
+    # Retrieve a *broad* grounded candidate pool, then let the composing LLM
+    # pick — top-k=6 alone buried the right symbol behind English homonyms
+    # (e.g. "block" → channel gates instead of `beforeToolCall`).
+    broad = max(body.top_k, 24)
     hits = await search_symbols(
-        db, project_id=project_id, query=body.message, top_k=body.top_k
+        db, project_id=project_id, query=body.message, top_k=broad
     )
-    # A Korean/concept question barely tokenises to English, so the lexical
-    # ranker misses the relevant code. Map concept words to English keywords
-    # and search again, merging by best score.
+    # Fast, free static concept map (common Korean concepts → English).
     expanded = _expand_terms(body.message)
     if expanded:
         extra = await search_symbols(
-            db, project_id=project_id, query=" ".join(expanded), top_k=body.top_k
+            db, project_id=project_id, query=" ".join(expanded), top_k=broad
         )
-        hits = _merge_hits(hits, extra, body.top_k)
-    source_root = _resolve_source_root(body.source_root)
+        hits = _merge_hits(hits, extra, broad)
     overview = await _project_overview(db, project_id)
+    # The deterministic tokenizer can't bridge Korean→symbol names, so when
+    # recall is weak the LLM rewrites the question into project-grounded English
+    # search terms (validated: surfaces `beforeToolCall` / `safe_schedule_*`
+    # that a Korean concept query otherwise misses entirely).
+    if _weak_recall(body.message, hits):
+        terms = await _llm_search_terms(
+            body.message, overview, provider, cfg, body.timeout_s
+        )
+        if terms:
+            more = await search_symbols(
+                db, project_id=project_id, query=" ".join(terms), top_k=broad
+            )
+            hits = _merge_hits(hits, more, broad)
+    # Feed a broadened set (was top-6) so the LLM selects the relevant symbols.
+    hits = hits[: max(body.top_k, 12)]
+    source_root = _resolve_source_root(body.source_root)
     ctx = await _build_context(db, project_id, hits, source_root)
     context_md = (
         "## Project overview\n" + _render_overview(overview)
