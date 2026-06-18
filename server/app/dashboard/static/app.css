@@ -18,39 +18,38 @@
  * ────────────────────────────────────────────────────────────── */
 
 :root {
-  /* shadcn-vue design tokens — neutral (zinc) base + indigo primary, a
-     light sidebar, the shadcn radius and very soft borders/shadows. Every
-     component below reads these vars, so remapping the values here restyles
-     the whole dashboard to the shadcn look without touching the markup. */
-  --bg:                   #fafafa;   /* zinc-50  app canvas  */
-  --surface:              #ffffff;   /* white cards          */
-  --surface-alt:          #f4f4f5;   /* zinc-100 subtle fill */
-  --surface-tint:         #f4f4f5;
-  --border:               #e4e4e7;   /* zinc-200             */
-  --border-soft:          #f0f0f1;
+  /* Theme: Nord Light — Snow Storm canvas + Polar Night ink + Frost accent.
+     Every component reads these vars, so the whole dashboard re-skins from
+     this one block. The dark theme below is One Dark Pro. */
+  --bg:                   #eceff4;   /* nord6 snow storm canvas */
+  --surface:              #ffffff;   /* cards                   */
+  --surface-alt:          #e5e9f0;   /* nord5 subtle fill       */
+  --surface-tint:         #e5e9f0;
+  --border:               #d8dee9;   /* nord4                   */
+  --border-soft:          #e5e9f0;
 
-  --text:                 #09090b;   /* zinc-950 foreground  */
-  --text-muted:           #71717a;   /* zinc-500             */
-  --text-inverted:        #fafafa;
+  --text:                 #2e3440;   /* nord0 polar night       */
+  --text-muted:           #4c566a;   /* nord3                   */
+  --text-inverted:        #eceff4;
 
-  --accent:               #4f46e5;   /* indigo-600 primary   */
-  --accent-soft:          #eef2ff;   /* indigo-50            */
-  --accent-strong:        #4338ca;   /* indigo-700           */
+  --accent:               #5e81ac;   /* nord10 frost            */
+  --accent-soft:          #e3eaf2;   /* light frost tint        */
+  --accent-strong:        #4c6f99;   /* deeper frost            */
 
-  --success:              #15803d;
-  --success-bg:           #f0fdf4;
-  --warn:                 #b45309;
-  --warn-bg:              #fffbeb;
-  --danger:               #dc2626;
-  --danger-bg:            #fef2f2;
-  --danger-button:        #dc2626;
-  --danger-banner:        #dc2626;
+  --success:              #4f7a3e;   /* nord14 darkened (AA)    */
+  --success-bg:           #eaf1e3;
+  --warn:                 #94621a;   /* nord13 darkened (AA)    */
+  --warn-bg:              #f7efdd;
+  --danger:               #b04a52;   /* nord11 darkened (AA)    */
+  --danger-bg:            #f6e7e8;
+  --danger-button:        #bf616a;   /* nord11                  */
+  --danger-banner:        #bf616a;
 
-  /* Light shadcn sidebar — was a dark slab; now a clean bordered panel. */
+  /* Nord light sidebar — clean snow panel. */
   --sidebar-bg:           #ffffff;
-  --sidebar-fg:           #52525b;   /* zinc-600             */
-  --sidebar-active:       #f4f4f5;   /* zinc-100 active fill */
-  --sidebar-active-fg:    #09090b;
+  --sidebar-fg:           #4c566a;   /* nord3                   */
+  --sidebar-active:       #e3eaf2;   /* frost tint active       */
+  --sidebar-active-fg:    #2e3440;
 
   --sp-1: 0.25rem;
   --sp-2: 0.5rem;
@@ -80,34 +79,35 @@
    theme switcher, or when the browser reports prefers-color-scheme:
    dark and no explicit preference is stored. */
 :root[data-theme="dark"] {
-  --bg:                   #09090b;   /* zinc-950 */
-  --surface:              #18181b;   /* zinc-900 cards */
-  --surface-alt:          #27272a;   /* zinc-800 */
-  --surface-tint:         #27272a;
-  --border:               #27272a;   /* zinc-800 */
-  --border-soft:          #1f1f23;
+  /* Theme: One Dark Pro */
+  --bg:                   #21252b;   /* canvas (gutter)   */
+  --surface:              #282c34;   /* editor bg = cards  */
+  --surface-alt:          #2c313c;   /* selection fill     */
+  --surface-tint:         #2c313c;
+  --border:               #3b4048;
+  --border-soft:          #2a2e36;
 
-  --text:                 #fafafa;
-  --text-muted:           #a1a1aa;   /* zinc-400 */
-  --text-inverted:        #18181b;
+  --text:                 #abb2bf;   /* one dark fg        */
+  --text-muted:           #7f8794;   /* brightened comment */
+  --text-inverted:        #282c34;
 
-  --accent:               #818cf8;   /* indigo-400 (contrast on dark) */
-  --accent-soft:          #1e1b4b;   /* indigo-950 */
-  --accent-strong:        #a5b4fc;
+  --accent:               #61afef;   /* one dark blue      */
+  --accent-soft:          #20303d;   /* dark blue tint     */
+  --accent-strong:        #82c0ff;
 
-  --success:              #4ade80;
-  --success-bg:           #052e16;
-  --warn:                 #fbbf24;
-  --warn-bg:              #3a2e16;
-  --danger:               #f87171;
-  --danger-bg:            #3a1818;
-  --danger-button:        #dc2626;
-  --danger-banner:        #b91c1c;
+  --success:              #98c379;   /* one dark green     */
+  --success-bg:           #1d2a1a;
+  --warn:                 #e5c07b;   /* one dark yellow    */
+  --warn-bg:              #2c2614;
+  --danger:               #e06c75;   /* one dark red       */
+  --danger-bg:            #2f1d20;
+  --danger-button:        #e06c75;
+  --danger-banner:        #be5046;
 
-  --sidebar-bg:           #09090b;
-  --sidebar-fg:           #a1a1aa;
-  --sidebar-active:       #27272a;
-  --sidebar-active-fg:    #fafafa;
+  --sidebar-bg:           #21252b;
+  --sidebar-fg:           #868e9b;
+  --sidebar-active:       #2c313c;
+  --sidebar-active-fg:    #d7dae0;
 
   --shadow-card:  0 1px 2px 0 rgba(0, 0, 0, 0.30);
   --shadow-hover: 0 1px 3px 0 rgba(0, 0, 0, 0.40);
@@ -120,30 +120,30 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     color-scheme: dark;
-    --bg:                   #09090b;
-    --surface:              #18181b;
-    --surface-alt:          #27272a;
-    --surface-tint:         #27272a;
-    --border:               #27272a;
-    --border-soft:          #1f1f23;
-    --text:                 #fafafa;
-    --text-muted:           #a1a1aa;
-    --text-inverted:        #18181b;
-    --accent:               #818cf8;
-    --accent-soft:          #1e1b4b;
-    --accent-strong:        #a5b4fc;
-    --success:              #4ade80;
-    --success-bg:           #052e16;
-    --warn:                 #fbbf24;
-    --warn-bg:              #3a2e16;
-    --danger:               #f87171;
-    --danger-bg:            #3a1818;
-    --danger-button:        #dc2626;
-    --danger-banner:        #b91c1c;
-    --sidebar-bg:           #09090b;
-    --sidebar-fg:           #a1a1aa;
-    --sidebar-active:       #27272a;
-    --sidebar-active-fg:    #fafafa;
+    --bg:                   #21252b;
+    --surface:              #282c34;
+    --surface-alt:          #2c313c;
+    --surface-tint:         #2c313c;
+    --border:               #3b4048;
+    --border-soft:          #2a2e36;
+    --text:                 #abb2bf;
+    --text-muted:           #7f8794;
+    --text-inverted:        #282c34;
+    --accent:               #61afef;
+    --accent-soft:          #20303d;
+    --accent-strong:        #82c0ff;
+    --success:              #98c379;
+    --success-bg:           #1d2a1a;
+    --warn:                 #e5c07b;
+    --warn-bg:              #2c2614;
+    --danger:               #e06c75;
+    --danger-bg:            #2f1d20;
+    --danger-button:        #e06c75;
+    --danger-banner:        #be5046;
+    --sidebar-bg:           #21252b;
+    --sidebar-fg:           #868e9b;
+    --sidebar-active:       #2c313c;
+    --sidebar-active-fg:    #d7dae0;
   }
 }
 
