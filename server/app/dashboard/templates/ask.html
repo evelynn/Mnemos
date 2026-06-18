@@ -1,271 +1,213 @@
 {% extends "_layout.html" %}
 {% block title %}Ask — Mnemos{% endblock %}
 {% block content %}
-<header class="page-head">
-  <h1 data-i18n="Ask the system">Ask the system</h1>
-</header>
+<style>
+/* Conversational Ask (P3 redesign) — thread + docked composer. Reads theme
+   tokens so it works in Nord Light & One Dark Pro. */
+.chat { display:flex; flex-direction:column; min-height:calc(100vh - 5rem); max-width:1040px; margin:0 auto; }
+.chat-thread { flex:1; display:flex; flex-direction:column; gap:1.5rem; padding-bottom:1rem; }
+.chat-empty { margin:auto; text-align:center; color:var(--text-muted); max-width:600px; padding:3rem 1rem; }
+.chat-empty h1 { color:var(--text); margin:0 0 .5rem; }
+.chat-empty .ex-row { display:flex; flex-wrap:wrap; gap:.5rem; justify-content:center; margin-top:1.4rem; }
+.chat-empty .ex { font-size:.85rem; padding:.4rem .8rem; border:1px solid var(--border); border-radius:var(--radius-pill);
+  background:var(--surface); color:var(--text); cursor:pointer; }
+.chat-empty .ex:hover { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); }
+.turn-q { align-self:flex-end; max-width:78%; background:var(--accent); color:#fff; padding:.65rem .95rem;
+  border-radius:var(--radius-lg) var(--radius-lg) 4px var(--radius-lg); line-height:1.55; box-shadow:var(--shadow-card); }
+.turn-a { display:flex; flex-direction:column; gap:.6rem; }
+.turn-a .spinner { vertical-align:-2px; }
+.ask-badges { display:flex; gap:.45rem; align-items:center; flex-wrap:wrap; }
+.ask-answer .ask-card, .turn-a .ask-card { background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--radius-lg); padding:1rem 1.1rem; box-shadow:var(--shadow-card); }
+.ask-sig { font-family:var(--font-mono); font-size:.8rem; background:var(--surface-alt);
+  border:1px solid var(--border-soft); border-radius:var(--radius-md); padding:.6rem .75rem; margin-top:.6rem; overflow:auto; }
 
-<section>
-  <p class="muted" data-i18n="Ask a question about the analysed system in plain language — Mnemos answers from the knowledge graph (symbols, data access, summaries). If the graph can't answer yet, it analyses the most relevant source files on demand and answers anyway.">
-    Ask a question about the analysed system in plain language — Mnemos
-    answers from the knowledge graph (symbols, data access, summaries).
-    If the graph can't answer yet, it analyses the most relevant source
-    files on demand and answers anyway.
-  </p>
+/* docked composer */
+.chat-dock { position:sticky; bottom:0; padding:.5rem 0 1rem; background:linear-gradient(0deg,var(--bg) 72%,transparent); }
+.chat-box { border:1px solid var(--border); border-radius:18px; background:var(--surface); box-shadow:var(--shadow-hover); transition:.15s; }
+.chat-box:focus-within { border-color:var(--accent); box-shadow:0 0 0 4px var(--accent-soft); }
+#aq-q { width:100%; border:none; background:none; resize:none; outline:none; padding:.95rem 1.1rem .3rem;
+  min-height:84px; max-height:40vh; font:inherit; line-height:1.6; color:var(--text); }
+#aq-q::placeholder { color:var(--text-muted); }
+.chat-bar { display:flex; align-items:center; gap:.5rem; padding:.45rem .65rem .65rem; flex-wrap:wrap; }
+.chat-bar select#aq-pid { height:32px; min-height:32px; padding:0 .5rem; font-size:.8rem; max-width:200px; }
+.chat-root { height:32px !important; min-height:32px !important; font-size:.8rem !important; width:160px; }
+.cbtn { display:inline-flex; align-items:center; gap:.35rem; height:32px; padding:0 .7rem; border-radius:var(--radius-md);
+  border:1px solid var(--border); background:var(--surface); color:var(--text-muted); font-size:.8rem; font-weight:500; cursor:pointer; }
+.cbtn:hover { background:var(--surface-alt); color:var(--text); }
+.cbtn.on { background:var(--accent-soft); color:var(--accent); border-color:transparent; }
+.csend { margin-left:auto; display:inline-flex; align-items:center; gap:.5rem; height:34px; padding:0 1rem;
+  border-radius:var(--radius-md); background:var(--accent); color:#fff; font-weight:600; font-size:.85rem; cursor:pointer; box-shadow:var(--shadow-card); }
+.csend:hover { background:var(--accent-strong); }
+.csend kbd { font:11px var(--font-mono); background:rgba(255,255,255,.2); border-radius:4px; padding:1px 5px; }
+.chat-hint { text-align:center; font-size:.75rem; color:var(--text-muted); margin-top:.5rem; }
 
-  <form onsubmit="return askQuestion(event)" class="ask-form">
-    <label><span data-i18n="Project">Project</span>
-      <input id="aq-pid" name="project_id" required placeholder="uuid" />
-    </label>
-    <label class="ask-question"><span data-i18n="Question">Question</span>
-      <div class="ask-q-row">
-        <textarea id="aq-q" rows="8" required
-          placeholder="e.g. Where is the order creation handler and which tables does it write? — write as much as you need; the box grows as you type."></textarea>
-        <!-- Voice command (PR-155). Hidden until the client confirms the
-             browser supports capture AND the server has an STT engine
-             installed (mountVoiceInput probes /api/v1/voice/status). -->
-        <button type="button" id="aq-mic" class="mic-btn" hidden
-                aria-label="Start voice input" aria-pressed="false"
-                data-required-role="operator"
-                title="Speak your question">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"
-               viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="1.7" aria-hidden="true">
-            <path stroke-linecap="round" stroke-linejoin="round"
-                  d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"/>
-          </svg>
-          <span class="sr-only" data-i18n="Voice input">Voice input</span>
-        </button>
+/* visualization */
+.viz { margin-top:.8rem; border:1px solid var(--border); border-radius:var(--radius-md); background:var(--surface-alt); padding:.85rem 1rem; }
+.viz-cap { font-size:.68rem; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); margin-bottom:.7rem; }
+.dgraph { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; font-family:var(--font-mono); font-size:.78rem; }
+.dgraph .node { padding:.3rem .6rem; border-radius:var(--radius-sm); border:1px solid var(--border); background:var(--surface); }
+.dgraph .node.sym { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); font-weight:700; }
+.dgraph .arr { color:var(--text-muted); }
+.dgraph .tbl { padding:.25rem .55rem; border-radius:var(--radius-sm); border:1px solid var(--border); }
+.dgraph .tbl.r { background:var(--accent-soft); }
+.dgraph .tbl.w { background:var(--warn-bg); color:var(--warn); border-color:var(--warn); }
+.dgraph .grp { display:flex; gap:.35rem; flex-wrap:wrap; align-items:center; }
+.dgraph .lbl { font-family:var(--font-body); font-size:.7rem; font-weight:700; text-transform:uppercase; color:var(--text-muted); }
+.flow { display:flex; align-items:stretch; overflow:auto; }
+.flow-step { flex:1; min-width:150px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); padding:.6rem .75rem; position:relative; }
+.flow-step + .flow-step { margin-left:1.6rem; }
+.flow-step + .flow-step::before { content:"→"; position:absolute; left:-1.25rem; top:50%; transform:translateY(-50%); color:var(--text-muted); }
+.flow-tier { font-size:.62rem; font-weight:800; letter-spacing:.05em; padding:1px .5rem; border-radius:var(--radius-pill); background:var(--accent-soft); color:var(--accent); }
+.flow-comp { font-family:var(--font-mono); font-weight:600; font-size:.82rem; margin:.35rem 0 .15rem; }
+.flow-act { font-size:.72rem; color:var(--text-muted); }
+</style>
+
+<div class="chat">
+  <div class="chat-thread" id="aq-thread">
+    <div class="chat-empty" id="aq-empty">
+      <h1 data-i18n="Ask the system">Ask the system</h1>
+      <p class="muted" data-i18n="Ask in plain language — Mnemos answers from the knowledge graph (symbols, data access, flows) and visualizes the result.">Ask in plain language — Mnemos answers from the knowledge graph (symbols, data access, flows) and visualizes the result.</p>
+      <div class="ex-row">
+        <button type="button" class="ex">감사 로그는 어디에 기록되나요?</button>
+        <button type="button" class="ex">인증 가드는 어떤 엔드포인트에 걸려 있나요?</button>
+        <button type="button" class="ex">세션을 쓰는 함수를 보여줘</button>
       </div>
-    </label>
-    <details class="ask-advanced">
-      <summary data-i18n="Deepen options">Deepen options</summary>
-      <label class="ask-inline">
-        <input id="aq-deepen" type="checkbox" checked />
-        <span data-i18n="Analyse more on demand if the graph can't answer">Analyse more on demand if the graph can't answer</span>
-      </label>
-      <label><span data-i18n="Source root (enables deepening)">Source root (enables deepening)</span>
-        <input id="aq-root" type="text" placeholder="/abs/path/to/repo (worker-visible)" />
-      </label>
-    </details>
-    <div class="ask-actions">
-      <button class="primary" type="submit" data-required-role="operator" data-i18n="Ask">Ask</button>
-      <button type="button" onclick="traceProcess()" data-required-role="operator" data-i18n="Trace as a process (FE→BE→DB)">Trace as a process (FE→BE→DB)</button>
     </div>
-  </form>
-</section>
+  </div>
 
-<section id="aq-pending" hidden aria-live="polite">
-  <p class="muted"><span class="spinner" aria-hidden="true"></span>
-    <span id="aq-pending-msg" data-i18n="Answering…">Answering…</span></p>
-</section>
-
-<section id="aq-result" hidden aria-labelledby="aq-result-title">
-  <h2 id="aq-result-title" class="sr-only" data-i18n="Answer">Answer</h2>
-  <div id="aq-badges" class="ask-badges"></div>
-  <div id="aq-answer" class="ask-answer"></div>
-  <details id="aq-matches-wrap" hidden>
-    <summary data-i18n="Other matches">Other matches</summary>
-    <ul id="aq-matches" class="ask-matches"></ul>
-  </details>
-</section>
-
-<section id="aq-flow" hidden aria-labelledby="aq-flow-title">
-  <h2 id="aq-flow-title" data-i18n="Process trace">Process trace</h2>
-  <div id="aq-flow-badges" class="ask-badges"></div>
-  <p id="aq-flow-summary" class="ask-flow-summary"></p>
-  <ol id="aq-flow-steps" class="flow-steps"></ol>
-  <div id="aq-flow-flags"></div>
-  <p id="aq-flow-data" class="muted"></p>
-</section>
+  <div class="chat-dock">
+    <div class="chat-box">
+      <textarea id="aq-q" required
+        data-i18n-placeholder="Ask anything about the codebase — write as much as you need…"
+        placeholder="Ask anything about the codebase — write as much as you need…"></textarea>
+      <div class="chat-bar">
+        <select id="aq-pid" name="project_id" aria-label="Project" required></select>
+        <button type="button" id="aq-trace" class="cbtn" title="Trace FE→BE→DB">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M4 18 9 9l5 4 6-9"/></svg>
+          <span data-i18n="Trace">Trace</span></button>
+        <button type="button" id="aq-deepen" class="cbtn on" title="Analyse on demand">
+          <span data-i18n="On-demand">On-demand</span></button>
+        <input type="text" id="aq-root" class="chat-root" placeholder="source root (옵션)" />
+        <button type="button" id="aq-mic" class="cbtn" hidden aria-label="Voice input" aria-pressed="false"
+                data-required-role="operator" title="Speak your question">🎤</button>
+        <button type="button" id="aq-send" class="csend" data-required-role="operator">
+          <span data-i18n="Send">Send</span> <kbd>↵</kbd></button>
+      </div>
+    </div>
+    <div class="chat-hint"><span data-i18n="Enter to send · Shift+Enter for a new line · Trace needs a source root">Enter to send · Shift+Enter for a new line · Trace needs a source root</span></div>
+  </div>
+</div>
 
 <script>
-const escapeHtml = MnemosUI.escapeHtml;
+const E = MnemosUI.escapeHtml;
+function mdLite(s){ let h=E(s||""); h=h.replace(/`([^`]+)`/g,"<code>$1</code>"); h=h.replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>"); return h; }
+function parseSymbolId(id){ const s=String(id||""); const at=s.split("@"); const line=at[1]?at[1].split(":")[0]:""; const segs=at[0].split(":"); const file=segs.length>=3?segs.slice(1,-1).join(":"):(segs[1]||""); return {file:file,line:line}; }
 
-// Render a tiny safe subset of markdown (**bold**, `code`) for the answer.
-function mdLite(s) {
-  let h = escapeHtml(s || "");
-  h = h.replace(/`([^`]+)`/g, "<code>$1</code>");
-  h = h.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  return h;
+let busy=false;
+function pid(){ return document.getElementById("aq-pid").value.trim(); }
+function scrollDown(){ window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"}); }
+
+function startTurn(text){
+  const empty=document.getElementById("aq-empty"); if(empty) empty.remove();
+  const t=document.getElementById("aq-thread");
+  const q=document.createElement("div"); q.className="turn-q"; q.textContent=text; t.appendChild(q);
+  const a=document.createElement("div"); a.className="turn-a";
+  a.innerHTML='<p class="muted"><span class="spinner" aria-hidden="true"></span> '+E(MnemosUI.t("Answering…"))+'</p>';
+  t.appendChild(a); scrollDown(); return a;
 }
 
-// "ts:src/.../page.tsx:AuditLog@16:1" → { file: "src/.../page.tsx", line: "16" }
-// so a human sees a location, never the raw key.
-function parseSymbolId(id) {
-  const s = String(id || "");
-  const at = s.split("@");
-  const line = at[1] ? at[1].split(":")[0] : "";
-  const segs = at[0].split(":");
-  const file = segs.length >= 3 ? segs.slice(1, -1).join(":") : (segs[1] || "");
-  return { file: file, line: line };
+// reads/writes → a compact data-access graph (symbol → tables)
+function dataGraph(name,reads,writes){
+  if(!(reads&&reads.length)&&!(writes&&writes.length)) return "";
+  const chips=(arr,cls)=>arr.map(x=>`<span class="tbl ${cls}">${E(x)}</span>`).join("");
+  let html='<div class="viz"><div class="viz-cap" data-i18n="Data access graph">Data access graph</div><div class="dgraph">';
+  if(reads&&reads.length) html+=`<span class="grp"><span class="lbl" data-i18n="Reads">Reads</span>${chips(reads,"r")}</span><span class="arr">→</span>`;
+  html+=`<span class="node sym">${E(name||"symbol")}</span>`;
+  if(writes&&writes.length) html+=`<span class="arr">→</span><span class="grp"><span class="lbl" data-i18n="Writes">Writes</span>${chips(writes,"w")}</span>`;
+  html+='</div></div>'; return html;
 }
 
-async function askQuestion(ev) {
-  ev.preventDefault();
-  const pid = document.getElementById("aq-pid").value.trim();
-  const q = document.getElementById("aq-q").value.trim();
-  if (!pid || !q) return false;
-  const deepen = document.getElementById("aq-deepen").checked;
-  const root = document.getElementById("aq-root").value.trim();
-
-  const pending = document.getElementById("aq-pending");
-  const result = document.getElementById("aq-result");
-  result.hidden = true;
-  pending.hidden = false;
-  document.getElementById("aq-pending-msg").textContent =
-    (deepen && root)
-      ? MnemosUI.t("Answering… (may analyse source files on demand)")
-      : MnemosUI.t("Answering…");
-
-  try {
-    const r = await fetch(`/api/v1/projects/${pid}/ask`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ question: q, deepen: deepen, source_root: root || null }),
-    });
-    if (!r.ok) { await MnemosUI.showError("Ask failed", r); return false; }
-    renderAnswer(await r.json());
-  } finally {
-    pending.hidden = true;
+function renderAnswerHTML(d){
+  const a=d.answer; const badges=[];
+  badges.push(d.answered?`<span class="badge ok" data-i18n="Answer">Answer</span>`:`<span class="badge" data-i18n="Best match">Best match</span>`);
+  if(d.deepened){ const files=(d.extracted_files||[]).map(E).join(", "); badges.push(`<span class="badge info" title="${files}" data-i18n="Analysed on demand">Analysed on demand</span>`); }
+  let html=`<div class="ask-badges">${badges.join(" ")}</div>`;
+  if(a){
+    const loc=a.file?(E(a.file)+(a.line?":"+E(String(a.line)):"")):"";
+    const chips=arr=>(arr||[]).map(w=>`<span class="chip">${E(w)}</span>`).join(" ");
+    const tentative=d.answered?"":`<p class="muted ask-tentative" data-i18n="No symbol confidently answers this — showing the closest match.">No symbol confidently answers this — showing the closest match.</p>`;
+    html+=tentative+`<div class="ask-card${d.answered?"":" ask-card-tentative"}">
+      <p class="ask-text">${mdLite(a.text||a.name||"")}</p>
+      <div class="ask-meta"><span class="ask-kind">${E(a.kind||"symbol")}</span>${loc?`<span class="ask-loc">${loc}</span>`:""}</div>
+      ${a.signature?`<pre class="ask-sig">${E(a.signature)}</pre>`:""}
+      ${dataGraph(a.name,a.reads,a.writes)}
+    </div>`;
+  } else {
+    html+=`<p class="muted" data-i18n="No matching symbol — try a different phrasing, or set a source root so Mnemos can analyse on demand.">No matching symbol — try a different phrasing, or set a source root so Mnemos can analyse on demand.</p>`;
   }
-  return false;
+  const matches=(d.matches||[]).slice(1);
+  if(matches.length){
+    html+=`<details class="ask-matches-wrap"><summary data-i18n="Other matches">Other matches</summary><ul class="ask-matches">`;
+    html+=matches.map(m=>{ const p=parseSymbolId(m.symbol_id); const where=p.file?`<span class="muted"> · ${E(p.file)}${p.line?":"+E(p.line):""}</span>`:""; return `<li><strong>${E(m.name||m.symbol_id)}</strong> <span class="ask-kind-sm">${E(m.kind||"")}</span>${where}</li>`; }).join("");
+    html+=`</ul></details>`;
+  }
+  return html;
 }
 
-function renderAnswer(d) {
-  const result = document.getElementById("aq-result");
-  const a = d.answer;
-  const badges = [];
-  badges.push(d.answered
-    ? `<span class="badge ok" data-i18n="Answer">Answer</span>`
-    : `<span class="badge" data-i18n="Best match">Best match</span>`);
-  if (d.deepened) {
-    const files = (d.extracted_files || []).map(escapeHtml).join(", ");
-    badges.push(`<span class="badge info" title="${files}" data-i18n="Analysed on demand">Analysed on demand</span>`);
+function renderFlowHTML(d){
+  const f=d.flow||{};
+  let html=`<div class="ask-badges"><span class="badge ok" data-i18n="Traced">Traced</span>`+(d.auto_collected_files||[]).map(x=>`<span class="badge info">${E(x)}</span>`).join(" ")+`</div>`;
+  html+=`<div class="ask-card">`;
+  if(f.summary) html+=`<p class="ask-text">${E(f.summary)}</p>`;
+  const steps=f.steps||[];
+  if(steps.length){
+    html+=`<div class="viz"><div class="viz-cap" data-i18n="Runtime path (cross-tier)">Runtime path (cross-tier)</div><div class="flow">`;
+    html+=steps.map(st=>{ const sig=st.signal||{}; const sg=sig.name?`${E(sig.kind||"")}: ${E(sig.name)}`:""; return `<div class="flow-step"><span class="flow-tier">${E(st.tier||"?")}</span><div class="flow-comp">${E(st.component||"")}</div><div class="flow-act">${E(st.action||"")}${sg?" · "+sg:""}</div></div>`; }).join("");
+    html+=`</div></div>`;
   }
-  document.getElementById("aq-badges").innerHTML = badges.join(" ");
+  const dt=(f.data_touched||[]).map(t=>`${E(t.op||"")} ${E(t.entity||"")}`).join(", ");
+  if(dt) html+=`<p class="muted" style="margin-top:.6rem">${E(MnemosUI.t("Data touched"))}: ${dt}</p>`;
+  html+=`</div>`;
+  return html;
+}
 
-  const ans = document.getElementById("aq-answer");
-  if (a) {
-    const loc = a.file ? (escapeHtml(a.file) + (a.line ? ":" + escapeHtml(String(a.line)) : "")) : "";
-    const sig = a.signature || "";
-    const chips = arr => (arr || []).map(w => `<span class="chip">${escapeHtml(w)}</span>`).join(" ");
-    const writes = chips(a.writes);
-    const reads = chips(a.reads);
-    const tentative = d.answered ? "" :
-      `<p class="muted ask-tentative" data-i18n="No symbol confidently answers this — showing the closest match. Try naming a specific function or file, or set a Source root to analyse on demand.">No symbol confidently answers this — showing the closest match. Try naming a specific function or file, or set a Source root to analyse on demand.</p>`;
-    ans.innerHTML = tentative + `
-      <div class="ask-card${d.answered ? "" : " ask-card-tentative"}">
-        <p class="ask-text">${mdLite(a.text || a.name || "")}
-          <button type="button" id="aq-listen" class="listen-btn" hidden
-                  aria-label="${MnemosUI.t("Read the answer aloud")}"
-                  title="${MnemosUI.t("Read the answer aloud")}">🔊
-            <span data-i18n="Listen">Listen</span></button></p>
-        <div class="ask-meta">
-          <span class="ask-kind">${escapeHtml(a.kind || "symbol")}</span>
-          ${loc ? `<span class="ask-loc">${loc}</span>` : ""}
-        </div>
-        ${sig ? `<pre class="ask-sig">${escapeHtml(sig)}</pre>` : ""}
-        ${writes ? `<div class="ask-da"><span class="ask-da-label" data-i18n="Writes">Writes</span>${writes}</div>` : ""}
-        ${reads ? `<div class="ask-da"><span class="ask-da-label" data-i18n="Reads">Reads</span>${reads}</div>` : ""}
-      </div>`;
-    // Voice output (PR-156): read the prose answer aloud (strip markdown).
-    const speakText = (a.text || a.name || "").replace(/[*`]/g, "");
-    const listenBtn = document.getElementById("aq-listen");
-    if (listenBtn && speakText) {
-      MnemosUI.voiceStatus().then(function (s) {
-        if (s && s.tts && s.tts.available) {
-          listenBtn.hidden = false;
-          listenBtn.addEventListener("click", function () { MnemosUI.speak(speakText); });
-        }
-      });
+async function send(){
+  if(busy) return; const p=pid(); const q=document.getElementById("aq-q").value.trim();
+  if(!p){ MnemosUI.showToast(MnemosUI.t("Pick a project first."),"warn"); return; }
+  if(!q) return;
+  const trace=document.getElementById("aq-trace").classList.contains("on");
+  const deepen=document.getElementById("aq-deepen").classList.contains("on");
+  const root=document.getElementById("aq-root").value.trim();
+  const slot=startTurn(q);
+  document.getElementById("aq-q").value=""; grow(); busy=true;
+  try{
+    if(trace){
+      if(!root){ slot.innerHTML=`<p class="muted" data-i18n="A source root is required to trace a process.">A source root is required to trace a process.</p>`; MnemosUI.applyI18n(slot); return; }
+      const r=await fetch(`/api/v1/projects/${p}/trace_flow/auto`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({entry:q,source_root:root})});
+      if(!r.ok){ slot.innerHTML=`<p class="muted">⚠ ${E(MnemosUI.t("Process trace failed"))}</p>`; await MnemosUI.showError("Process trace failed",r); return; }
+      slot.innerHTML=renderFlowHTML(await r.json());
+    } else {
+      const r=await fetch(`/api/v1/projects/${p}/ask`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({question:q,deepen:deepen,source_root:root||null})});
+      if(!r.ok){ slot.innerHTML=`<p class="muted">⚠ ${E(MnemosUI.t("Ask failed"))}</p>`; await MnemosUI.showError("Ask failed",r); return; }
+      slot.innerHTML=renderAnswerHTML(await r.json());
     }
-  } else {
-    ans.innerHTML = `<p class="muted" data-i18n="No matching symbol — try a different phrasing, or set a Source root under Deepen options so Mnemos can analyse the code on demand.">No matching symbol — try a different phrasing, or set a Source root under Deepen options so Mnemos can analyse the code on demand.</p>`;
-  }
-
-  // Related matches — name + location, never the raw id.
-  const matches = (d.matches || []).slice(1);
-  const wrap = document.getElementById("aq-matches-wrap");
-  if (matches.length) {
-    document.getElementById("aq-matches").innerHTML = matches.map(m => {
-      const p = parseSymbolId(m.symbol_id);
-      const where = p.file ? `<span class="muted"> · ${escapeHtml(p.file)}${p.line ? ":" + escapeHtml(p.line) : ""}</span>` : "";
-      return `<li><strong>${escapeHtml(m.name || m.symbol_id)}</strong> <span class="ask-kind-sm">${escapeHtml(m.kind || "")}</span>${where}</li>`;
-    }).join("");
-    wrap.hidden = false;
-  } else {
-    wrap.hidden = true;
-  }
-
-  result.hidden = false;
-  MnemosUI.applyI18n(result);
+    MnemosUI.applyI18n(slot); scrollDown();
+  } finally { busy=false; }
 }
 
-async function traceProcess() {
-  const pid = document.getElementById("aq-pid").value.trim();
-  const q = document.getElementById("aq-q").value.trim();
-  const root = document.getElementById("aq-root").value.trim();
-  if (!pid || !q) { MnemosUI.showToast(MnemosUI.t("Pick a project and enter the process to trace."), "warn"); return; }
-  if (!root) { MnemosUI.showToast(MnemosUI.t("A source root is required to trace a process — set it under Deepen options."), "warn"); return; }
-
-  const pending = document.getElementById("aq-pending");
-  const flowSec = document.getElementById("aq-flow");
-  flowSec.hidden = true;
-  pending.hidden = false;
-  document.getElementById("aq-pending-msg").textContent =
-    MnemosUI.t("Tracing the process across tiers… (analyses the relevant FE/BE/DB files)");
-  try {
-    const r = await fetch(`/api/v1/projects/${pid}/trace_flow/auto`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ entry: q, source_root: root }),
-    });
-    if (!r.ok) { await MnemosUI.showError("Process trace failed", r); return; }
-    renderFlow(await r.json());
-  } finally {
-    pending.hidden = true;
-  }
-}
-
-function renderFlow(d) {
-  const f = d.flow || {};
-  document.getElementById("aq-flow-badges").innerHTML =
-    `<span class="badge ok" data-i18n="Traced">Traced</span>` +
-    (d.auto_collected_files || []).map(x => `<span class="badge info">${escapeHtml(x)}</span>`).join(" ");
-  document.getElementById("aq-flow-summary").textContent = f.summary || "";
-
-  document.getElementById("aq-flow-steps").innerHTML = (f.steps || []).map(st => {
-    const sig = st.signal || {};
-    const sigTxt = sig.name ? ` <span class="muted">(${escapeHtml(sig.kind || "")}: ${escapeHtml(sig.name)})</span>` : "";
-    return `<li><strong>[${escapeHtml(st.tier || "?")}]</strong> ${escapeHtml(st.component || "")} — ${escapeHtml(st.action || "")}${sigTxt}</li>`;
-  }).join("");
-
-  const flags = f.flags || [];
-  document.getElementById("aq-flow-flags").innerHTML = flags.length
-    ? "<h3 data-i18n='Flags'>Flags</h3><ul class='flow-flags'>" + flags.map(fl =>
-        `<li><strong>${escapeHtml(fl.name || "")}</strong>: `
-        + (fl.values || []).map(v => `<code>${escapeHtml(String(v.value))}</code> = ${escapeHtml(v.meaning || "")}`).join("; ")
-        + "</li>").join("") + "</ul>"
-    : "";
-
-  const dt = (f.data_touched || []).map(t => `${escapeHtml(t.op || "")} ${escapeHtml(t.entity || "")}`).join(", ");
-  document.getElementById("aq-flow-data").textContent = dt ? (MnemosUI.t("Data touched") + ": " + dt) : "";
-
-  const sec = document.getElementById("aq-flow");
-  sec.hidden = false;
-  MnemosUI.applyI18n(sec);
-}
+// auto-grow textarea
+const ta=document.getElementById("aq-q");
+function grow(){ ta.style.height="auto"; ta.style.height=Math.min(ta.scrollHeight, window.innerHeight*0.40)+"px"; }
+ta.addEventListener("input", grow); grow();
+ta.addEventListener("keydown", e=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); send(); } });
+document.getElementById("aq-send").addEventListener("click", send);
+document.getElementById("aq-trace").addEventListener("click", e=>e.currentTarget.classList.toggle("on"));
+document.getElementById("aq-deepen").addEventListener("click", e=>e.currentTarget.classList.toggle("on"));
+document.querySelectorAll(".chat-empty .ex").forEach(b=>b.addEventListener("click",()=>{ ta.value=b.textContent; grow(); ta.focus(); }));
 
 MnemosUI.mountProjectPicker("#aq-pid", { autoSubmit: false });
-
-// Voice command (PR-155): speak the question instead of typing it.
-// Recognition runs on a local server-side model; the recognised text
-// lands in the question box for the operator to review before asking.
-MnemosUI.mountVoiceInput({
-  button: "#aq-mic",
-  target: "#aq-q",
-  projectInput: "#aq-pid",
-});
+MnemosUI.mountVoiceInput({ button:"#aq-mic", target:"#aq-q", projectInput:"#aq-pid" });
+ta.focus();
 </script>
 {% endblock %}
