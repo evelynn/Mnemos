@@ -1,5 +1,6 @@
 {% extends "_layout.html" %}
 {% block title %}Ask — Mnemos{% endblock %}
+{% block topbar_title %}<span data-i18n="Ask">Ask</span> <span class="crumb" data-i18n="· code Q&A">· code Q&A</span>{% endblock %}
 {% block content %}
 <style>
 /* Conversational Ask (P3 redesign) — thread + docked composer. Reads theme
@@ -82,7 +83,7 @@
         data-i18n-placeholder="Ask anything about the codebase — write as much as you need…"
         placeholder="Ask anything about the codebase — write as much as you need…"></textarea>
       <div class="chat-bar">
-        <select id="aq-pid" name="project_id" aria-label="Project" required></select>
+        <input type="hidden" id="aq-pid" name="project_id">
         <button type="button" id="aq-trace" class="cbtn" title="Trace FE→BE→DB">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M4 18 9 9l5 4 6-9"/></svg>
           <span data-i18n="Trace">Trace</span></button>
@@ -105,7 +106,13 @@ function mdLite(s){ let h=E(s||""); h=h.replace(/`([^`]+)`/g,"<code>$1</code>");
 function parseSymbolId(id){ const s=String(id||""); const at=s.split("@"); const line=at[1]?at[1].split(":")[0]:""; const segs=at[0].split(":"); const file=segs.length>=3?segs.slice(1,-1).join(":"):(segs[1]||""); return {file:file,line:line}; }
 
 let busy=false;
-function pid(){ return document.getElementById("aq-pid").value.trim(); }
+// Project now comes from the topbar global picker (#global-project). Read it
+// via MnemosUI.currentProject() and mirror into the hidden #aq-pid for voice.
+function pid(){
+  var g = (MnemosUI.currentProject && MnemosUI.currentProject()) || "";
+  var h = document.getElementById("aq-pid"); if (h && g) h.value = g;
+  return String(g).trim();
+}
 function scrollDown(){ window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"}); }
 
 function startTurn(text){
@@ -206,7 +213,8 @@ document.getElementById("aq-trace").addEventListener("click", e=>e.currentTarget
 document.getElementById("aq-deepen").addEventListener("click", e=>e.currentTarget.classList.toggle("on"));
 document.querySelectorAll(".chat-empty .ex").forEach(b=>b.addEventListener("click",()=>{ ta.value=b.textContent; grow(); ta.focus(); }));
 
-MnemosUI.mountProjectPicker("#aq-pid", { autoSubmit: false });
+// sync hidden project from the topbar picker (for the voice STT call)
+(function(){ var g=(MnemosUI.currentProject&&MnemosUI.currentProject())||""; var h=document.getElementById("aq-pid"); if(h&&g) h.value=g; })();
 MnemosUI.mountVoiceInput({ button:"#aq-mic", target:"#aq-q", projectInput:"#aq-pid" });
 ta.focus();
 </script>
