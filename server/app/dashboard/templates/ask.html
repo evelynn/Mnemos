@@ -22,6 +22,8 @@
   border-radius:var(--radius-lg); padding:1rem 1.1rem; box-shadow:var(--shadow-card); }
 .ask-sig { font-family:var(--font-mono); font-size:.8rem; background:var(--surface-alt);
   border:1px solid var(--border-soft); border-radius:var(--radius-md); padding:.6rem .75rem; margin-top:.6rem; overflow:auto; }
+.llm-prose { white-space:pre-wrap; line-height:1.7; }
+.llm-prose pre.ask-sig { white-space:pre; }
 
 /* docked composer */
 .chat-dock { position:sticky; bottom:0; padding:.5rem 0 1rem; background:linear-gradient(0deg,var(--bg) 72%,transparent); }
@@ -106,6 +108,7 @@ function mdLite(s){ let h=E(s||""); h=h.replace(/`([^`]+)`/g,"<code>$1</code>");
 function parseSymbolId(id){ const s=String(id||""); const at=s.split("@"); const line=at[1]?at[1].split(":")[0]:""; const segs=at[0].split(":"); const file=segs.length>=3?segs.slice(1,-1).join(":"):(segs[1]||""); return {file:file,line:line}; }
 
 let busy=false;
+let history=[];  // LLM conversation context (sent to /chat so it stays multi-turn)
 // Project now comes from the topbar global picker (#global-project). Read it
 // via MnemosUI.currentProject() and mirror into the hidden #aq-pid for voice.
 function pid(){
@@ -179,6 +182,23 @@ function renderFlowHTML(d){
   return html;
 }
 
+// LLM reply (from /chat) → grounded prose. Escape first, then a safe markdown
+// subset (code blocks, inline code, bold, bullets); newlines kept via CSS.
+function mdRender(s){
+  let h=E(s||"");
+  h=h.replace(/```([\s\S]*?)```/g, (m,c)=>`</div><pre class="ask-sig">${c.replace(/^\n/,"")}</pre><div class="llm-prose">`);
+  h=h.replace(/`([^`]+)`/g, "<code>$1</code>");
+  h=h.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  h=h.replace(/^\s*[-*]\s+(.*)$/gm, "• $1");
+  return h;
+}
+function renderChatReply(d){
+  const prov=d.provider?`<span class="badge info">${E(d.provider)}</span>`:"";
+  return `<div class="ask-badges"><span class="badge ok" data-i18n="Answer">Answer</span>${prov}`
+    + `<span class="badge" data-i18n="LLM · graph-grounded">LLM · graph-grounded</span></div>`
+    + `<div class="ask-card"><div class="llm-prose">${mdRender(d.reply||"")}</div></div>`;
+}
+
 async function send(){
   if(busy) return; const p=pid(); const q=document.getElementById("aq-q").value.trim();
   if(!p){ MnemosUI.showToast(MnemosUI.t("Pick a project first."),"warn"); return; }
@@ -195,9 +215,18 @@ async function send(){
       if(!r.ok){ slot.innerHTML=`<p class="muted">⚠ ${E(MnemosUI.t("Process trace failed"))}</p>`; await MnemosUI.showError("Process trace failed",r); return; }
       slot.innerHTML=renderFlowHTML(await r.json());
     } else {
-      const r=await fetch(`/api/v1/projects/${p}/ask`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({question:q,deepen:deepen,source_root:root||null})});
-      if(!r.ok){ slot.innerHTML=`<p class="muted">⚠ ${E(MnemosUI.t("Ask failed"))}</p>`; await MnemosUI.showError("Ask failed",r); return; }
-      slot.innerHTML=renderAnswerHTML(await r.json());
+      // LLM-backed answer: /chat grounds on the graph (symbol hits + overview)
+      // then an LLM (claudecode/…) composes the answer, so natural-language
+      // questions are understood properly. Slower than the old graph lookup.
+      const r=await fetch(`/api/v1/projects/${p}/chat`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({message:q,history:history.slice(-12),source_root:root||null})});
+      if(!r.ok){
+        if(r.status===503){ slot.innerHTML=`<p class="muted">⚠ <span data-i18n="The AI is starting up — ask again in a moment.">The AI is starting up — ask again in a moment.</span></p>`; MnemosUI.applyI18n(slot); }
+        else { slot.innerHTML=`<p class="muted">⚠ ${E(MnemosUI.t("Ask failed"))}</p>`; await MnemosUI.showError("Ask failed",r); }
+        return;
+      }
+      const d=await r.json();
+      slot.innerHTML=renderChatReply(d);
+      history.push({role:"user",content:q}); history.push({role:"assistant",content:(d.reply||"").slice(0,7000)});
     }
     MnemosUI.applyI18n(slot); scrollDown();
   } finally { busy=false; }
