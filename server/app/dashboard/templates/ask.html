@@ -24,6 +24,17 @@
   border:1px solid var(--border-soft); border-radius:var(--radius-md); padding:.6rem .75rem; margin-top:.6rem; overflow:auto; }
 .llm-prose { white-space:pre-wrap; line-height:1.7; }
 .llm-prose pre.ask-sig { white-space:pre; }
+.llm-prose:empty { display:none; }
+/* LLM answers often return markdown tables/headings — render them as real
+   tables (not raw pipes) so tabular results are actually visualized. */
+.md-table { border-collapse:collapse; width:100%; margin:.8rem 0; font-size:.85rem; display:block; overflow-x:auto; }
+.md-table th, .md-table td { border:1px solid var(--border); padding:.45rem .7rem; text-align:left; vertical-align:top; white-space:normal; }
+.md-table thead th { background:var(--surface-alt); font-weight:650; color:var(--text); }
+.md-table tbody tr:nth-child(even) { background:var(--surface-alt); }
+.md-table code { font-family:var(--font-mono); font-size:.82em; }
+.md-h { margin:1.1rem 0 .5rem; line-height:1.3; font-weight:650; color:var(--text); }
+.md-h:first-child { margin-top:.1rem; }
+h4.md-h, h5.md-h { font-size:.92rem; }
 
 /* docked composer */
 .chat-dock { position:sticky; bottom:0; padding:.5rem 0 1rem; background:linear-gradient(0deg,var(--bg) 72%,transparent); }
@@ -183,14 +194,46 @@ function renderFlowHTML(d){
 }
 
 // LLM reply (from /chat) → grounded prose. Escape first, then a safe markdown
-// subset (code blocks, inline code, bold, bullets); newlines kept via CSS.
+// subset rendered line-by-line: code blocks, GFM tables, headings, bold,
+// inline code, bullets. Tables/headings/code break OUT of the .llm-prose
+// pre-wrap wrapper into real elements so tabular results are visualized
+// (not shown as raw "| … |" pipes). Prose newlines are kept via CSS.
 function mdRender(s){
-  let h=E(s||"");
-  h=h.replace(/```([\s\S]*?)```/g, (m,c)=>`</div><pre class="ask-sig">${c.replace(/^\n/,"")}</pre><div class="llm-prose">`);
-  h=h.replace(/`([^`]+)`/g, "<code>$1</code>");
-  h=h.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  h=h.replace(/^\s*[-*]\s+(.*)$/gm, "• $1");
-  return h;
+  const L=E(s||"").split("\n");
+  const cells=line=>{ let x=line.trim(); if(x.charAt(0)==="|")x=x.slice(1); if(x.charAt(x.length-1)==="|")x=x.slice(0,-1); return x.split("|").map(c=>c.trim()); };
+  const isSep=line=>{ if(line==null||line.indexOf("|")<0) return false; const c=cells(line); return c.length>0 && c.every(x=>/^:?-+:?$/.test(x)); };
+  const isRow=line=> line!=null && line.indexOf("|")>=0 && line.trim()!=="" && !isSep(line);
+  const inl=t=> t.replace(/`([^`]+)`/g,"<code>$1</code>").replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>");
+  let out="";
+  for(let i=0;i<L.length;i++){
+    const ln=L[i];
+    if(/^\s*```/.test(ln)){                              // fenced code block
+      let buf=""; i++;
+      for(; i<L.length && !/^\s*```/.test(L[i]); i++) buf+=L[i]+"\n";
+      out+=`</div><pre class="ask-sig">${buf.replace(/\n$/,"")}</pre><div class="llm-prose">`;
+      continue;
+    }
+    const hm=ln.match(/^\s*(#{1,5})\s+(.*?)\s*#*\s*$/);   // heading
+    if(hm){ const lv=Math.min(hm[1].length+1,5); out+=`</div><h${lv} class="md-h">${inl(hm[2])}</h${lv}><div class="llm-prose">`; continue; }
+    if(isRow(ln)){                                        // GFM table (header + separator row)
+      let j=i+1; while(j<L.length && L[j].trim()==="") j++;
+      if(j<L.length && isSep(L[j])){
+        const head=cells(ln), rows=[]; let k=j+1;
+        while(k<L.length){
+          if(L[k].trim()===""){ let m=k+1; while(m<L.length && L[m].trim()==="") m++; if(m<L.length && isRow(L[m])){ k=m; continue; } break; }
+          if(!isRow(L[k])) break;
+          rows.push(cells(L[k])); k++;
+        }
+        let t=`</div><table class="md-table"><thead><tr>${head.map(c=>`<th>${inl(c)}</th>`).join("")}</tr></thead><tbody>`;
+        t+=rows.map(r=>`<tr>${head.map((_,ci)=>`<td>${inl(r[ci]!=null?r[ci]:"")}</td>`).join("")}</tr>`).join("");
+        out+=t+`</tbody></table><div class="llm-prose">`; i=k-1; continue;
+      }
+    }
+    const bm=ln.match(/^\s*[-*]\s+(.*)$/);                // bullet
+    if(bm){ out+="• "+inl(bm[1])+"\n"; continue; }
+    out+=inl(ln)+"\n";                                    // prose (newline kept by pre-wrap)
+  }
+  return out;
 }
 function renderChatReply(d){
   const prov=d.provider?`<span class="badge info">${E(d.provider)}</span>`:"";
