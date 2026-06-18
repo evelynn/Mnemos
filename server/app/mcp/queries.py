@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.findings import Finding, Summary
 from app.models.graph import Edge, Node
 
-_TOKEN = re.compile(r"[A-Za-z0-9]+")
+_TOKEN = re.compile(r"[A-Za-z0-9_]+")
 
 # Grammatical function words + interrogatives that carry no search
 # intent. Dropping them is what lets a natural-language question
@@ -74,11 +74,24 @@ def _tokenize(query: str | None) -> list[str]:
     the old substring match needed the literal phrase. Tokenising lets
     each term match independently; dropping stopwords keeps a
     natural-language question from ranking on filler words.
+
+    snake_case identifiers (``should_compress``) keep their *whole* form
+    so an exact symbol query matches that symbol — AND split into parts
+    so cross-convention concept matching (``order_create`` ↔
+    ``orderCreate``) still works (PR-186: the whole-form was needed so
+    ``should_compress`` beats the bare ``compress`` methods).
     """
-    return [
-        t for t in (m.lower() for m in _TOKEN.findall(query or ""))
-        if t not in _STOPWORDS
-    ]
+    out: list[str] = []
+    for m in _TOKEN.findall(query or ""):
+        low = m.lower()
+        if "_" in low and low.strip("_"):
+            if low not in _STOPWORDS:
+                out.append(low)
+            out.extend(p for p in low.split("_") if p and p not in _STOPWORDS)
+        elif low not in _STOPWORDS:
+            out.append(low)
+    seen: set[str] = set()
+    return [t for t in out if not (t in seen or seen.add(t))]
 
 
 def _score_symbol(
@@ -106,11 +119,16 @@ def _score_symbol(
     matched = 0
     for t in terms:
         if name_l == t:                                  # whole name
-            score += 5.0
+            # Exact symbol-name hits must dominate: a named symbol in the
+            # question (``executeToolCallsParallel``, ``should_compress``)
+            # has to beat several coincidental 4-char-stem collisions
+            # (``exec`` ↔ ``shouldSuppressExec…``). PR-186 — the LLM-Ask
+            # grounding was burying exact matches under stem floods.
+            score += 12.0
         elif t in name_tokens:                           # exact word in name
-            score += 4.0
+            score += 8.0
         elif _prefix_match(t, name_tokens):              # stem of a name word
-            score += 2.5
+            score += 2.0
         elif t in aux_tokens or _prefix_match(t, aux_tokens):  # file path / id word
             score += 1.5
         elif t in name_l:    # mid-word substring — weak; alone it stays

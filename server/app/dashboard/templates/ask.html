@@ -92,7 +92,7 @@
         <button type="button" id="aq-deepen" class="cbtn on" title="Analyse on demand">
           <span data-i18n="On-demand">On-demand</span></button>
         <input type="text" id="aq-root" class="chat-root" placeholder="source root (옵션)" />
-        <button type="button" id="aq-mic" class="cbtn" hidden aria-label="Voice input" aria-pressed="false"
+        <button type="button" id="aq-mic" class="cbtn mic-btn" hidden aria-label="Voice input" aria-pressed="false"
                 data-required-role="operator" title="Speak your question">🎤</button>
         <button type="button" id="aq-send" class="csend" data-required-role="operator">
           <span data-i18n="Send">Send</span> <kbd>↵</kbd></button>
@@ -194,9 +194,12 @@ function mdRender(s){
 }
 function renderChatReply(d){
   const prov=d.provider?`<span class="badge info">${E(d.provider)}</span>`:"";
+  const speak=(d.reply||"").replace(/[`*#|>]/g," ").replace(/\s+/g," ").trim().slice(0,4000);
   return `<div class="ask-badges"><span class="badge ok" data-i18n="Answer">Answer</span>${prov}`
     + `<span class="badge" data-i18n="LLM · graph-grounded">LLM · graph-grounded</span></div>`
-    + `<div class="ask-card"><div class="llm-prose">${mdRender(d.reply||"")}</div></div>`;
+    + `<div class="ask-card"><div class="llm-prose">${mdRender(d.reply||"")}</div>`
+    + `<button type="button" id="aq-listen" class="listen-btn" data-speak="${E(speak)}" hidden`
+    + ` aria-label="${E(MnemosUI.t("Read the answer aloud"))}" title="${E(MnemosUI.t("Read the answer aloud"))}">🔊 <span data-i18n="Listen">Listen</span></button></div>`;
 }
 
 async function send(){
@@ -226,6 +229,9 @@ async function send(){
       }
       const d=await r.json();
       slot.innerHTML=renderChatReply(d);
+      // Read-aloud (TTS) when a server STT/TTS engine is present (PR-156).
+      const _lb=slot.querySelector("#aq-listen");
+      if(_lb){ MnemosUI.voiceStatus().then(function(s){ if(s&&s.tts&&s.tts.available){ _lb.hidden=false; _lb.addEventListener("click",function(){ MnemosUI.speak(_lb.dataset.speak); }); } }); }
       history.push({role:"user",content:q}); history.push({role:"assistant",content:(d.reply||"").slice(0,7000)});
     }
     MnemosUI.applyI18n(slot); scrollDown();

@@ -26,7 +26,11 @@ from app.mcp.queries import _score_symbol, _tokenize
 
 def test_tokenize_splits_and_lowercases():
     assert _tokenize("Payment Retry!") == ["payment", "retry"]
-    assert _tokenize("find-callers_v2") == ["find", "callers", "v2"]
+    # snake_case keeps the whole identifier AND its parts (PR-186), so an
+    # exact symbol query (``should_compress``) matches that symbol while the
+    # parts still drive cross-convention concept matching.
+    assert _tokenize("find-callers_v2") == ["find", "callers_v2", "callers", "v2"]
+    assert _tokenize("order_create") == ["order_create", "order", "create"]
     assert _tokenize("") == []
     assert _tokenize(None) == []
 
