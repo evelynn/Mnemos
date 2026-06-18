@@ -322,24 +322,31 @@ async def _claude_subscription(
         permission_mode="default",
         cwd=os.environ.get("MNEMOS_AGENT_SDK_CWD", "/tmp"),
     )
-    out: list[str] = []
-
-    async def _drain() -> None:
+    async def _drain(sink: list[str]) -> None:
         async for msg in query(prompt=prompt, options=opts):
             if isinstance(msg, AssistantMessage):
                 for block in msg.content:
                     if isinstance(block, TextBlock):
-                        out.append(block.text)
+                        sink.append(block.text)
 
-    try:
-        await asyncio.wait_for(_drain(), timeout=timeout_s)
-    except TimeoutError:
-        log.warning("chat: subscription LLM timed out after %ds", timeout_s)
-        return None
-    except Exception as exc:  # noqa: BLE001
-        log.warning("chat: %s: %s", exc.__class__.__name__, exc)
-        return None
-    return "\n".join(out).strip() or None
+    # The Agent SDK's control handshake ("initialize") is flaky on a cold CLI
+    # subprocess and raises *before* any tokens stream (observed on a large
+    # repo: "Control request timeout: initialize" → 503, while the very next
+    # call to the same prompt answers in ~90s). One retry warms it up. A real
+    # content timeout (TimeoutError) is not retried — it would just wait again.
+    for attempt in range(2):
+        out: list[str] = []
+        try:
+            await asyncio.wait_for(_drain(out), timeout=timeout_s)
+        except TimeoutError:
+            log.warning("chat: subscription LLM timed out after %ds", timeout_s)
+            return None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("chat: %s: %s (init attempt %d/2)",
+                        exc.__class__.__name__, exc, attempt + 1)
+            continue
+        return "\n".join(out).strip() or None
+    return None
 
 
 async def provider_chat(
