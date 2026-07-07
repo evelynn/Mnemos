@@ -110,6 +110,16 @@ services:
     image: mnemos/ggoss-py:latest
     entrypoint: ["true"]
 
+  # PR-191 — C/C++ analyzer. Pure stdlib (regex + brace scanner),
+  # zero third-party deps — same minimal shape as ggoss-py.
+  analyzer-cpp:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-cpp
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-cpp:latest
+    entrypoint: ["true"]
+
   analyzer-sql-mssql:
     profiles: ["analyzers"]
     build:

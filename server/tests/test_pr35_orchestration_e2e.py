@@ -463,12 +463,13 @@ async def test_d2_concurrent_records_merge_into_one_graph(tmp_path):
 def test_d2_registry_has_one_binary_per_phase1_language():
     """Regression guard. If ``_BINARIES`` ever drops a language the
     multi-language scenario silently degrades. PR-115 added Python
-    (ggoss-py — pure-stdlib Python AST analyzer) so the set is
-    six: 5 source-tree languages + the dotnet binary decompiler."""
+    (ggoss-py — pure-stdlib Python AST analyzer); PR-191 added cpp
+    (ggoss-cpp) and javascript (served by ggoss-ts, which already walks
+    .js). 7 source-tree languages + the dotnet binary decompiler."""
     from app.analyzers.registry import _BINARIES
 
     expected = {
-        "csharp", "typescript", "python",
+        "csharp", "typescript", "javascript", "python", "cpp",
         "mssql", "oracle",
         "dotnet_binary",
     }

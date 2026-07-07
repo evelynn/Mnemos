@@ -35,7 +35,7 @@ def test_search_symbols_accepts_component_id():
 def test_search_symbols_tool_schema_advertises_component_id():
     body = _read(_APP / "mcp" / "server.py")
     idx = body.find('name="search_symbols"')
-    slab = body[idx:idx + 900]
+    slab = body[idx:idx + 2000]
     assert '"component_id"' in slab
 
 

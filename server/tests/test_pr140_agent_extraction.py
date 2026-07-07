@@ -22,14 +22,15 @@ os.environ.setdefault("SESSION_COOKIE_SECURE", "false")
 os.environ.setdefault("MNEMOS_SKIP_STARTUP_VERIFY", "1")
 
 
-def test_cpp_has_no_deterministic_analyzer_but_is_agent_eligible():
-    """The wiring decision: C++ has no ggoss binary, so run_ingest must
-    route it to the agent-extraction stage."""
+def test_uncovered_language_routes_to_agent_extraction():
+    """The wiring decision: a language with no ggoss binary must be routed
+    by run_ingest to the agent-extraction stage. Was C++ until PR-191 gave
+    it a deterministic analyzer; ruby remains uncovered."""
     from app.analyzers.registry import binary_for
     from app.extractor.agent_extract import AGENT_LANGUAGE_EXTENSIONS
 
-    assert binary_for("cpp") is None, "cpp must have no deterministic analyzer"
-    assert "cpp" in AGENT_LANGUAGE_EXTENSIONS, "cpp must be agent-extraction eligible"
+    assert binary_for("ruby") is None, "ruby must have no deterministic analyzer"
+    assert "ruby" in AGENT_LANGUAGE_EXTENSIONS, "ruby must be agent-extraction eligible"
     # A covered language must NOT be double-handled by the agent stage's
     # wiring (it still may appear in the map, but run_ingest only calls the
     # agent stage when binary_for(lang) is None).

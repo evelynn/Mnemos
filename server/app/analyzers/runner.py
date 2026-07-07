@@ -39,6 +39,10 @@ _INREPO_ANALYZERS: dict[str, tuple[str, Path]] = {
                  _REPO_ROOT / "analyzers" / "ggoss-py" / "src" / "ggoss_py.py"),
     "ggoss-ts": ("node",
                  _REPO_ROOT / "analyzers" / "ggoss-ts" / "src" / "index.mjs"),
+    # PR-191 — C/C++ (stdlib-only regex/brace scanner); closes the eval
+    # doc's P0 "dominant language skipped as no_analyzer" gap.
+    "ggoss-cpp": (sys.executable,
+                  _REPO_ROOT / "analyzers" / "ggoss-cpp" / "src" / "ggoss_cpp.py"),
 }
 
 

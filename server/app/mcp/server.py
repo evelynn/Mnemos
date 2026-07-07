@@ -10,12 +10,24 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import uuid
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+# Docker-free local mode runs MCP against SQLite too. Install the same
+# PostgreSQL-type shims serve_local installs before app.db/models are imported,
+# otherwise UUID/JSONB/ARRAY comparisons can silently miss rows.
+if os.environ.get("MNEMOS_LOCAL_MODE") == "1" or os.environ.get(
+    "DATABASE_URL", ""
+).startswith("sqlite"):
+    from app.testing.sqlite_polyglot import install_polyglot
+
+    install_polyglot()
+
+from app.artifacts import build_project_index, build_task_context_pack
 from app.audit.logger import record as audit_record
 from app.db import SessionLocal
 from app.mcp.data_queries import (
@@ -46,12 +58,70 @@ from app.mcp.queries import (
 
 _TOOLS = [
     Tool(
+        name="get_project_index",
+        description=(
+            "Return the compact AI index for this project: graph counts, "
+            "certainty breakdown, latest run, top contracts, hot symbols, "
+            "data entities, risk queue, and recommended MCP workflows.\n\n"
+            "Use when: starting work in a large repository or after switching "
+            "projects. Do not ask for the whole graph or read the whole repo; "
+            "use IDs from this index to request get_task_context_pack or "
+            "targeted graph queries."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "top_k": {"type": "integer", "default": 25},
+            },
+        },
+    ),
+    Tool(
+        name="get_task_context_pack",
+        description=(
+            "Return a bounded, machine-readable context pack for one task "
+            "target (Symbol, Contract, DataEntity, Edge, or Finding). The "
+            "pack contains target facts, caller/callee/data-access slices, "
+            "related findings, summaries, evidence refs, and next MCP "
+            "queries. Raw source is intentionally excluded.\n\n"
+            "Use when: preparing to edit, debug, or review one concrete "
+            "target. This is the standard handoff from Mnemos analysis to "
+            "Claude Code/Codex implementation work."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "string"},
+                "target_kind": {
+                    "type": "string",
+                    "default": "auto",
+                    "enum": [
+                        "auto",
+                        "node",
+                        "symbol",
+                        "contract",
+                        "data_entity",
+                        "edge",
+                        "finding",
+                    ],
+                },
+                "intent": {"type": "string", "nullable": True},
+                "budget_items": {"type": "integer", "default": 50},
+            },
+            "required": ["target_id"],
+        },
+    ),
+    Tool(
         name="search_symbols",
         description=(
             "Search symbols by ranked multi-term lexical match over id, "
             "name and signature (PR-80 BM25-ish; PR-90 fuses vector "
             "when MNEMOS_EMBEDDING_PROVIDER is configured). Optional "
-            "kind / component_id filters per spec §11.3.\n\n"
+            "kind / component_id filters per spec §11.3. scope narrows by "
+            "source role (product = product+support code, tests = test "
+            "helpers, all = everything); path_prefix keeps only symbols "
+            "under that project-relative path. Results carry location "
+            "(file, relative_file, line) and source_role so you can read "
+            "the file narrowly without a second lookup.\n\n"
             "Use when: starting from a fuzzy name (\"the order-processing "
             "function\") and you need a symbol_id to feed into the other "
             "tools. Don't call this if you already have a fully-qualified "
@@ -64,6 +134,12 @@ _TOOLS = [
                 "kind": {"type": "string", "nullable": True},
                 "component_id": {"type": "string", "nullable": True},
                 "top_k": {"type": "integer", "default": 20},
+                "scope": {
+                    "type": "string",
+                    "enum": ["all", "product", "tests"],
+                    "default": "all",
+                },
+                "path_prefix": {"type": "string", "nullable": True},
             },
             "required": ["query"],
         },
@@ -483,7 +559,22 @@ def build_server(project_id: uuid.UUID) -> Server:
     @server.call_tool()
     async def _call_tool(name: str, arguments: dict) -> list[TextContent]:
         async with SessionLocal() as db:
-            if name == "search_symbols":
+            if name == "get_project_index":
+                result = await build_project_index(
+                    db,
+                    project_id=project_id,
+                    top_k=int(arguments.get("top_k", 25)),
+                )
+            elif name == "get_task_context_pack":
+                result = await build_task_context_pack(
+                    db,
+                    project_id=project_id,
+                    target_id=arguments["target_id"],
+                    target_kind=arguments.get("target_kind", "auto"),
+                    intent=arguments.get("intent"),
+                    budget_items=int(arguments.get("budget_items", 50)),
+                )
+            elif name == "search_symbols":
                 result = await search_symbols(
                     db,
                     project_id=project_id,
@@ -491,6 +582,8 @@ def build_server(project_id: uuid.UUID) -> Server:
                     kind=arguments.get("kind"),
                     component_id=arguments.get("component_id"),
                     top_k=int(arguments.get("top_k", 20)),
+                    scope=arguments.get("scope", "all"),
+                    path_prefix=arguments.get("path_prefix"),
                 )
             elif name == "get_symbol":
                 result = await get_symbol(

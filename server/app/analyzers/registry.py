@@ -9,7 +9,15 @@ from app.analyzers.runner import AnalyzerRunner, inrepo_script
 _BINARIES = {
     "csharp": "ggoss-csharp",
     "typescript": "ggoss-ts",
+    # ggoss-ts walks .js/.jsx/.mjs/.cjs alongside .ts — a JS-only project
+    # gets deterministic extraction instead of the agent fallback. When a
+    # project lists BOTH typescript and javascript the orchestrator skips
+    # the duplicate stage (same binary, same tree) with a recorded reason.
+    "javascript": "ggoss-ts",
     "python": "ggoss-py",
+    # PR-191 — deterministic C/C++ extraction (functions/structs/enums/
+    # macros + CALLS); vendored/ trees excluded by the analyzer itself.
+    "cpp": "ggoss-cpp",
     "mssql": "ggoss-sql-mssql",
     "oracle": "ggoss-sql-oracle",
     "dotnet_binary": "ggoss-binary-dotnet",

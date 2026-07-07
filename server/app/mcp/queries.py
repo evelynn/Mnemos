@@ -41,6 +41,135 @@ _STOPWORDS = frozenset({
 # snake_case, kebab, and path separators. ``api-auth.ts`` → [api, auth,
 # ts]; ``getUserById`` → [get, user, by, id].
 _CAMEL = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
+_MAX_OUTPUT_STRING_CHARS = 512
+_MAX_SIGNATURE_CHARS = 240
+_RAW_DATA_KEYS = {
+    "body",
+    "blob",
+    "bytes",
+    "code",
+    "content",
+    "content_base64",
+    "file_text",
+    "full_text",
+    "payload",
+    "raw",
+    "snippet",
+    "source_text",
+}
+_LOW_SIGNAL_PATH_SEGMENTS = {
+    "tests",
+    "test",
+    "__tests__",
+    "vendored",
+    "vendor",
+    "third_party",
+    "thirdparty",
+    "node_modules",
+    "build",
+    "dist",
+    "coverage",
+}
+_SUPPORT_PATH_SEGMENTS = {"tools", "scripts", "fixtures", "examples", "docs"}
+_VENDORED_PATH_SEGMENTS = {
+    "vendored", "vendor", "third_party", "thirdparty", "node_modules",
+}
+_TEST_PATH_SEGMENTS = {"tests", "test", "__tests__"}
+_GENERATED_PATH_SEGMENTS = {"build", "dist", "coverage"}
+
+_ABS_PATH_RE = re.compile(r"^(?:[A-Za-z]:[/\\]|[/\\])")
+
+
+def _norm_path(path: str) -> str:
+    p = path.replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
+
+def source_role(path: str | None) -> str:
+    """Classify a source path so agents can tell product code from tests,
+    vendored trees, generated output, and tooling (eval doc Task 4 —
+    ``source_role`` in search results)."""
+    if not path:
+        return "product"
+    segments = {part for part in _norm_path(path).lower().split("/") if part}
+    if segments & _VENDORED_PATH_SEGMENTS:
+        return "vendored"
+    if segments & _TEST_PATH_SEGMENTS:
+        return "test"
+    if segments & _GENERATED_PATH_SEGMENTS:
+        return "generated"
+    if segments & _SUPPORT_PATH_SEGMENTS:
+        return "support"
+    return "product"
+
+
+# project_id → common absolute-path prefix of its symbol locations (or None).
+# The analyzers disagree on path style (ggoss-ts absolute POSIX, ggoss-py
+# absolute Windows, ggoss-cpp project-relative); stripping the per-project
+# common prefix gives agents one stable project-relative path to feed into
+# narrow read_file calls (eval doc Task 3). Roots don't move for a live
+# project, so a simple capped cache is enough.
+_ROOT_PREFIX_CACHE: dict[str, str | None] = {}
+_ROOT_PREFIX_CACHE_MAX = 256
+
+
+async def project_root_prefix(
+    session: AsyncSession, project_id: uuid.UUID
+) -> str | None:
+    """Best-effort repository root: the component-wise common prefix of the
+    project's *absolute* symbol file paths. None when the project has no
+    absolute paths (everything already relative) or only one directory of
+    evidence (a prefix inferred from one dir would over-strip)."""
+    key = str(project_id)
+    if key in _ROOT_PREFIX_CACHE:
+        return _ROOT_PREFIX_CACHE[key]
+    rows = (
+        await session.execute(
+            select(Node.data["location"]["file"].astext)
+            .where(
+                Node.project_id == project_id,
+                Node.kind == "Symbol",
+                Node.valid_to.is_(None),
+            )
+            .limit(2000)
+        )
+    ).all()
+    abs_paths = sorted({
+        _norm_path(row[0]) for row in rows
+        if row[0] and _ABS_PATH_RE.match(row[0])
+    })
+    prefix: str | None = None
+    if abs_paths:
+        first = abs_paths[0].split("/")
+        last = abs_paths[-1].split("/")
+        common: list[str] = []
+        for a, b in zip(first, last):
+            if a.lower() != b.lower():
+                break
+            common.append(a)
+        # Never let the prefix swallow a whole path (single-file corner
+        # case) — the file name itself must survive stripping.
+        while common and len("/".join(common)) >= len(abs_paths[0]):
+            common.pop()
+        prefix = "/".join(common) if common else None
+    if len(_ROOT_PREFIX_CACHE) >= _ROOT_PREFIX_CACHE_MAX:
+        _ROOT_PREFIX_CACHE.clear()
+    _ROOT_PREFIX_CACHE[key] = prefix
+    return prefix
+
+
+def relative_source_path(path: str | None, root_prefix: str | None) -> str | None:
+    """Project-relative POSIX path, or None when it cannot be derived."""
+    if not path or not isinstance(path, str):
+        return None
+    p = _norm_path(path)
+    if not _ABS_PATH_RE.match(p):
+        return p
+    if root_prefix and p.lower().startswith(root_prefix.lower() + "/"):
+        return p[len(root_prefix) + 1:]
+    return None
 
 
 def _name_tokens(s: str | None) -> set[str]:
@@ -49,6 +178,49 @@ def _name_tokens(s: str | None) -> set[str]:
         for tok in _CAMEL.findall(chunk):
             out.add(tok.lower())
     return out
+
+
+def _signature_excerpt(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    first_line = value.strip().splitlines()[0].strip()
+    if len(first_line) <= _MAX_SIGNATURE_CHARS:
+        return first_line
+    return f"{first_line[:_MAX_SIGNATURE_CHARS]}... [truncated chars={len(value)}]"
+
+
+def _safe_node_data(data: dict[str, Any] | None) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in (data or {}).items():
+        key_s = str(key)
+        low = key_s.lower()
+        if key_s == "signature":
+            out[key_s] = _signature_excerpt(value)
+        elif (
+            low in _RAW_DATA_KEYS
+            or low.endswith("_raw")
+            or low.endswith("_content")
+            or low.endswith("_blob")
+        ):
+            out[key_s] = {"omitted": "raw_payload"}
+        elif isinstance(value, str) and len(value) > _MAX_OUTPUT_STRING_CHARS:
+            out[key_s] = {"omitted": "large_string", "chars": len(value)}
+        else:
+            out[key_s] = value
+    return out
+
+
+def _path_score_multiplier(path: str | None) -> float:
+    if not path:
+        return 1.0
+    segments = {
+        part for part in path.replace("\\", "/").lower().split("/") if part
+    }
+    if segments & _LOW_SIGNAL_PATH_SEGMENTS:
+        return 0.55
+    if segments & _SUPPORT_PATH_SEGMENTS:
+        return 0.75
+    return 1.0
 
 
 def _prefix_match(term: str, tokens: set[str]) -> bool:
@@ -141,7 +313,7 @@ def _score_symbol(
     # Every term matched somewhere — a strong signal.
     if matched == len(terms):
         score += 1.0
-    return score
+    return score * _path_score_multiplier(path)
 
 
 async def search_symbols(
@@ -152,7 +324,13 @@ async def search_symbols(
     kind: str | None = None,
     component_id: str | None = None,
     top_k: int = 20,
+    scope: str = "all",
+    path_prefix: str | None = None,
 ) -> list[dict[str, Any]]:
+    """``scope`` narrows results by source role — ``product`` (product +
+    support code), ``tests`` (test helpers only) or ``all``. ``path_prefix``
+    keeps only symbols whose project-relative path starts with the given
+    prefix. Both default to no filtering (eval doc Task 4)."""
     top_k = max(1, min(top_k, 200))
     terms = _tokenize(query)
     stmt = (
@@ -265,18 +443,42 @@ async def search_symbols(
                         reason="vector_query_failed"
                     ).inc()
 
-    return [
-        {
+    root_prefix = await project_root_prefix(session, project_id)
+    norm_path_prefix = _norm_path(path_prefix).lower().rstrip("/") if path_prefix else None
+    out: list[dict[str, Any]] = []
+    for s, r in scored:
+        if len(out) >= top_k:
+            break
+        d = r.data or {}
+        loc = d.get("location") or {}
+        file_path = loc.get("file")
+        role = source_role(file_path)
+        if scope == "product" and role not in ("product", "support"):
+            continue
+        if scope == "tests" and role != "test":
+            continue
+        rel = relative_source_path(file_path, root_prefix)
+        if norm_path_prefix is not None:
+            probe = (rel or _norm_path(file_path or "")).lower()
+            if not (probe == norm_path_prefix
+                    or probe.startswith(norm_path_prefix + "/")):
+                continue
+        out.append({
             "symbol_id": r.id,
-            "name": (r.data or {}).get("name"),
-            "component_id": (r.data or {}).get("component_id"),
+            "name": d.get("name"),
+            "component_id": d.get("component_id"),
             "kind": r.kind,
             "certainty": r.certainty,
             "score": round(s, 2),
-            "excerpt": (r.data or {}).get("signature"),
-        }
-        for s, r in scored[:top_k]
-    ]
+            "excerpt": _signature_excerpt(d.get("signature")),
+            "location": {
+                "file": file_path,
+                "relative_file": rel,
+                "line": loc.get("line"),
+            },
+            "source_role": role,
+        })
+    return out
 
 
 async def get_symbol(
@@ -339,7 +541,7 @@ async def get_symbol(
         "symbol": {
             "id": node.id,
             "kind": node.kind,
-            "data": node.data,
+            "data": _safe_node_data(node.data),
             "certainty": node.certainty,
         },
         "l1_summary": l1.summary if l1 is not None else None,

@@ -22,9 +22,10 @@ these are **implemented and verified in code**, not aspirations:
    in the graph is **dropped** (`extractor/validator.py`); dangling LLM edges are filtered at
    ingest. Analyzer facts are `certainty="verified"`; LLM-derived structure is `"inferred"` —
    **never conflated** (`extractor/agent_extract.py`).
-3. **Determinism.** Language analyzers (`analyzers/ggoss-{ts,py,csharp,sql-mssql,sql-oracle,
-   binary-dotnet}`) are AST/parser-based and deterministic (ggoss-py = stdlib `ast`). The graph
-   is the source of truth; the LLM only narrates or fills gaps for uncovered languages.
+3. **Determinism.** Language analyzers (`analyzers/ggoss-{ts,py,cpp,csharp,sql-mssql,
+   sql-oracle,binary-dotnet}`) are AST/parser-based and deterministic (ggoss-py = stdlib `ast`;
+   ggoss-cpp = stdlib regex + brace scanner). The graph is the source of truth; the LLM only
+   narrates or fills gaps for uncovered languages.
 4. **No reuse across sessions.** Results persist in a **bitemporal, provenance-tracked knowledge
    graph** (`models/graph.py`: Node/Edge with `valid_from`/`valid_to`, `certainty`, `created_by`,
    `NodeSource`, `AnalysisRun` per git_sha) and are re-queryable by **MCP tools**
@@ -55,11 +56,13 @@ It then **presents results as clear tables/views** in the dashboard, and answers
 ## Known gaps (Phase-2 — do not claim as done)
 
 - ggoss-py cross-module call resolution is name-based only (no full import graph).
+- ggoss-cpp does not evaluate the preprocessor (both `#ifdef` branches are seen), does not
+  resolve function-pointer/member calls, and skips `vendored/` trees by default.
 - L3 module boundary is a path-segment heuristic; L4/L5 summaries are not built.
 - First-pass coverage is bounded by a symbol `limit`; the long tail of a 100k-symbol repo may be
   shallow on the first pass.
-- LLM-extracted languages (Go/Rust/C++/…) are `certainty="inferred"` only — lower trust than the
-  deterministic analyzers.
+- LLM-extracted languages (Go/Rust/Ruby/…) are `certainty="inferred"` only — lower trust than
+  the deterministic analyzers (C/C++ moved to the deterministic set in PR-191).
 
 ## Stack quick-map
 

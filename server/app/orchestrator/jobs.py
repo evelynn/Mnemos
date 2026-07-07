@@ -18,7 +18,7 @@ from typing import Any
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.analyzers.registry import analyzer_available, runner_for
+from app.analyzers.registry import analyzer_available, binary_for, runner_for
 from app.audit.logger import record as audit_record
 from app.config import get_settings
 from app.db import SessionLocal
@@ -665,10 +665,30 @@ async def run_ingest(
 
     try:
         if scope != "continuation":
-            # Stages L0: per-language, per-verb extraction.
+            # Stages L0: per-language, per-verb extraction. Two languages can
+            # map to the same analyzer binary (typescript+javascript → ggoss-ts
+            # walks both file sets); running it twice over the same tree only
+            # duplicates work, so the second language records a skipped stage
+            # with the covering language as the reason (coverage_report shows
+            # this instead of a misleading ``no_analyzer``).
+            seen_binaries: dict[str, str] = {}
             for language in project.languages:
+                binary = binary_for(language)
+                covered_by = seen_binaries.get(binary) if binary else None
+                if binary and covered_by is None:
+                    seen_binaries[binary] = language
                 for verb in ("symbols", "contracts", "calls", "data_access"):
                     position += 1
+                    if covered_by is not None:
+                        async with StageTracker(
+                            bus, run_id, project_id, f"{verb}:{language}",
+                            language=language, position=position,
+                        ) as stage:
+                            stage.set_stats({
+                                "skipped": True,
+                                "reason": f"covered_by:{covered_by}",
+                            })
+                        continue
                     await _run_analyzer_stage(
                         bus, project_id, run_id, language, verb, path, position, totals
                     )

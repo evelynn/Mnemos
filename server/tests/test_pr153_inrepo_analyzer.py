@@ -60,7 +60,8 @@ def test_analyzer_available_uses_inrepo_when_flagged(_flag_on):
     # python must not fire in the basic config.
     assert reg.analyzer_available("python") is True
     # languages with no in-repo entrypoint stay on the Claude fallback path
-    assert reg.analyzer_available("cpp") is False
+    # (cpp gained an in-repo analyzer in PR-191, so it no longer qualifies)
+    assert reg.analyzer_available("ruby") is False
     importlib.reload(reg)  # restore module state for other tests
 
 
