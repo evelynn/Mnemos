@@ -47,6 +47,12 @@ _INREPO_ANALYZERS: dict[str, tuple[str, Path]] = {
     # eval's empty-graph gap on Spring backends.
     "ggoss-java": (sys.executable,
                    _REPO_ROOT / "analyzers" / "ggoss-java" / "src" / "ggoss_java.py"),
+    # PR-193 — web templates (HTML routes → contracts); stdlib regex.
+    "ggoss-web": (sys.executable,
+                  _REPO_ROOT / "analyzers" / "ggoss-web" / "src" / "ggoss_web.py"),
+    # PR-194 — Kotlin (JVM web); stdlib regex + brace scanner.
+    "ggoss-kotlin": (sys.executable,
+                     _REPO_ROOT / "analyzers" / "ggoss-kotlin" / "src" / "ggoss_kotlin.py"),
 }
 
 

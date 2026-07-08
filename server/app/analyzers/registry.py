@@ -23,6 +23,16 @@ _BINARIES = {
     # client resolves to, so Java-server ↔ TS-client cross-service linking
     # works); closes the web+Java eval's empty-graph gap.
     "java": "ggoss-java",
+    # PR-193 — web templates. ggoss-web extracts HTML form/link routes as HTTP
+    # contracts (same normalized node a Java handler EXPOSES) so a template ↔
+    # Spring-handler cross-service link forms; makes HTML/CSS targetable at all
+    # (the web+Java eval's P2 gap). One binary walks html+css.
+    "html": "ggoss-web",
+    "css": "ggoss-web",
+    "scss": "ggoss-web",
+    # PR-194 — Kotlin (JVM web; modern Spring Boot). Separate analyzer, same
+    # Spring annotations → same http.<M>.<path> node (cross-service linking).
+    "kotlin": "ggoss-kotlin",
     "mssql": "ggoss-sql-mssql",
     "oracle": "ggoss-sql-oracle",
     "dotnet_binary": "ggoss-binary-dotnet",

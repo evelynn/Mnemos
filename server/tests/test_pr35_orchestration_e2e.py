@@ -465,11 +465,14 @@ def test_d2_registry_has_one_binary_per_phase1_language():
     multi-language scenario silently degrades. PR-115 added Python
     (ggoss-py — pure-stdlib Python AST analyzer); PR-191 added cpp
     (ggoss-cpp) and javascript (ggoss-ts walks .js); PR-192 added java
-    (ggoss-java). 8 source-tree languages + the dotnet binary decompiler."""
+    (ggoss-java); PR-193 added html/css/scss
+    (ggoss-web); PR-194 added kotlin (ggoss-kotlin). 12 source-tree languages
+    + the dotnet binary decompiler."""
     from app.analyzers.registry import _BINARIES
 
     expected = {
-        "csharp", "typescript", "javascript", "python", "cpp", "java",
+        "csharp", "typescript", "javascript", "python", "cpp", "java", "kotlin",
+        "html", "css", "scss",
         "mssql", "oracle",
         "dotnet_binary",
     }

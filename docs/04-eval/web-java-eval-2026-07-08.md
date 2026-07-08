@@ -113,6 +113,34 @@ JAX-RS(`@Path`+`@GET/…`) → HTTP 컨트랙트(클래스 prefix 조인) + CALL
   `{id}`) → 파라미터 경로는 링크 안 될 수 있음(정적 경로는 정확히 링크).
 - HTML/CSS는 여전히 지정 불가(P2).
 
+## 6.5 P2/P3/P4 구현 완료 (후속)
+
+P2·P3·P4는 파일이 겹치지 않아(P3=별도 ggoss-kotlin, P4=ggoss-java 내부) 순차
+구현했다.
+
+- **P2 — ggoss-web (PR-193).** HTML `<form>`/`<a>`의 라우트(action/th:action,
+  href/th:href, Thymeleaf `@{…}`)를 HTTP 컨트랙트로 추출 + template 심볼.
+  CSS/SCSS는 stylesheet 심볼만(저가치). html/css/scss를 registry/
+  SUPPORTED_LANGUAGES에 추가 → **이제 지정 가능**(생성 거부 해소). PetClinic
+  재분석: template 17개, **HTML 템플릿 ↔ Java 핸들러 cross-service 링크 3개**
+  실확인(`http.GET./owners/new` 등에 HTML CALLS + Java EXPOSES 공존). asset/
+  webjars/외부URL/`#`는 제외.
+- **P3 — ggoss-kotlin (PR-194).** 별도 분석기(ggoss-java 미수정). `fun` 기반
+  함수 감지(톱레벨 포함), class/interface/object/enum/annotation + 중첩 FQN,
+  Spring 애노테이션(=Java) → 같은 `http.<M>.<path>` 노드 정규화, CALLS
+  same-file→전역유일→extern. kotlin을 결정적 셋에 등록.
+- **P4 — ggoss-java 깊이.** (1) **추상/인터페이스 메서드 검출**(`;` 종료, `=`·
+  enum·annotation 가드) → PetClinic에서 Spring Data repository 메서드
+  `findById`/`findByLastNameStartingWith`/`findPetTypes` 3개가 심볼로(222→225,
+  오검출 0). (2) **리시버-클래스 콜 해소**: `Type.method()`가 알려진 프로젝트
+  클래스면 그 클래스 메서드로 해소(이름-only fallback보다 정확), `resolution:
+  receiver_class` 메타 기록.
+
+결정적 분석기: 6 → **12**(ts,py,cpp,java,csharp,sql + javascript, **html,css,
+scss,kotlin**). 신규 테스트 pr193(6)·pr194(5)·pr192 P4(2) 추가. 관련 스위트
+통과, ruff clean(전체 스위트의 pr35 D1/D2 실패는 clean HEAD와 동일한 Windows
+subprocess 아티팩트, 신규 회귀 0).
+
 ## 7. 판정
 
 웹+Java 전장에서 Mnemos는 이제 TS/JS(최상급) + Java(신규 결정적) 추출을 갖췄고,

@@ -38,11 +38,10 @@ Paths: ``location.file`` and ids use project-relative POSIX paths
 (``java:src/main/java/.../OwnerController.java:OwnerController.processFindForm@94``).
 
 Limitations (documented honesty, see docs/analyzer-contract.md):
-- Only body-bearing (concrete) methods are extracted; abstract / interface
-  methods and Spring-Data repository query methods (``findByX(...);`` with no
-  body) are not yet symbols. Follow-up.
-- Call resolution is name-based (no import/FQN type resolution yet); a call
-  to an overloaded / same-named method across classes stays unresolved.
+- Call resolution is name-based with a receiver-class shortcut (``Type.m()``
+  resolves within a known project class); a bare call to an overloaded /
+  same-named method across classes with a non-class receiver stays
+  unresolved (no full type inference / variable-type tracking).
 - Generics, lambdas-as-calls, method-reference (``::``) targets, and calls
   through field/getter chains are not resolved.
 - Parameterized route params keep the framework's own name (Spring
@@ -191,7 +190,6 @@ _METHOD_HEAD_RE = re.compile(
 # whose paren-group otherwise swallows the real signature.
 _ANNOT_BLANK_RE = re.compile(r"@\w+\s*(?:\([^()]*\))?")
 _ANNOT_RE = re.compile(r"@([A-Za-z_]\w*)\s*(\([^()]*(?:\([^()]*\)[^()]*)*\))?")
-_CALL_RE = re.compile(r"(?:\.\s*)?([A-Za-z_]\w*)\s*\(")
 
 
 @dataclass
@@ -240,6 +238,7 @@ def _scan_file(src: str, rel: str) -> _FileScan:
         pkg = mpkg.group(1)
 
     type_stack: list[str] = []       # names contributing to FQN
+    type_kind_stack: list[str] = []  # enclosing type kind (enum guard)
     frame_kinds: list[str] = []      # 'type' | 'method' | 'other' per '{'
     method_frames: list[_Sym] = []   # open method syms awaiting body_end
 
@@ -265,6 +264,7 @@ def _scan_file(src: str, rel: str) -> _FileScan:
                 symbols.append(sym)
                 class_headers[qual] = header_src
                 type_stack.append(name)
+                type_kind_stack.append(kind)
                 frame_kinds.append("type")
             else:
                 header_det = _ANNOT_BLANK_RE.sub(
@@ -298,12 +298,44 @@ def _scan_file(src: str, rel: str) -> _FileScan:
         if c == "}":
             if frame_kinds:
                 kind = frame_kinds.pop()
-                if kind == "type" and type_stack:
-                    type_stack.pop()
+                if kind == "type":
+                    if type_stack:
+                        type_stack.pop()
+                    if type_kind_stack:
+                        type_kind_stack.pop()
                 elif kind == "method" and method_frames:
                     m = method_frames.pop()
                     m.body_end = i
                     m.src_body_end = i
+            i += 1
+            continue
+        if c == ";":
+            # Abstract / interface method: ``ReturnType name(params);`` with no
+            # body, directly in a type body. Excludes fields (have ``=`` or no
+            # parens) and enum constants (enclosing enum guarded out). This is
+            # what makes Spring-Data repository query methods graph symbols.
+            if (
+                frame_kinds[-1:] == ["type"]
+                and type_kind_stack[-1:] != ["enum"]
+                and type_kind_stack[-1:] != ["annotation_type"]
+            ):
+                boundary = _prev_boundary(text, i)
+                header = text[boundary:i]
+                if "=" not in header:
+                    header_det = _ANNOT_BLANK_RE.sub(
+                        lambda m: " " * len(m.group(0)), header
+                    )
+                    mh = _METHOD_HEAD_RE.search(header_det)
+                    if mh is not None and mh.group(1) not in _CTRL_WORDS:
+                        name = mh.group(1)
+                        qual = ".".join(type_stack + [name])
+                        line = _line_of(text, boundary + mh.start(1))
+                        symbols.append(_Sym(
+                            id=_symbol_id(rel, qual, line), kind="method",
+                            name=name, qual=qual, line=line,
+                            header_src=src[boundary:i].strip()[:600],
+                            metadata={"abstract": True},
+                        ))
             i += 1
             continue
         i += 1
@@ -387,15 +419,33 @@ def cmd_symbols(target: Path, out_stream) -> None:
 # ─── verb: calls ───────────────────────────────────────────────────
 
 
+_CALL_RECV_RE = re.compile(
+    r"(?:([A-Za-z_]\w*)\s*\.\s*)?([A-Za-z_]\w*)\s*\("
+)
+
+
+def _enclosing_class(qual: str) -> str | None:
+    parts = qual.split(".")
+    return parts[-2] if len(parts) >= 2 else None
+
+
 def cmd_calls(target: Path, out_stream) -> None:
     target = target.resolve()
     scans = _scan_all(target)
 
     global_methods: dict[str, list[str]] = {}
+    # class simple-name → {method name → id} for receiver-qualified resolution
+    # (``OwnerService.load()`` / static calls) — PR-192 P4, better than the
+    # bare-name unique-global fallback for cross-class calls.
+    class_methods: dict[str, dict[str, str]] = {}
     for _p, _s, scan in scans:
         for s in scan.symbols:
-            if s.kind == "method":
-                global_methods.setdefault(s.name, []).append(s.id)
+            if s.kind != "method":
+                continue
+            global_methods.setdefault(s.name, []).append(s.id)
+            cls = _enclosing_class(s.qual)
+            if cls:
+                class_methods.setdefault(cls, {}).setdefault(s.name, s.id)
 
     for _p, _s, scan in scans:
         local = {}
@@ -407,11 +457,20 @@ def cmd_calls(target: Path, out_stream) -> None:
                 continue
             body = scan.text[s.body_start:s.body_end]
             seen: set[tuple[str, str]] = set()
-            for m in _CALL_RE.finditer(body):
-                callee = m.group(1)
-                if callee in _CTRL_WORDS:
+            for m in _CALL_RECV_RE.finditer(body):
+                receiver, callee = m.group(1), m.group(2)
+                if callee in _CTRL_WORDS or (receiver and receiver in _CTRL_WORDS):
                     continue
-                resolved = local.get(callee)
+                via = None
+                resolved = None
+                # 1) Receiver is a known project class → resolve within it.
+                if receiver and callee in class_methods.get(receiver, {}):
+                    resolved = class_methods[receiver][callee]
+                    via = "receiver_class"
+                # 2) Same-file method of that name.
+                if resolved is None:
+                    resolved = local.get(callee)
+                # 3) Unique project-wide.
                 if resolved is None:
                     ids = global_methods.get(callee, [])
                     resolved = ids[0] if len(ids) == 1 else None
@@ -420,17 +479,20 @@ def cmd_calls(target: Path, out_stream) -> None:
                 if key in seen:
                     continue
                 seen.add(key)
-                line = _line_of(scan.text, s.body_start + m.start(1))
+                line = _line_of(scan.text, s.body_start + m.start(2))
+                meta = {
+                    "invocation_site": {"line": line, "col": 1},
+                    "callee_resolved": resolved is not None,
+                }
+                if via:
+                    meta["resolution"] = via
                 out_stream.write(_envelope("edge", {
                     "source_id": s.id,
                     "target_id": target_id,
                     "kind": "CALLS",
                     "certainty": "asserted" if resolved else "inferred",
                     "created_by": [_SOURCE_NAME],
-                    "metadata": {
-                        "invocation_site": {"line": line, "col": 1},
-                        "callee_resolved": resolved is not None,
-                    },
+                    "metadata": meta,
                 }) + "\n")
 
 

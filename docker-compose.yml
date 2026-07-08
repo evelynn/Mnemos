@@ -130,6 +130,24 @@ services:
     image: mnemos/ggoss-java:latest
     entrypoint: ["true"]
 
+  # PR-193 — Web (HTML/CSS) analyzer. Pure stdlib (regex), zero deps.
+  analyzer-web:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-web
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-web:latest
+    entrypoint: ["true"]
+
+  # PR-194 — Kotlin analyzer. Pure stdlib (regex + brace scanner), zero deps.
+  analyzer-kotlin:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-kotlin
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-kotlin:latest
+    entrypoint: ["true"]
+
   analyzer-sql-mssql:
     profiles: ["analyzers"]
     build:

@@ -186,3 +186,71 @@ def test_registry_maps_java() -> None:
     from app.analyzers.registry import binary_for
 
     assert binary_for("java") == "ggoss-java"
+
+
+# ── PR-192 P4: abstract/interface methods + receiver-class resolution ──
+
+_REPO = """\
+package com.demo.owner;
+
+import org.springframework.data.repository.Repository;
+
+interface OwnerRepository extends Repository<Owner, Integer> {
+
+    Owner findById(Integer id);
+
+    List<Owner> findByLastNameStartingWith(String lastName, Pageable pageable);
+
+    // Not a method — a field with an initializer must NOT be detected.
+    String CACHE_KEY = buildKey();
+}
+"""
+
+_CALLER = """\
+package com.demo.owner;
+
+class OwnerService {
+    private final OwnerRepository repo;
+    OwnerService(OwnerRepository repo) { this.repo = repo; }
+
+    Owner byId(Integer id) {
+        return OwnerRepository.findById(id);  // receiver-class qualified call
+    }
+}
+"""
+
+
+def _write_repo(root: Path) -> None:
+    d = root / "src" / "com" / "demo" / "owner"
+    d.mkdir(parents=True)
+    (d / "OwnerRepository.java").write_text(_REPO, encoding="utf-8")
+    (d / "OwnerService.java").write_text(_CALLER, encoding="utf-8")
+
+
+def test_abstract_interface_methods_are_symbols(tmp_path: Path) -> None:
+    _write_repo(tmp_path)
+    data = [r["data"] for r in _run("symbols", tmp_path)]
+    methods = {d["name"]: d for d in data if d["kind"] == "method"}
+
+    # Spring-Data repository query methods (no body, ``;``-terminated) now
+    # become graph symbols — the P4 gap.
+    assert "findById" in methods
+    assert methods["findById"]["metadata"].get("abstract") is True
+    assert "findByLastNameStartingWith" in methods
+    # A field initializer ``String CACHE_KEY = buildKey();`` is NOT a method.
+    assert "CACHE_KEY" not in methods
+
+
+def test_receiver_class_call_resolution(tmp_path: Path) -> None:
+    _write_repo(tmp_path)
+    edges = [r["data"] for r in _run("calls", tmp_path)]
+    # OwnerService.byId calls OwnerRepository.findById via a class-qualified
+    # receiver — resolved to the interface method, not left extern.
+    hit = [
+        e for e in edges
+        if e["source_id"].split("@")[0].endswith("byId")
+        and "OwnerRepository.findById" in e["target_id"]
+    ]
+    assert hit, [e["target_id"] for e in edges]
+    assert hit[0]["metadata"]["callee_resolved"] is True
+    assert hit[0]["metadata"].get("resolution") == "receiver_class"
