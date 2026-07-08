@@ -188,6 +188,82 @@ class _Call:
     callee_resolved_id: str | None  # None if not resolved in-module
     line: int
     col: int
+    resolution: str | None = None   # how it resolved (e.g. "receiver_type")
+
+
+def _type_from_value(node: ast.AST, project_classes: set[str]) -> str | None:
+    """Infer a class name from an assignment RHS: ``ClassName(...)`` → the
+    class (PR-203 type inference). Only project classes count."""
+    if isinstance(node, ast.Call):
+        f = node.func
+        if isinstance(f, ast.Name) and f.id in project_classes:
+            return f.id
+        if isinstance(f, ast.Attribute) and f.attr in project_classes:
+            return f.attr
+    return None
+
+
+def _type_from_annotation(node: ast.AST | None, project_classes: set[str]) -> str | None:
+    """Infer a class name from a type annotation: ``repo: Repo`` /
+    ``x: Optional[Repo]`` → ``Repo``."""
+    if node is None:
+        return None
+    if isinstance(node, ast.Name) and node.id in project_classes:
+        return node.id
+    if isinstance(node, ast.Attribute) and node.attr in project_classes:
+        return node.attr
+    if isinstance(node, ast.Subscript):  # Optional[X], list[X] …
+        return _type_from_annotation(node.slice, project_classes)
+    return None
+
+
+def _class_attr_types(
+    tree: ast.Module, project_classes: set[str]
+) -> dict[str, dict[str, str]]:
+    """``{class name → {attr → type}}`` from ``self.x = Type()`` /
+    ``self.x: Type`` / constructor-injected ``def __init__(self, x: Type):
+    self.x = x``. The dominant Python DI pattern."""
+    out: dict[str, dict[str, str]] = {}
+
+    def scan_class(cls: ast.ClassDef) -> None:
+        attrs: dict[str, str] = {}
+        for item in cls.body:
+            # class-body annotation: ``repo: Repo``
+            if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                t = _type_from_annotation(item.annotation, project_classes)
+                if t:
+                    attrs[item.target.id] = t
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                param_types = {
+                    a.arg: _type_from_annotation(a.annotation, project_classes)
+                    for a in item.args.args
+                }
+                for sub in ast.walk(item):
+                    # ``self.x = Type()`` or ``self.x = param`` (injected).
+                    if isinstance(sub, ast.Assign):
+                        for tgt in sub.targets:
+                            if (isinstance(tgt, ast.Attribute)
+                                    and isinstance(tgt.value, ast.Name)
+                                    and tgt.value.id == "self"):
+                                t = _type_from_value(sub.value, project_classes)
+                                if not t and isinstance(sub.value, ast.Name):
+                                    t = param_types.get(sub.value.id)
+                                if t:
+                                    attrs[tgt.attr] = t
+                    elif (isinstance(sub, ast.AnnAssign)
+                          and isinstance(sub.target, ast.Attribute)
+                          and isinstance(sub.target.value, ast.Name)
+                          and sub.target.value.id == "self"):
+                        t = _type_from_annotation(sub.annotation, project_classes)
+                        if t:
+                            attrs[sub.target.attr] = t
+        if attrs:
+            out[cls.name] = attrs
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            scan_class(node)
+    return out
 
 
 class _CallVisitor(ast.NodeVisitor):
@@ -195,7 +271,14 @@ class _CallVisitor(ast.NodeVisitor):
     enclosing function/method scope. Tracks the nested-function
     stack the same way ggoss-ts does."""
 
-    def __init__(self, rel_path: str, symbols: list[_Symbol]):
+    def __init__(
+        self,
+        rel_path: str,
+        symbols: list[_Symbol],
+        class_methods: dict[str, dict[str, str]] | None = None,
+        class_attrs: dict[str, dict[str, str]] | None = None,
+        project_classes: set[str] | None = None,
+    ):
         self._rel = rel_path
         self.calls: list[_Call] = []
         # qual_name → symbol id, for in-module resolution.
@@ -206,6 +289,11 @@ class _CallVisitor(ast.NodeVisitor):
             self._name_to_ids.setdefault(s.name, []).append(s.id)
         self._scope: list[str] = []  # qual_name stack
         self._class_stack: list[str] = []
+        # PR-203 — type-aware resolution maps (project-wide).
+        self._class_methods = class_methods or {}
+        self._class_attrs = class_attrs or {}
+        self._project_classes = project_classes or set()
+        self._local_types: list[dict[str, str]] = []  # per-function var → class
 
     # ---- scope ----------------------------------------------------
 
@@ -224,10 +312,52 @@ class _CallVisitor(ast.NodeVisitor):
     def _visit_fn(self, node) -> None:
         qname = ".".join(self._class_stack + [node.name])
         self._scope.append(qname)
-        # Generic-visit so we see nested calls.
+        # PR-203 — local type env: param annotations + ``x = Type()`` /
+        # ``x: Type`` in the body. Drives receiver-type call resolution.
+        local: dict[str, str] = {}
+        for a in list(node.args.args) + list(node.args.kwonlyargs):
+            t = _type_from_annotation(a.annotation, self._project_classes)
+            if t:
+                local[a.arg] = t
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Assign):
+                t = _type_from_value(sub.value, self._project_classes)
+                if t:
+                    for tgt in sub.targets:
+                        if isinstance(tgt, ast.Name):
+                            local[tgt.id] = t
+            elif (isinstance(sub, ast.AnnAssign)
+                  and isinstance(sub.target, ast.Name)):
+                t = _type_from_annotation(sub.annotation, self._project_classes)
+                if t:
+                    local[sub.target.id] = t
+        self._local_types.append(local)
         for child in node.body:
             self.visit(child)
+        self._local_types.pop()
         self._scope.pop()
+
+    def _resolve_by_type(self, func: ast.expr) -> str | None:
+        """Type-aware resolution of ``recv.method()``: if ``recv``'s class is
+        known (local var / param / ``self.attr``), resolve the method in that
+        class. This is what disambiguates same-named methods (PR-203)."""
+        if not isinstance(func, ast.Attribute):
+            return None
+        method = func.attr
+        recv = func.value
+        rtype: str | None = None
+        if isinstance(recv, ast.Name):
+            for env in reversed(self._local_types):
+                if recv.id in env:
+                    rtype = env[recv.id]
+                    break
+        elif (isinstance(recv, ast.Attribute)
+              and isinstance(recv.value, ast.Name)
+              and recv.value.id == "self" and self._class_stack):
+            rtype = self._class_attrs.get(self._class_stack[-1], {}).get(recv.attr)
+        if rtype:
+            return self._class_methods.get(rtype, {}).get(method)
+        return None
 
     # ---- calls ----------------------------------------------------
 
@@ -239,7 +369,14 @@ class _CallVisitor(ast.NodeVisitor):
                 self.visit(child)
             return
         callee_name, qname_hint = _callee_repr(node.func)
-        resolved_id = self._resolve(callee_name, qname_hint)
+        # PR-203 — receiver-type resolution first (disambiguates same-named
+        # methods), then the name-based ladder.
+        resolution = None
+        resolved_id = self._resolve_by_type(node.func)
+        if resolved_id is not None:
+            resolution = "receiver_type"
+        else:
+            resolved_id = self._resolve(callee_name, qname_hint)
         caller_qname = self._scope[-1]
         caller_id = self._qname_to_id.get(caller_qname)
         if caller_id is None:
@@ -252,6 +389,7 @@ class _CallVisitor(ast.NodeVisitor):
             callee_resolved_id=resolved_id,
             line=node.lineno,
             col=node.col_offset + 1,
+            resolution=resolution,
         ))
         # Descend into args (could contain further calls).
         for child in ast.iter_child_nodes(node):
@@ -397,8 +535,11 @@ def cmd_calls(target: Path, out_stream) -> None:
     # another module degraded to ``py:extern`` (the documented cross-module
     # gap). The global map lets an unresolved-in-file callee resolve to a
     # unique project-wide symbol of that name.
-    parsed: list[tuple[str, list[_Call]]] = []
+    files: list[tuple[str, ast.Module, list[_Symbol]]] = []
     global_by_name: dict[str, set[str]] = {}
+    project_classes: set[str] = set()
+    # class simple-name → {method → id} (receiver-type resolution, PR-203).
+    class_methods: dict[str, dict[str, str]] = {}
     for path in _iter_py_files(target):
         try:
             src = path.read_text(encoding="utf-8", errors="replace")
@@ -407,32 +548,47 @@ def cmd_calls(target: Path, out_stream) -> None:
             continue
         rel = str(path.resolve())
         symbols = _walk_symbols(tree, rel)
+        files.append((rel, tree, symbols))
         for s in symbols:
             global_by_name.setdefault(s.name, set()).add(s.id)
-        visitor = _CallVisitor(rel, symbols)
+            if s.kind == "class":
+                project_classes.add(s.name)
+            if s.kind in ("method",) and "." in s.qual_name:
+                cls = s.qual_name.rsplit(".", 1)[0].rsplit(".", 1)[-1]
+                class_methods.setdefault(cls, {}).setdefault(s.name, s.id)
+
+    # class attribute types need the full project-class set first.
+    class_attrs: dict[str, dict[str, str]] = {}
+    for _rel, tree, _symbols in files:
+        for cls, attrs in _class_attr_types(tree, project_classes).items():
+            class_attrs.setdefault(cls, {}).update(attrs)
+
+    # Pass 2 — run each visitor with the project-wide type maps, then emit.
+    # Cross-module name fallback is precision-safe (unique-name only).
+    parsed: list[tuple[str, list[_Call]]] = []
+    for rel, tree, symbols in files:
+        visitor = _CallVisitor(rel, symbols, class_methods, class_attrs,
+                               project_classes)
         visitor.visit(tree)
         parsed.append((rel, visitor.calls))
 
-    # Pass 2 — emit edges. Cross-module resolution is precision-safe: it only
-    # fires for a callee with exactly ONE project-wide symbol of that bare
-    # name (ambiguous names stay extern rather than guessing wrong).
     for _rel, calls in parsed:
         for c in calls:
             resolved_id = c.callee_resolved_id
-            cross_module = False
+            resolution = c.resolution
             if resolved_id is None:
                 bare = c.callee_name.rsplit(".", 1)[-1]
                 ids = global_by_name.get(bare, set())
                 if len(ids) == 1:
                     resolved_id = next(iter(ids))
-                    cross_module = True
+                    resolution = "cross_module"
             resolved = resolved_id is not None
             meta: dict[str, Any] = {
                 "invocation_site": {"line": c.line, "col": c.col},
                 "callee_resolved": resolved,
             }
-            if cross_module:
-                meta["resolution"] = "cross_module"
+            if resolution:
+                meta["resolution"] = resolution
             data = {
                 "source_id": c.caller_id,
                 "target_id": resolved_id or f"py:extern:{c.callee_name}",
