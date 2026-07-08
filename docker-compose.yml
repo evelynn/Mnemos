@@ -120,6 +120,16 @@ services:
     image: mnemos/ggoss-cpp:latest
     entrypoint: ["true"]
 
+  # PR-192 — Java analyzer. Pure stdlib (regex + brace scanner),
+  # zero third-party deps — same minimal shape as ggoss-py.
+  analyzer-java:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-java
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-java:latest
+    entrypoint: ["true"]
+
   analyzer-sql-mssql:
     profiles: ["analyzers"]
     build:

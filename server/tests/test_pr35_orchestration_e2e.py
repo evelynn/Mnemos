@@ -464,12 +464,12 @@ def test_d2_registry_has_one_binary_per_phase1_language():
     """Regression guard. If ``_BINARIES`` ever drops a language the
     multi-language scenario silently degrades. PR-115 added Python
     (ggoss-py — pure-stdlib Python AST analyzer); PR-191 added cpp
-    (ggoss-cpp) and javascript (served by ggoss-ts, which already walks
-    .js). 7 source-tree languages + the dotnet binary decompiler."""
+    (ggoss-cpp) and javascript (ggoss-ts walks .js); PR-192 added java
+    (ggoss-java). 8 source-tree languages + the dotnet binary decompiler."""
     from app.analyzers.registry import _BINARIES
 
     expected = {
-        "csharp", "typescript", "javascript", "python", "cpp",
+        "csharp", "typescript", "javascript", "python", "cpp", "java",
         "mssql", "oracle",
         "dotnet_binary",
     }

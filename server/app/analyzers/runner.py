@@ -43,6 +43,10 @@ _INREPO_ANALYZERS: dict[str, tuple[str, Path]] = {
     # doc's P0 "dominant language skipped as no_analyzer" gap.
     "ggoss-cpp": (sys.executable,
                   _REPO_ROOT / "analyzers" / "ggoss-cpp" / "src" / "ggoss_cpp.py"),
+    # PR-192 — Java (same stdlib regex/brace approach); closes the web+Java
+    # eval's empty-graph gap on Spring backends.
+    "ggoss-java": (sys.executable,
+                   _REPO_ROOT / "analyzers" / "ggoss-java" / "src" / "ggoss_java.py"),
 }
 
 

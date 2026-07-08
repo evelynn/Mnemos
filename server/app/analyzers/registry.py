@@ -18,6 +18,11 @@ _BINARIES = {
     # PR-191 — deterministic C/C++ extraction (functions/structs/enums/
     # macros + CALLS); vendored/ trees excluded by the analyzer itself.
     "cpp": "ggoss-cpp",
+    # PR-192 — deterministic Java extraction (types/methods + Spring/JAX-RS
+    # HTTP contracts normalized to the same http.<M>.<path> node a TS fetch
+    # client resolves to, so Java-server ↔ TS-client cross-service linking
+    # works); closes the web+Java eval's empty-graph gap.
+    "java": "ggoss-java",
     "mssql": "ggoss-sql-mssql",
     "oracle": "ggoss-sql-oracle",
     "dotnet_binary": "ggoss-binary-dotnet",
