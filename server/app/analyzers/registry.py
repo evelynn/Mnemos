@@ -41,6 +41,11 @@ _BINARIES = {
     "go": "ggoss-treesitter",
     "rust": "ggoss-treesitter",
     "ruby": "ggoss-treesitter",
+    # PR-199 — more tree-sitter languages (config-only additions to the same
+    # analyzer). Adding a language = a ``_LANG`` entry + one line here.
+    "php": "ggoss-treesitter",
+    "scala": "ggoss-treesitter",
+    "swift": "ggoss-treesitter",
     "mssql": "ggoss-sql-mssql",
     "oracle": "ggoss-sql-oracle",
     "dotnet_binary": "ggoss-binary-dotnet",

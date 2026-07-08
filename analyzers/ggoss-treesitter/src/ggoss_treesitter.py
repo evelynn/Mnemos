@@ -89,6 +89,55 @@ _LANG: dict[str, dict[str, Any]] = {
             "module": "module",
         },
     },
+    "php": {
+        "exts": (".php",),
+        "func": {"function_definition", "method_declaration"},
+        "type": {"class_declaration", "interface_declaration",
+                 "trait_declaration", "enum_declaration"},
+        "call": {"function_call_expression", "member_call_expression",
+                 "scoped_call_expression"},
+        # function_call_expression carries the callee on ``function``;
+        # member/scoped calls carry the method on ``name``.
+        "callee_field": ("function", "name"),
+        "kinds": {
+            "function_definition": "function",
+            "method_declaration": "method",
+            "class_declaration": "class",
+            "interface_declaration": "interface",
+            "trait_declaration": "trait",
+            "enum_declaration": "enum",
+        },
+    },
+    "scala": {
+        "exts": (".scala", ".sc"),
+        "func": {"function_definition"},
+        "type": {"class_definition", "object_definition", "trait_definition"},
+        "call": {"call_expression"},
+        "callee_field": "function",
+        "kinds": {
+            "function_definition": "function",
+            "class_definition": "class",
+            "object_definition": "object",
+            "trait_definition": "interface",
+        },
+    },
+    "swift": {
+        "exts": (".swift",),
+        "func": {"function_declaration"},
+        "type": {"class_declaration", "struct_declaration",
+                 "protocol_declaration", "enum_declaration"},
+        "call": {"call_expression"},
+        # Swift call_expression has no ``function`` field — the callee is the
+        # first child; ``callee_field`` empty triggers the first-child path.
+        "callee_field": (),
+        "kinds": {
+            "function_declaration": "function",
+            "class_declaration": "class",
+            "struct_declaration": "struct",
+            "protocol_declaration": "interface",
+            "enum_declaration": "enum",
+        },
+    },
 }
 
 _EXT_TO_LANG: dict[str, str] = {
@@ -183,14 +232,30 @@ def _node_name(src: bytes, node) -> str | None:
     return _text(src, nm) if nm is not None else None
 
 
-def _bare_callee(src: bytes, node, callee_field: str) -> str | None:
+def _bare_callee(src: bytes, node, callee_field) -> str | None:
     """Last identifier of the callee expression: ``r.db.Insert`` → ``Insert``,
-    ``foo`` → ``foo``, ``a::b::c`` → ``c``."""
-    fn = node.child_by_field_name(callee_field)
+    ``foo`` → ``foo``, ``a::b::c`` → ``c``.
+
+    ``callee_field`` may be a field name, a tuple of field names to try in
+    order (languages differ: Go/Scala use ``function``, Ruby/PHP-method use
+    ``name``), or empty — in which case the callee is the call node's first
+    named child (Swift, whose call_expression exposes no callee field)."""
+    fields = (callee_field,) if isinstance(callee_field, str) else tuple(callee_field)
+    fn = None
+    for f in fields:
+        fn = node.child_by_field_name(f)
+        if fn is not None:
+            break
+    if fn is None:
+        # First-child fallback (Swift): the callee expression leads the call.
+        fn = next((c for c in node.named_children), None)
     if fn is None:
         return None
     txt = _text(src, fn).strip()
-    for sep in ("::", "."):
+    # Drop call args if the first child was the whole ``callee(args)`` shape.
+    if "(" in txt:
+        txt = txt.split("(", 1)[0]
+    for sep in ("::", ".", "->"):
         if sep in txt:
             txt = txt.rsplit(sep, 1)[-1]
     txt = txt.strip()

@@ -467,14 +467,15 @@ def test_d2_registry_has_one_binary_per_phase1_language():
     (ggoss-cpp) and javascript (ggoss-ts walks .js); PR-192 added java
     (ggoss-java); PR-193 added html/css/scss
     (ggoss-web); PR-194 added kotlin (ggoss-kotlin);
-    PR-195 added go/rust/ruby (ggoss-treesitter, config-driven). 15
-    source-tree languages + the dotnet binary decompiler."""
+    PR-195 added go/rust/ruby (ggoss-treesitter, config-driven); PR-199 added
+    php/scala/swift (same analyzer, config-only). 18 source-tree languages +
+    the dotnet binary decompiler."""
     from app.analyzers.registry import _BINARIES
 
     expected = {
         "csharp", "typescript", "javascript", "python", "cpp", "java", "kotlin",
         "html", "css", "scss",
-        "go", "rust", "ruby",
+        "go", "rust", "ruby", "php", "scala", "swift",
         "mssql", "oracle",
         "dotnet_binary",
     }
