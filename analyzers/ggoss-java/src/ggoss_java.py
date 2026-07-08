@@ -215,6 +215,19 @@ class _FileScan:
     class_annotics: dict[str, str]  # type qual → original class header
     text: str = ""   # blanked source; _strip is offset-preserving so body
     src: str = ""    # indices are valid against BOTH text and src
+    # PR-202 — type-aware resolution: class qual → {field name → type simple}.
+    class_fields: dict[str, dict[str, str]] = field(default_factory=dict)
+
+
+# A field / local declaration: ``[<generics>] Type name`` where Type is a
+# class (leading uppercase — primitives are lowercase and useless for method
+# resolution). Used for receiver-type call resolution (PR-202).
+_TYPED_DECL_RE = re.compile(
+    r"\b([A-Z]\w*)(?:\s*<[^;{}()]*>)?(?:\s*\[\s*\])?\s+([a-z_]\w*)\s*$"
+)
+_LOCAL_DECL_RE = re.compile(
+    r"\b([A-Z]\w*)(?:\s*<[^;{}()]*>)?(?:\s*\[\s*\])?\s+([a-z_]\w*)\s*[=;]"
+)
 
 
 def _prev_boundary(text: str, idx: int) -> int:
@@ -231,6 +244,7 @@ def _scan_file(src: str, rel: str) -> _FileScan:
     text = _strip(src)
     symbols: list[_Sym] = []
     class_headers: dict[str, str] = {}
+    class_fields: dict[str, dict[str, str]] = {}
 
     pkg = ""
     mpkg = re.search(r"^\s*package\s+([\w.]+)\s*;", text, re.M)
@@ -321,21 +335,36 @@ def _scan_file(src: str, rel: str) -> _FileScan:
             ):
                 boundary = _prev_boundary(text, i)
                 header = text[boundary:i]
-                if "=" not in header:
-                    header_det = _ANNOT_BLANK_RE.sub(
-                        lambda m: " " * len(m.group(0)), header
-                    )
-                    mh = _METHOD_HEAD_RE.search(header_det)
-                    if mh is not None and mh.group(1) not in _CTRL_WORDS:
-                        name = mh.group(1)
-                        qual = ".".join(type_stack + [name])
-                        line = _line_of(text, boundary + mh.start(1))
-                        symbols.append(_Sym(
-                            id=_symbol_id(rel, qual, line), kind="method",
-                            name=name, qual=qual, line=line,
-                            header_src=src[boundary:i].strip()[:600],
-                            metadata={"abstract": True},
-                        ))
+                header_det = _ANNOT_BLANK_RE.sub(
+                    lambda m: " " * len(m.group(0)), header
+                )
+                mh = (
+                    _METHOD_HEAD_RE.search(header_det)
+                    if "=" not in header else None
+                )
+                if mh is not None and mh.group(1) not in _CTRL_WORDS:
+                    name = mh.group(1)
+                    qual = ".".join(type_stack + [name])
+                    line = _line_of(text, boundary + mh.start(1))
+                    symbols.append(_Sym(
+                        id=_symbol_id(rel, qual, line), kind="method",
+                        name=name, qual=qual, line=line,
+                        header_src=src[boundary:i].strip()[:600],
+                        metadata={"abstract": True},
+                    ))
+                else:
+                    # Field declaration ``[modifiers] Type name [= …]`` — record
+                    # its type for receiver-type call resolution (PR-202). The
+                    # declarator (before ``=``) must have no parens (else it is
+                    # a method) and end in ``Type name``.
+                    decl = header_det.split("=", 1)[0]
+                    if "(" not in decl and ")" not in decl:
+                        fm = _TYPED_DECL_RE.search(decl)
+                        if fm and fm.group(1) not in _CTRL_WORDS:
+                            cls_qual = ".".join(type_stack)
+                            if cls_qual:
+                                class_fields.setdefault(cls_qual, {})[
+                                    fm.group(2)] = fm.group(1)
             i += 1
             continue
         i += 1
@@ -348,7 +377,8 @@ def _scan_file(src: str, rel: str) -> _FileScan:
             s.metadata.setdefault("signature", sig[:400])
 
     return _FileScan(rel=rel, package=pkg, symbols=symbols,
-                     class_annotics=class_headers, text=text, src=src)
+                     class_annotics=class_headers, text=text, src=src,
+                     class_fields=class_fields)
 
 
 def _read(path: Path) -> str | None:
@@ -429,33 +459,72 @@ def _enclosing_class(qual: str) -> str | None:
     return parts[-2] if len(parts) >= 2 else None
 
 
+def _parse_params(header_src: str) -> dict[str, str]:
+    """``{param name → type simple}`` from a method header. Annotations are
+    blanked so the first ``(...)`` is the parameter list; generics dropped."""
+    hdr = _ANNOT_BLANK_RE.sub(lambda m: " " * len(m.group(0)), header_src)
+    m = re.search(r"\(([^()]*)\)", hdr)
+    if not m:
+        return {}
+    params = re.sub(r"<[^<>]*>", "", m.group(1))
+    env: dict[str, str] = {}
+    for part in params.split(","):
+        toks = [t for t in part.replace("final", " ").replace("[]", " ").split()
+                if t]
+        if len(toks) >= 2 and toks[-2][:1].isupper() and toks[-1].isidentifier():
+            env[toks[-1]] = toks[-2]
+    return env
+
+
 def cmd_calls(target: Path, out_stream) -> None:
     target = target.resolve()
     scans = _scan_all(target)
 
     global_methods: dict[str, list[str]] = {}
-    # class simple-name → {method name → id} for receiver-qualified resolution
-    # (``OwnerService.load()`` / static calls) — PR-192 P4, better than the
-    # bare-name unique-global fallback for cross-class calls.
+    # class simple-name → {method name → id}. Type-aware resolution (PR-202)
+    # looks a receiver's type up here; static ``Type.method()`` too.
     class_methods: dict[str, dict[str, str]] = {}
+    # class simple-name → {field name → type simple} (receiver-type env).
+    fields_by_class: dict[str, dict[str, str]] = {}
+    # class simple-name → class node id / its constructor id (for ``new T()``).
+    class_by_name: dict[str, list[str]] = {}
+    ctor_by_class: dict[str, str] = {}
     for _p, _s, scan in scans:
-        for s in scan.symbols:
-            if s.kind != "method":
-                continue
-            global_methods.setdefault(s.name, []).append(s.id)
-            cls = _enclosing_class(s.qual)
-            if cls:
-                class_methods.setdefault(cls, {}).setdefault(s.name, s.id)
-
-    for _p, _s, scan in scans:
-        local = {}
         for s in scan.symbols:
             if s.kind == "method":
-                local.setdefault(s.name, s.id)
+                global_methods.setdefault(s.name, []).append(s.id)
+                cls = _enclosing_class(s.qual)
+                if cls:
+                    class_methods.setdefault(cls, {}).setdefault(s.name, s.id)
+                if s.metadata.get("constructor"):
+                    ctor_by_class.setdefault(s.name, s.id)
+            elif s.kind in ("class", "enum", "record"):
+                class_by_name.setdefault(s.name, []).append(s.id)
+        for cls_qual, flds in scan.class_fields.items():
+            fields_by_class.setdefault(cls_qual.split(".")[-1], {}).update(flds)
+
+    for _p, _s, scan in scans:
+        # Same-file method names → ids, keeping AMBIGUITY: a name defined by
+        # two classes in one file must NOT resolve to whichever came first
+        # (pre-fix precision bug) — only a unique same-file name resolves.
+        local_by_name: dict[str, list[str]] = {}
+        for s in scan.symbols:
+            if s.kind == "method":
+                local_by_name.setdefault(s.name, []).append(s.id)
         for s in scan.symbols:
             if s.kind != "method" or s.body_start < 0:
                 continue
             body = scan.text[s.body_start:s.body_end]
+            # Type env for THIS method: enclosing-class fields + params +
+            # method-body local declarations. Drives receiver-type resolution.
+            type_env: dict[str, str] = {}
+            encl = _enclosing_class(s.qual)
+            if encl:
+                type_env.update(fields_by_class.get(encl, {}))
+            type_env.update(_parse_params(s.header_src))
+            for lm in _LOCAL_DECL_RE.finditer(body):
+                if lm.group(1) not in _CTRL_WORDS:
+                    type_env.setdefault(lm.group(2), lm.group(1))
             seen: set[tuple[str, str]] = set()
             for m in _CALL_RECV_RE.finditer(body):
                 receiver, callee = m.group(1), m.group(2)
@@ -463,17 +532,38 @@ def cmd_calls(target: Path, out_stream) -> None:
                     continue
                 via = None
                 resolved = None
-                # 1) Receiver is a known project class → resolve within it.
-                if receiver and callee in class_methods.get(receiver, {}):
+                # 0) Receiver is a typed variable (field/param/local) → resolve
+                #    the call in that variable's class. The precise, cbm-like
+                #    path that disambiguates same-named methods (PR-202).
+                if receiver and receiver in type_env:
+                    rtype = type_env[receiver]
+                    resolved = class_methods.get(rtype, {}).get(callee)
+                    if resolved is not None:
+                        via = "receiver_type"
+                # 1) Receiver is a known project class → static call.
+                if resolved is None and receiver and callee in class_methods.get(receiver, {}):
                     resolved = class_methods[receiver][callee]
                     via = "receiver_class"
-                # 2) Same-file method of that name.
+                # 2) Unique same-file method of that name (ambiguous → skip).
                 if resolved is None:
-                    resolved = local.get(callee)
+                    ids = local_by_name.get(callee, [])
+                    if len(ids) == 1:
+                        resolved = ids[0]
                 # 3) Unique project-wide.
                 if resolved is None:
                     ids = global_methods.get(callee, [])
                     resolved = ids[0] if len(ids) == 1 else None
+                # 4) Constructor call ``new Type()`` → the type's constructor,
+                #    or the class node when the constructor is implicit.
+                if resolved is None and receiver is None and callee in class_by_name:
+                    before = body[:m.start()].rstrip()
+                    if before.endswith("new"):
+                        cids = class_by_name[callee]
+                        resolved = ctor_by_class.get(callee) or (
+                            cids[0] if len(cids) == 1 else None
+                        )
+                        if resolved is not None:
+                            via = "constructor"
                 target_id = resolved or f"java:extern:{callee}"
                 key = (s.id, target_id)
                 if key in seen:
