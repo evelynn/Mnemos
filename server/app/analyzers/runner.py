@@ -61,10 +61,28 @@ _INREPO_ANALYZERS: dict[str, tuple[str, Path]] = {
 }
 
 
+def _inrepo_deps_ok(binary: str, script: Path) -> bool:
+    """Whether an in-repo analyzer's non-stdlib dependencies are present.
+
+    ggoss-ts is the only stdlib-exception among the docker-free analyzers: it
+    imports the ``typescript`` npm package, so it needs ``node_modules`` built
+    (``npm ci`` in ``analyzers/ggoss-ts``). Without it ``node`` crashes with
+    ERR_MODULE_NOT_FOUND — an opaque failure. Gating availability here makes
+    the orchestrator record a clean ``no_analyzer`` skip / agent fallback
+    instead, and keeps the analyzer honest about needing setup. The stdlib
+    analyzers (py/cpp/java/kotlin/web) have no such deps; ggoss-treesitter is
+    gated separately in the registry on its Python package."""
+    if binary == "ggoss-ts":
+        # script = analyzers/ggoss-ts/src/index.mjs → node_modules is a sibling
+        # of ``src``.
+        return (script.parent.parent / "node_modules" / "typescript").exists()
+    return True
+
+
 def _inrepo_entry(binary: str) -> tuple[str, Path] | None:
     """(resolved_interpreter, script) for a docker-free in-repo analyzer, or
     None when the path is disabled, the interpreter is missing (e.g. no
-    ``node``), or the script is absent."""
+    ``node``), the script is absent, or a required dependency isn't built."""
     if os.environ.get("MNEMOS_INREPO_ANALYZERS") not in ("1", "true", "True"):
         return None
     entry = _INREPO_ANALYZERS.get(binary)
@@ -72,6 +90,8 @@ def _inrepo_entry(binary: str) -> tuple[str, Path] | None:
         return None
     interp, script = entry
     if not script.exists():
+        return None
+    if not _inrepo_deps_ok(binary, script):
         return None
     resolved = interp if interp == sys.executable else shutil.which(interp)
     return (resolved, script) if resolved else None

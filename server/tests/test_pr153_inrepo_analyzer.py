@@ -41,7 +41,14 @@ def test_inrepo_script_gated_by_flag(monkeypatch):
     import shutil
 
     ts = inrepo_script("ggoss-ts")
-    if shutil.which("node"):
+    # PR-197 — ts inrepo now also requires its ``typescript`` npm dependency
+    # (node_modules built), not just ``node`` on PATH.
+    from pathlib import Path as _P
+    _ts_pkg = (
+        _P(__file__).resolve().parents[2]
+        / "analyzers" / "ggoss-ts" / "node_modules" / "typescript"
+    ).exists()
+    if shutil.which("node") and _ts_pkg:
         assert ts is not None and ts.name == "index.mjs" and ts.exists()
     else:
         assert ts is None
