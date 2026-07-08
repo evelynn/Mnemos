@@ -43,6 +43,7 @@ from app.mcp.dev_tools import (
     submit_plan as submit_plan_tool,
 )
 from app.mcp.queries import (
+    compare_runs,
     find_callees,
     find_callers,
     find_runtime_path,
@@ -456,6 +457,29 @@ _TOOLS = [
         },
     ),
     Tool(
+        name="compare_runs",
+        description=(
+            "Diff the graph between two analysis runs (bitemporal): symbols / "
+            "contracts / data-entities added, removed, or modified; edge-kind "
+            "deltas (CALLS/EXPOSES/READS/WRITES added & removed); and findings "
+            "first seen between the runs. Certainty is preserved per change.\n\n"
+            "Use when: \"what changed between these two commits/analyses and "
+            "what's the blast radius?\" — code review, regression triage, "
+            "release notes. This is history-aware analysis: a re-indexing tool "
+            "that keeps no snapshots cannot produce it. Get run ids from "
+            "get_project_index (latest_run) or the runs list."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "run_a_id": {"type": "string"},
+                "run_b_id": {"type": "string"},
+                "limit": {"type": "integer", "default": 40},
+            },
+            "required": ["run_a_id", "run_b_id"],
+        },
+    ),
+    Tool(
         name="submit_plan",
         description=(
             "Submit a Plan for Gate A approval. Creates a worktree at "
@@ -699,6 +723,14 @@ def build_server(project_id: uuid.UUID) -> Server:
                     entry_contract_id=arguments["entry_contract_id"],
                     max_depth=int(arguments.get("max_depth", 6)),
                     time_window=arguments.get("time_window"),
+                )
+            elif name == "compare_runs":
+                result = await compare_runs(
+                    db,
+                    project_id=project_id,
+                    run_a_id=uuid.UUID(arguments["run_a_id"]),
+                    run_b_id=uuid.UUID(arguments["run_b_id"]),
+                    limit=int(arguments.get("limit", 40)),
                 )
             elif name == "submit_plan":
                 result = await submit_plan_tool(

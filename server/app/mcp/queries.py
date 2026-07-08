@@ -15,7 +15,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.findings import Finding, Summary
-from app.models.graph import Edge, Node
+from app.models.graph import AnalysisRun, Edge, Node
 
 _TOKEN = re.compile(r"[A-Za-z0-9_]+")
 
@@ -1058,4 +1058,168 @@ async def get_contract(
         "exposers": [row[0] for row in exposers],
         "callers": [row[0] for row in callers],
         "runtime_stats": None,
+    }
+
+
+# ─── temporal comparison (bitemporal graph diff) ───────────────────
+#
+# PR-204 — "what changed between two analysis runs" and its blast radius.
+# codebase-memory-mcp re-indexes without keeping history, so it CANNOT
+# compare graph states across commits/runs. Mnemos's bitemporal graph
+# (valid_from / valid_to per row) makes an as-of snapshot a query, so a diff
+# is two snapshots subtracted — an analysis + comparison that a re-indexing
+# tool structurally can't do. Grounded: the diff preserves certainty so an
+# agent knows how trustworthy each change is.
+
+
+def _live_at(model, when):
+    """Bitemporal predicate — the row is the live version at time ``when``."""
+    return (model.valid_from <= when) & (
+        (model.valid_to.is_(None)) | (model.valid_to > when)
+    )
+
+
+async def _run_asof(session, project_id, run_id):
+    run = (
+        await session.execute(
+            select(AnalysisRun).where(
+                AnalysisRun.project_id == project_id, AnalysisRun.id == run_id
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        return None, None
+    return run, (run.completed_at or run.created_at)
+
+
+async def _node_snapshot(session, project_id, when):
+    rows = (
+        await session.execute(
+            select(Node.id, Node.kind, Node.valid_from, Node.certainty, Node.data)
+            .where(Node.project_id == project_id, _live_at(Node, when))
+        )
+    ).all()
+    return {
+        nid: {"kind": kind, "vfrom": vf, "certainty": cert,
+              "name": (data or {}).get("name")}
+        for nid, kind, vf, cert, data in rows
+    }
+
+
+async def _edge_snapshot(session, project_id, when):
+    rows = (
+        await session.execute(
+            select(Edge.source_id, Edge.target_id, Edge.kind)
+            .where(Edge.project_id == project_id, _live_at(Edge, when))
+        )
+    ).all()
+    return {(s, t, k) for s, t, k in rows}
+
+
+async def compare_runs(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    run_a_id: uuid.UUID,
+    run_b_id: uuid.UUID,
+    limit: int = 40,
+) -> dict[str, Any]:
+    """Diff the graph between two analysis runs (bitemporal). Returns bounded
+    added / removed / modified symbols + contracts, edge-kind deltas, and new
+    findings — with certainty preserved. The older run is ``before``."""
+    limit = max(1, min(limit, 200))
+    run_a, t_a = await _run_asof(session, project_id, run_a_id)
+    run_b, t_b = await _run_asof(session, project_id, run_b_id)
+    if run_a is None or run_b is None:
+        return {"error": "run_not_found"}
+    if t_a is None or t_b is None:
+        return {"error": "run_incomplete"}
+    # Order chronologically — ``before`` is the earlier snapshot.
+    if t_a > t_b:
+        run_a, run_b, t_a, t_b = run_b, run_a, t_b, t_a
+
+    na = await _node_snapshot(session, project_id, t_a)
+    nb = await _node_snapshot(session, project_id, t_b)
+    a_ids, b_ids = set(na), set(nb)
+
+    def _kind_bucket(ids, snap):
+        out: dict[str, list[dict]] = {}
+        for nid in ids:
+            info = snap[nid]
+            out.setdefault(info["kind"], []).append(
+                {"id": nid, "name": info["name"], "certainty": info["certainty"]}
+            )
+        return out
+
+    added_ids = b_ids - a_ids
+    removed_ids = a_ids - b_ids
+    # Modified = same id, but the live version was superseded between A and B.
+    modified_ids = {
+        nid for nid in (a_ids & b_ids) if na[nid]["vfrom"] != nb[nid]["vfrom"]
+    }
+    added = _kind_bucket(added_ids, nb)
+    removed = _kind_bucket(removed_ids, na)
+    modified = _kind_bucket(modified_ids, nb)
+
+    def _section(kind):
+        return {
+            "added": added.get(kind, [])[:limit],
+            "removed": removed.get(kind, [])[:limit],
+            "modified": modified.get(kind, [])[:limit],
+            "added_count": len(added.get(kind, [])),
+            "removed_count": len(removed.get(kind, [])),
+            "modified_count": len(modified.get(kind, [])),
+        }
+
+    ea = await _edge_snapshot(session, project_id, t_a)
+    eb = await _edge_snapshot(session, project_id, t_b)
+    edge_added, edge_removed = eb - ea, ea - eb
+    edge_delta: dict[str, dict[str, int]] = {}
+    for s, t, k in edge_added:
+        edge_delta.setdefault(k, {"added": 0, "removed": 0})["added"] += 1
+    for s, t, k in edge_removed:
+        edge_delta.setdefault(k, {"added": 0, "removed": 0})["removed"] += 1
+
+    # New findings — first observed within (t_a, t_b].
+    new_findings = (
+        await session.execute(
+            select(Finding)
+            .where(
+                Finding.project_id == project_id,
+                Finding.first_seen_at > t_a,
+                Finding.first_seen_at <= t_b,
+            )
+            .order_by(Finding.risk_score.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+
+    return {
+        "before": {"run_id": str(run_a.id), "git_sha": run_a.git_sha,
+                   "at": t_a.isoformat()},
+        "after": {"run_id": str(run_b.id), "git_sha": run_b.git_sha,
+                  "at": t_b.isoformat()},
+        "symbols": _section("Symbol"),
+        "contracts": _section("Contract"),
+        "data_entities": _section("DataEntity"),
+        "edges": edge_delta,
+        "new_findings": [
+            {"id": str(f.id), "kind": f.kind, "severity": f.severity,
+             "risk_score": f.risk_score, "subject_node_id": f.subject_node_id}
+            for f in new_findings
+        ],
+        "new_findings_count": len(new_findings),
+        "summary": {
+            "symbols_added": _section("Symbol")["added_count"],
+            "symbols_removed": _section("Symbol")["removed_count"],
+            "symbols_modified": _section("Symbol")["modified_count"],
+            "edges_added": len(edge_added),
+            "edges_removed": len(edge_removed),
+            "contracts_changed": (_section("Contract")["added_count"]
+                                  + _section("Contract")["removed_count"]),
+            "new_findings": len(new_findings),
+        },
+        "note": "certainty preserved per change; older run is 'before'. "
+                "Bitemporal diff — a re-indexing tool without history cannot "
+                "produce this.",
     }
