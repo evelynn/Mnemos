@@ -33,6 +33,14 @@ _BINARIES = {
     # PR-194 — Kotlin (JVM web; modern Spring Boot). Separate analyzer, same
     # Spring annotations → same http.<M>.<path> node (cross-service linking).
     "kotlin": "ggoss-kotlin",
+    # PR-195 — tree-sitter multi-language analyzer (absorption review T2:
+    # cbm's language-extensibility mechanism, native). ONE analyzer backed by
+    # tree-sitter-language-pack; adding a language = a config entry. Registered
+    # here for languages with no stdlib analyzer; needs the tree-sitter package
+    # (analyzer_available gates on it), else these fall back to agent extraction.
+    "go": "ggoss-treesitter",
+    "rust": "ggoss-treesitter",
+    "ruby": "ggoss-treesitter",
     "mssql": "ggoss-sql-mssql",
     "oracle": "ggoss-sql-oracle",
     "dotnet_binary": "ggoss-binary-dotnet",
@@ -63,6 +71,19 @@ def analyzer_available(language: str) -> bool:
     binary = binary_for(language)
     if binary is None:
         return False
+    # PR-195 — the tree-sitter analyzer needs a non-stdlib package. When it
+    # isn't importable, report unavailable so go/rust/ruby fall back to agent
+    # extraction instead of silently extracting nothing.
+    if binary == "ggoss-treesitter" and not _treesitter_importable():
+        return False
     # Available if installed on PATH (docker/prod) or runnable from the
     # in-repo source (docker-free basic config, PR-153).
     return shutil.which(binary) is not None or inrepo_script(binary) is not None
+
+
+def _treesitter_importable() -> bool:
+    try:
+        import tree_sitter_language_pack  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        return False

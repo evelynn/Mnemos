@@ -101,6 +101,13 @@ _ANALYZERS: dict[str, dict[str, Any]] = {
         "kinds": {"class", "interface", "object", "enum",
                   "annotation_class", "function"},
     },
+    # PR-195 — tree-sitter analyzer, measured per-language (Go here). The
+    # binary is language-generic; the fixture picks the language by extension.
+    "go": {
+        "binary": "ggoss-treesitter",
+        "verb": "symbols",
+        "kinds": {"function", "method", "type", "struct", "enum", "interface"},
+    },
 }
 
 # Pass/fail floor. An accuracy regression below these in CI is a

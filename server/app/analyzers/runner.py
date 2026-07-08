@@ -53,6 +53,11 @@ _INREPO_ANALYZERS: dict[str, tuple[str, Path]] = {
     # PR-194 — Kotlin (JVM web); stdlib regex + brace scanner.
     "ggoss-kotlin": (sys.executable,
                      _REPO_ROOT / "analyzers" / "ggoss-kotlin" / "src" / "ggoss_kotlin.py"),
+    # PR-195 — tree-sitter multi-language (Go/Rust/Ruby PoC). Needs the
+    # tree-sitter-language-pack package in the interpreter that runs it.
+    "ggoss-treesitter": (sys.executable,
+                         _REPO_ROOT / "analyzers" / "ggoss-treesitter" / "src"
+                         / "ggoss_treesitter.py"),
 }
 
 

@@ -148,6 +148,16 @@ services:
     image: mnemos/ggoss-kotlin:latest
     entrypoint: ["true"]
 
+  # PR-195 — tree-sitter multi-language analyzer (Go/Rust/Ruby PoC).
+  # Has a dependency (tree-sitter-language-pack) — the opt-in breadth path.
+  analyzer-treesitter:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-treesitter
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-treesitter:latest
+    entrypoint: ["true"]
+
   analyzer-sql-mssql:
     profiles: ["analyzers"]
     build:

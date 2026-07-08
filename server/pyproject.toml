@@ -66,6 +66,15 @@ local = [
 search = [
     "pgvector>=0.3",
 ]
+# PR-195 — tree-sitter multi-language analyzer (Go/Rust/Ruby and 100+ more
+# via one config-driven analyzer; the absorption-review T2 breadth path).
+# Optional so the base install and the pure-stdlib analyzers stay
+# dependency-free. ``pip install 'mnemos-platform[analyzers-treesitter]'``.
+# Absent → go/rust/ruby fall back to Claude-Code agent extraction.
+analyzers-treesitter = [
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=1.0",
+]
 # Voice INPUT — speech-to-text on the Ask tab (PR-155/156). Default engine
 # is Moonshine "Flavors of Moonshine" (``moonshine-voice``, MIT): the Korean
 # ``tiny-ko`` flavor is ~26M params, ONNX (no torch), and beats Whisper-tiny

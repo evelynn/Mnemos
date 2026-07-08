@@ -1,0 +1,13 @@
+{
+  "_about": "Hand-curated ground truth for ggoss-treesitter on the Go orders fixture. Mirrors the py/ts fixtures. Update source and this file together.",
+  "symbols": [
+    {"kind": "type",     "name": "Order",         "location": {"file": "orders.go"}},
+    {"kind": "function", "name": "validateOrder", "location": {"file": "orders.go"}},
+    {"kind": "function", "name": "CreateOrder",   "location": {"file": "orders.go"}},
+    {"kind": "function", "name": "ConfirmOrder",  "location": {"file": "orders.go"}}
+  ],
+  "edges": [
+    {"kind": "CALLS", "source": "CreateOrder",  "target": "validateOrder"},
+    {"kind": "CALLS", "source": "ConfirmOrder", "target": "validateOrder"}
+  ]
+}
