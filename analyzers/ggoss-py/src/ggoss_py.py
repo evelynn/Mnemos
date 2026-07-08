@@ -28,9 +28,11 @@ Edge kinds emitted:
                    module calls, False for stdlib/3rd-party.
 
 Limitations (documented honesty, see docs/analyzer-contract.md):
-- Cross-module call resolution is name-based only (no full import
-  graph) — `from a import f; f()` resolves to a's f; `import a;
-  a.f()` doesn't yet. Future PR.
+- Cross-module call resolution is name-based (no full import graph): a
+  callee unresolved within its own file resolves to a *unique* project-wide
+  symbol of that bare name (PR-198). Ambiguous names (2+ project-wide) stay
+  ``extern`` rather than guessing — precision over recall. Import-aware
+  disambiguation of same-named cross-module symbols is future work.
 - No type inference; method binding falls back to receiver-name
   matching.
 - Decorators that wrap functions (Click, FastAPI routes) are
@@ -389,6 +391,14 @@ def _find_node_at(tree: ast.Module, line: int) -> ast.AST:
 
 def cmd_calls(target: Path, out_stream) -> None:
     target = target.resolve()
+    # Pass 1 — parse every module, collect its calls, and build a project-wide
+    # bare-name → symbol-id map. Pre-fix, ``_CallVisitor`` only knew the
+    # *current file's* symbols, so a call to a function/class defined in
+    # another module degraded to ``py:extern`` (the documented cross-module
+    # gap). The global map lets an unresolved-in-file callee resolve to a
+    # unique project-wide symbol of that name.
+    parsed: list[tuple[str, list[_Call]]] = []
+    global_by_name: dict[str, set[str]] = {}
     for path in _iter_py_files(target):
         try:
             src = path.read_text(encoding="utf-8", errors="replace")
@@ -397,20 +407,39 @@ def cmd_calls(target: Path, out_stream) -> None:
             continue
         rel = str(path.resolve())
         symbols = _walk_symbols(tree, rel)
+        for s in symbols:
+            global_by_name.setdefault(s.name, set()).add(s.id)
         visitor = _CallVisitor(rel, symbols)
         visitor.visit(tree)
-        for c in visitor.calls:
-            resolved = c.callee_resolved_id is not None
+        parsed.append((rel, visitor.calls))
+
+    # Pass 2 — emit edges. Cross-module resolution is precision-safe: it only
+    # fires for a callee with exactly ONE project-wide symbol of that bare
+    # name (ambiguous names stay extern rather than guessing wrong).
+    for _rel, calls in parsed:
+        for c in calls:
+            resolved_id = c.callee_resolved_id
+            cross_module = False
+            if resolved_id is None:
+                bare = c.callee_name.rsplit(".", 1)[-1]
+                ids = global_by_name.get(bare, set())
+                if len(ids) == 1:
+                    resolved_id = next(iter(ids))
+                    cross_module = True
+            resolved = resolved_id is not None
+            meta: dict[str, Any] = {
+                "invocation_site": {"line": c.line, "col": c.col},
+                "callee_resolved": resolved,
+            }
+            if cross_module:
+                meta["resolution"] = "cross_module"
             data = {
                 "source_id": c.caller_id,
-                "target_id": c.callee_resolved_id or f"py:extern:{c.callee_name}",
+                "target_id": resolved_id or f"py:extern:{c.callee_name}",
                 "kind": "CALLS",
                 "certainty": "asserted" if resolved else "inferred",
                 "created_by": [_SOURCE_NAME],
-                "metadata": {
-                    "invocation_site": {"line": c.line, "col": c.col},
-                    "callee_resolved": resolved,
-                },
+                "metadata": meta,
             }
             out_stream.write(_envelope("edge", data) + "\n")
 
