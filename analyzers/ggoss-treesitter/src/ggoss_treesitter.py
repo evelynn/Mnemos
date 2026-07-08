@@ -62,6 +62,15 @@ _LANG: dict[str, dict[str, Any]] = {
             "method_declaration": "method",
             "type_spec": "type",
         },
+        # HTTP route registrations → contracts (cross-service linking). Keyed
+        # by the call's method name (lowercased): Gin/Echo/chi router verbs
+        # (r.GET/e.POST/…) carry the method; net/http HandleFunc/Handle don't,
+        # so they default to GET (documented approximation).
+        "routes": {
+            "get": "GET", "post": "POST", "put": "PUT", "delete": "DELETE",
+            "patch": "PATCH", "head": "HEAD", "options": "OPTIONS",
+            "handlefunc": "GET", "handle": "GET",
+        },
     },
     "rust": {
         "exts": (".rs",),
@@ -216,11 +225,20 @@ class _Call:
 
 
 @dataclass
+class _Route:
+    method: str
+    path: str
+    exposer_id: str | None  # enclosing function that registers the route
+    line: int
+
+
+@dataclass
 class _FileParse:
     lang: str
     rel: str
     symbols: list[_Sym]
     calls: list[_Call] = field(default_factory=list)
+    routes: list[_Route] = field(default_factory=list)
 
 
 def _text(src: bytes, node) -> str:
@@ -230,6 +248,23 @@ def _text(src: bytes, node) -> str:
 def _node_name(src: bytes, node) -> str | None:
     nm = node.child_by_field_name("name")
     return _text(src, nm) if nm is not None else None
+
+
+def _first_string_arg(src: bytes, node) -> str | None:
+    """First string-literal argument of a call — the route path in
+    ``r.GET("/owners", h)``. Quotes/backticks stripped; f-strings/dynamic
+    args are ignored (we don't guess a path we can't read)."""
+    args = node.child_by_field_name("arguments")
+    if args is None:
+        return None
+    for c in args.named_children:
+        if "string" in c.type:
+            txt = _text(src, c).strip()
+            for q in ('"', "`", "'"):
+                if txt.startswith(q) and txt.endswith(q) and len(txt) >= 2:
+                    return txt[1:-1]
+            return txt
+    return None
 
 
 def _bare_callee(src: bytes, node, callee_field) -> str | None:
@@ -296,15 +331,23 @@ def _parse_file(path: Path, target: Path) -> _FileParse | None:
     func_types, type_types = cfg["func"], cfg["type"]
     call_types, callee_field = cfg["call"], cfg["callee_field"]
     kinds = cfg["kinds"]
+    routes_cfg = cfg.get("routes") or {}
 
     def walk(node, type_prefix: str, enclosing_func: str | None) -> None:
         nt = node.type
         if nt in call_types:
-            if enclosing_func is not None:
-                callee = _bare_callee(src, node, callee_field)
-                if callee:
+            callee = _bare_callee(src, node, callee_field)
+            if callee:
+                if enclosing_func is not None:
                     fp.calls.append(_Call(enclosing_func, callee,
                                           node.start_point[0] + 1))
+                # HTTP route registration → contract (cross-service linking).
+                verb = routes_cfg.get(callee.lower())
+                if verb:
+                    route = _first_string_arg(src, node)
+                    if route and route.startswith("/"):
+                        fp.routes.append(_Route(
+                            verb, route, enclosing_func, node.start_point[0] + 1))
             for c in node.children:
                 walk(c, type_prefix, enclosing_func)
             return
@@ -419,7 +462,35 @@ def cmd_calls(target: Path, out_stream) -> None:
 
 
 def cmd_contracts(target: Path, out_stream) -> None:
-    del target, out_stream  # per-framework route extraction — future work
+    """HTTP route registrations → contracts, normalized to the same
+    ``http.<METHOD>.<path>`` node a TS fetch / Java handler / HTML form
+    resolves to (cross-service linking). Currently Go frameworks (net/http,
+    Gin, Echo, chi) via the language's ``routes`` config."""
+    if not _ts_available():
+        return
+    target = target.resolve()
+    comp = _component_id(target)
+    for fp in _parse_all(target):
+        seen: set[str] = set()
+        for r in fp.routes:
+            cid = f"http.{r.method}.{r.path}"
+            if cid not in seen:
+                seen.add(cid)
+                out_stream.write(_envelope("contract", {
+                    "id": cid, "kind": "http_endpoint",
+                    "name": f"{r.method} {r.path}",
+                    "spec": {"method": r.method, "path": r.path},
+                    "component_id": comp,
+                    "location": {"file": fp.rel, "line": r.line, "col": 1},
+                    "created_by": [_SOURCE_NAME], "certainty": "inferred",
+                }) + "\n")
+            if r.exposer_id is not None:
+                out_stream.write(_envelope("edge", {
+                    "source_id": r.exposer_id, "target_id": cid,
+                    "kind": "EXPOSES", "certainty": "inferred",
+                    "created_by": [_SOURCE_NAME],
+                    "metadata": {"framework": "go_http", "line": r.line},
+                }) + "\n")
 
 
 def cmd_data_access(target: Path, out_stream) -> None:
@@ -432,8 +503,8 @@ def cmd_schema() -> dict[str, Any]:
         "languages": sorted(_LANG),
         "symbol_kinds": ["function", "method", "struct", "class", "enum",
                          "interface", "module", "type"],
-        "edge_kinds": ["CALLS"],
-        "record_types": ["symbol", "edge"],
+        "edge_kinds": ["CALLS", "EXPOSES"],
+        "record_types": ["symbol", "edge", "contract"],
         "backend": "tree-sitter-language-pack",
     }
 

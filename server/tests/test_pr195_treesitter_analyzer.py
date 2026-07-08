@@ -105,6 +105,47 @@ def test_extensibility_rust_and_ruby_same_analyzer(tmp_path: Path) -> None:
     assert any(k == "method" and n == "save" for k, n in rbsyms)
 
 
+_GO_ROUTES = """\
+package main
+
+import "net/http"
+
+func setupRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/owners", listOwners)
+	r := gin.Default()
+	r.GET("/api/owners/:id", getOwner)
+	r.POST("/api/owners", createOwner)
+}
+
+func listOwners(w http.ResponseWriter, req *http.Request) {}
+func getOwner(c *gin.Context) {}
+func createOwner(c *gin.Context) {}
+"""
+
+
+def test_go_routes_become_cross_service_contracts(tmp_path: Path) -> None:
+    from app.merge.contract_id import http_contract_id
+
+    d = _write(tmp_path / "goroutes", "server.go", _GO_ROUTES)
+    records = _run("contracts", d)
+    contracts = [r["data"] for r in records if r["record_type"] == "contract"]
+    specs = {(c["spec"]["method"], c["spec"]["path"]) for c in contracts}
+
+    # Gin verb methods + net/http HandleFunc (defaults GET).
+    assert ("POST", "/api/owners") in specs
+    assert ("GET", "/api/owners") in specs
+    assert ("GET", "/api/owners/:id") in specs
+    assert all(c["kind"] == "http_endpoint" for c in contracts)
+    # Cross-service: a TS fetch / Java handler on POST /api/owners lands on the
+    # SAME normalized node this Go route produces.
+    ids = {http_contract_id(c["spec"]["method"], c["spec"]["path"])
+           for c in contracts}
+    assert http_contract_id("POST", "/api/owners") in ids
+    # The registrar EXPOSES the route.
+    assert any(r["record_type"] == "edge" and r["data"]["kind"] == "EXPOSES"
+               for r in records)
+
+
 def test_schema_lists_configured_languages() -> None:
     cp = subprocess.run(
         [sys.executable, str(_TS), "schema"],
