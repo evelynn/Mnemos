@@ -1,0 +1,16 @@
+{
+  "_about": "Hand-curated ground truth for ggoss-cpp on the orders fixture. Mirrors the py/ts fixtures. Update this file and orders.c together.",
+  "symbols": [
+    {"kind": "struct",   "name": "order",          "location": {"file": "orders.c"}},
+    {"kind": "enum",     "name": "order_status",   "location": {"file": "orders.c"}},
+    {"kind": "function", "name": "validate_order", "location": {"file": "orders.c"}},
+    {"kind": "function", "name": "order_add",      "location": {"file": "orders.c"}},
+    {"kind": "function", "name": "create_order",   "location": {"file": "orders.c"}},
+    {"kind": "function", "name": "cancel_order",   "location": {"file": "orders.c"}}
+  ],
+  "edges": [
+    {"kind": "CALLS", "source": "order_add",    "target": "validate_order"},
+    {"kind": "CALLS", "source": "create_order", "target": "order_add"},
+    {"kind": "CALLS", "source": "cancel_order", "target": "validate_order"}
+  ]
+}
