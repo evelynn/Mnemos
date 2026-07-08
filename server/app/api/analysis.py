@@ -364,6 +364,17 @@ async def graph_component_map(
         # PR-25 OTLP Tier 2 marks live edges/nodes with this flag.
         return str((data or {}).get("exercised", "")).lower() == "true"
 
+    # PR-196 — the reconcile marks CALLS *edges* exercised, not nodes, so a
+    # node-only check showed every symbol as dead. A symbol is exercised when
+    # its own flag is set OR any incident (visible) edge is exercised —
+    # consistent with findings._subject_is_exercised. Derived from edge_rows
+    # (no extra query); reflects the exercised edges actually drawn.
+    exercised_node_ids: set[str] = set()
+    for e in edge_rows:
+        if _exercised(e.data or {}):
+            exercised_node_ids.add(e.source_id)
+            exercised_node_ids.add(e.target_id)
+
     return {
         "nodes": [
             {
@@ -371,7 +382,7 @@ async def graph_component_map(
                 "kind": n.kind,
                 "label": _label(n),
                 "certainty": n.certainty,
-                "exercised": _exercised(n.data or {}),
+                "exercised": _exercised(n.data or {}) or n.id in exercised_node_ids,
                 "confirmed": _confirmation_action(n.data or {}),
             }
             for n in nodes

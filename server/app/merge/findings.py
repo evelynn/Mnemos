@@ -44,9 +44,19 @@ async def _blast_radius(
 async def _subject_is_exercised(
     session: AsyncSession, project_id: uuid.UUID, subject_node_id: str | None
 ) -> bool:
-    """True iff the subject node carries the OTLP ``exercised`` flag
-    (PR-25 Tier 2). A finding on a live production path outranks one
-    on apparently-dead code."""
+    """True iff the subject symbol lies on a live production path (PR-25
+    Tier 2). A finding on an exercised path outranks one on apparently-dead
+    code.
+
+    A symbol counts as exercised when EITHER the node itself carries the
+    ``exercised`` flag (seed / direct marking) OR any CALLS edge incident to
+    it does. The Tier-2 reconcile (``merge/runtime.py``) marks *edges*
+    exercised from OTLP traces — never nodes — so the original node-only
+    check returned False for every trace-derived hit, silently dropping the
+    exercised risk multiplier for node-subject findings. This aligns the
+    read with where runtime writes the flag (and with
+    ``queries.impact_analysis``, which also derives node exercised-ness from
+    incident edges)."""
     if subject_node_id is None:
         return False
     node = (
@@ -58,9 +68,25 @@ async def _subject_is_exercised(
             )
         )
     ).scalar_one_or_none()
-    if node is None:
-        return False
-    return str((node.data or {}).get("exercised", "")).lower() == "true"
+    if node is not None and str((node.data or {}).get("exercised", "")).lower() == "true":
+        return True
+    # Runtime marks CALLS edges exercised, not nodes — a symbol is exercised
+    # if any observed production call goes into or out of it.
+    edge_hit = (
+        await session.execute(
+            select(Edge.id)
+            .where(
+                Edge.project_id == project_id,
+                Edge.kind == "CALLS",
+                Edge.valid_to.is_(None),
+                (Edge.source_id == subject_node_id)
+                | (Edge.target_id == subject_node_id),
+                Edge.data["exercised"].astext == "true",
+            )
+            .limit(1)
+        )
+    ).first()
+    return edge_hit is not None
 
 
 async def _upsert_finding(
