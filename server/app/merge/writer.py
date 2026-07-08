@@ -21,23 +21,33 @@ async def upsert_node(
     data: dict[str, Any],
     certainty: str,
     source_name: str,
+    skip_close: bool = False,
 ) -> None:
     """Supersede any currently-valid node row for this (project, node_id) and
     insert a fresh one. The previous row is kept for snapshot history.
+
+    ``skip_close`` omits the supersede-UPDATE. Callers set it ONLY when they
+    can guarantee no currently-valid row exists for this id — the analyzer
+    ingest of a fresh (empty) graph, where every UPDATE would match zero rows.
+    On a large first pass this halves the write statements (PR-200). Passing it
+    when a current row *does* exist would leave a duplicate current version, so
+    the default is False and the ingest path gates it on the graph being empty
+    AND the id not already written this run.
     """
     now = datetime.now(tz=timezone.utc)
 
-    await session.execute(
-        update(Node)
-        .where(
-            and_(
-                Node.project_id == project_id,
-                Node.id == node_id,
-                Node.valid_to.is_(None),
+    if not skip_close:
+        await session.execute(
+            update(Node)
+            .where(
+                and_(
+                    Node.project_id == project_id,
+                    Node.id == node_id,
+                    Node.valid_to.is_(None),
+                )
             )
+            .values(valid_to=now)
         )
-        .values(valid_to=now)
-    )
 
     session.add(
         Node(
@@ -68,25 +78,31 @@ async def upsert_edge(
     data: dict[str, Any],
     certainty: str,
     source_name: str,
+    skip_close: bool = False,
 ) -> None:
     """Close the currently-valid edge of the same (source, target, kind) and
     insert a new one. Multi-source merge arrives in Week 3.
+
+    ``skip_close`` — see :func:`upsert_node`. Same fresh-graph fast path
+    (PR-200): omit the supersede-UPDATE when no current edge of this identity
+    can exist. Default False.
     """
     now = datetime.now(tz=timezone.utc)
 
-    await session.execute(
-        update(Edge)
-        .where(
-            and_(
-                Edge.project_id == project_id,
-                Edge.source_id == source_id,
-                Edge.target_id == target_id,
-                Edge.kind == kind,
-                Edge.valid_to.is_(None),
+    if not skip_close:
+        await session.execute(
+            update(Edge)
+            .where(
+                and_(
+                    Edge.project_id == project_id,
+                    Edge.source_id == source_id,
+                    Edge.target_id == target_id,
+                    Edge.kind == kind,
+                    Edge.valid_to.is_(None),
+                )
             )
+            .values(valid_to=now)
         )
-        .values(valid_to=now)
-    )
 
     session.add(
         Edge(

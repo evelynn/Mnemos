@@ -103,13 +103,37 @@ async def _record_payload(
     payload: dict[str, Any],
     accept_kinds: set[str],
     totals: dict[str, int],
+    fresh: bool = False,
+    seen_nodes: set[str] | None = None,
+    seen_edges: set[tuple[str, str, str]] | None = None,
 ) -> None:
-    """Apply one analyzer JSON record if its record_type is in ``accept_kinds``."""
+    """Apply one analyzer JSON record if its record_type is in ``accept_kinds``.
+
+    ``fresh`` (PR-200) — the project graph was empty when the run started, so
+    the supersede-UPDATE in ``upsert_*`` matches zero rows and can be skipped.
+    ``seen_nodes``/``seen_edges`` guard the ONE exception: an id emitted twice
+    in the same run (e.g. the ``http.<M>.<path>`` contract node both a Java
+    handler and an HTML form produce) — the second write must supersede the
+    first, so only the *first* occurrence skips the close. Omit the sets to
+    disable the fast path (cold/re-analysis paths keep normal upserts).
+    """
     record_type = payload.get("record_type")
     if record_type not in accept_kinds:
         return
     data = payload.get("data", {}) or {}
     source_name = payload.get("source_name", "unknown")
+
+    def _node_skip(nid: str) -> bool:
+        if not fresh or seen_nodes is None or nid in seen_nodes:
+            return False
+        seen_nodes.add(nid)
+        return True
+
+    def _edge_skip(key: tuple[str, str, str]) -> bool:
+        if not fresh or seen_edges is None or key in seen_edges:
+            return False
+        seen_edges.add(key)
+        return True
 
     if record_type == "symbol":
         node_id = data.get("id")
@@ -123,6 +147,7 @@ async def _record_payload(
             data=data,
             certainty=data.get("certainty", "asserted"),
             source_name=source_name,
+            skip_close=_node_skip(node_id),
         )
         totals["symbols"] += 1
     elif record_type == "contract":
@@ -143,6 +168,7 @@ async def _record_payload(
             data=data,
             certainty=data.get("certainty", "inferred"),
             source_name=source_name,
+            skip_close=_node_skip(node_id),
         )
         totals["contracts"] += 1
     elif record_type == "data_entity":
@@ -161,6 +187,7 @@ async def _record_payload(
             data=data,
             certainty=data.get("certainty", "verified"),
             source_name=source_name,
+            skip_close=_node_skip(node_id),
         )
         totals["data_entities"] = totals.get("data_entities", 0) + 1
     elif record_type == "edge":
@@ -187,6 +214,7 @@ async def _record_payload(
             data=data.get("metadata", {}) or {},
             certainty=data.get("certainty", "asserted"),
             source_name=source_name,
+            skip_close=_edge_skip((src, tgt, kind)),
         )
         totals["edges"] += 1
 
@@ -203,6 +231,31 @@ _VERB_ACCEPT = {
 }
 
 
+async def _graph_is_empty(
+    session: AsyncSession, project_id: uuid.UUID
+) -> bool:
+    """True when the project has no current node AND no current edge. Only then
+    is the fresh-graph write fast path (PR-200) safe — every supersede-UPDATE
+    would match zero rows."""
+    node = (
+        await session.execute(
+            select(Node.id)
+            .where(Node.project_id == project_id, Node.valid_to.is_(None))
+            .limit(1)
+        )
+    ).first()
+    if node is not None:
+        return False
+    edge = (
+        await session.execute(
+            select(Edge.id)
+            .where(Edge.project_id == project_id, Edge.valid_to.is_(None))
+            .limit(1)
+        )
+    ).first()
+    return edge is None
+
+
 async def _run_analyzer_stage(
     bus: ProgressBus,
     project_id: uuid.UUID,
@@ -212,6 +265,9 @@ async def _run_analyzer_stage(
     path: str,
     position: int,
     totals: dict[str, int],
+    fresh: bool = False,
+    seen_nodes: set[str] | None = None,
+    seen_edges: set[tuple[str, str, str]] | None = None,
 ) -> None:
     """One analyser verb (e.g. 'symbols' for 'csharp') as a tracked stage."""
     runner = runner_for(language)
@@ -251,6 +307,9 @@ async def _run_analyzer_stage(
                     payload=rec.payload,
                     accept_kinds=accept,
                     totals=totals,
+                    fresh=fresh,
+                    seen_nodes=seen_nodes,
+                    seen_edges=seen_edges,
                 )
                 after = sum(totals.values())
                 if after > before:
@@ -663,6 +722,19 @@ async def run_ingest(
     }
     position = 0
 
+    # PR-200 — fresh-graph write fast path. When the project's current graph is
+    # empty, the supersede-UPDATE in every upsert matches zero rows; skipping it
+    # roughly halves the write statements on a large first pass (measured: the
+    # cpp calls stage was ~93% DB-ingest, docs/04-eval/throughput-analysis-
+    # 2026-07-08.md). Guarded per-run by seen-sets so an id emitted twice (e.g.
+    # a contract node both Java and HTML produce) still supersedes correctly.
+    fresh_graph = False
+    seen_nodes: set[str] = set()
+    seen_edges: set[tuple[str, str, str]] = set()
+    if scope != "continuation":
+        async with SessionLocal() as session:
+            fresh_graph = await _graph_is_empty(session, project_id)
+
     try:
         if scope != "continuation":
             # Stages L0: per-language, per-verb extraction. Two languages can
@@ -690,7 +762,9 @@ async def run_ingest(
                             })
                         continue
                     await _run_analyzer_stage(
-                        bus, project_id, run_id, language, verb, path, position, totals
+                        bus, project_id, run_id, language, verb, path, position,
+                        totals, fresh=fresh_graph, seen_nodes=seen_nodes,
+                        seen_edges=seen_edges,
                     )
 
             # Stage L0-Agent: delegate extraction to the operator's Claude
