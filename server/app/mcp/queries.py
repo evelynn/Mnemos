@@ -1194,6 +1194,40 @@ async def compare_runs(
         )
     ).scalars().all()
 
+    # Change blast radius — who called the changed / removed symbols in the
+    # BEFORE graph. Those callers are what a reviewer must re-check. This is
+    # the analysis+comparison fusion (what changed AND what it affects) that a
+    # history-less tool cannot produce.
+    changed_targets = list(modified_ids | removed_ids)[:200]
+    change_impact: list[dict[str, Any]] = []
+    if changed_targets:
+        caller_rows = (
+            await session.execute(
+                select(Edge.source_id, Edge.target_id)
+                .where(
+                    Edge.project_id == project_id,
+                    Edge.kind == "CALLS",
+                    _live_at(Edge, t_a),
+                    Edge.target_id.in_(changed_targets),
+                )
+                .limit(2000)
+            )
+        ).all()
+        by_target: dict[str, list[str]] = {}
+        for src, tgt in caller_rows:
+            by_target.setdefault(tgt, []).append(src)
+        change_impact = [
+            {
+                "changed_symbol": tgt,
+                "change_kind": "removed" if tgt in removed_ids else "modified",
+                "affected_callers": callers[:10],
+                "affected_count": len(callers),
+            }
+            for tgt, callers in sorted(
+                by_target.items(), key=lambda kv: -len(kv[1])
+            )
+        ][:limit]
+
     return {
         "before": {"run_id": str(run_a.id), "git_sha": run_a.git_sha,
                    "at": t_a.isoformat()},
@@ -1209,6 +1243,7 @@ async def compare_runs(
             for f in new_findings
         ],
         "new_findings_count": len(new_findings),
+        "change_impact": change_impact,
         "summary": {
             "symbols_added": _section("Symbol")["added_count"],
             "symbols_removed": _section("Symbol")["removed_count"],
@@ -1218,6 +1253,7 @@ async def compare_runs(
             "contracts_changed": (_section("Contract")["added_count"]
                                   + _section("Contract")["removed_count"]),
             "new_findings": len(new_findings),
+            "impacted_callers": sum(c["affected_count"] for c in change_impact),
         },
         "note": "certainty preserved per change; older run is 'before'. "
                 "Bitemporal diff — a re-indexing tool without history cannot "

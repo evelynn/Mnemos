@@ -76,6 +76,11 @@ async def seeded():
                    target_id="sym:added", kind="CALLS", data={},
                    certainty="asserted", created_by=["t"],
                    valid_from=_T_ADD, valid_to=None))      # edge added
+        # sym:keep called the modified symbol in the BEFORE graph → blast radius.
+        s.add(Edge(id=uuid.uuid4(), project_id=pid, source_id="sym:keep",
+                   target_id="sym:modified", kind="CALLS", data={},
+                   certainty="asserted", created_by=["t"],
+                   valid_from=_BASE, valid_to=None))
         s.add(Finding(id=uuid.uuid4(), project_id=pid, kind="schema_mismatch",
                       severity="warning", status="open",
                       subject_node_id="sym:added", detail={}, risk_score=50,
@@ -118,6 +123,19 @@ async def test_edge_delta_and_new_findings(seeded):
     assert diff["summary"]["edges_added"] == 1
     assert diff["new_findings_count"] == 1
     assert diff["new_findings"][0]["kind"] == "schema_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_change_impact_shows_affected_callers(seeded):
+    """The analysis+comparison fusion: who called a changed symbol (blast
+    radius) — what a reviewer must re-check. cbm cannot produce this."""
+    s, pid, run_a, run_b = seeded
+    diff = await compare_runs(s, project_id=pid, run_a_id=run_a, run_b_id=run_b)
+    impact = {c["changed_symbol"]: c for c in diff["change_impact"]}
+    assert "sym:modified" in impact
+    assert "sym:keep" in impact["sym:modified"]["affected_callers"]
+    assert impact["sym:modified"]["change_kind"] == "modified"
+    assert diff["summary"]["impacted_callers"] >= 1
 
 
 @pytest.mark.asyncio
