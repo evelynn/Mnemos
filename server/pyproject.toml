@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mnemos-platform"
-version = "0.1.0"
+version = "0.7.0"
 description = "Knowledge Production Platform — server"
 requires-python = ">=3.12"
 dependencies = [
