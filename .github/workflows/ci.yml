@@ -141,7 +141,9 @@ jobs:
       - name: Load image
         run: docker load -i /tmp/platform.tar
       - name: Trivy SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@0.24.0
+        # v0.36.0, pinned to the immutable release commit.  Aqua's 2026
+        # incident guidance explicitly recommends full-SHA action pins.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: image
           image-ref: mnemos-platform:ci
@@ -153,7 +155,8 @@ jobs:
           name: sbom
           path: sbom.cdx.json
       - name: Trivy vulnerability scan (fail on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.24.0
+        # v0.36.0 -- keep this in lockstep with the SBOM invocation above.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: image
           image-ref: mnemos-platform:ci

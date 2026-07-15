@@ -10,8 +10,10 @@ revisions.
 
 This is an implementation/evidence checkpoint, **not a production-qualification
 claim**. The highest recorded evidence level for the combined change is E2.
-Real PostgreSQL CI for this branch, hard-kill fault injection, a 50 K-file
-representative soak, and a live-provider canary have not been run.
+PostgreSQL 16/Redis 7 CI and the production container build have run for this
+branch. Hard-kill fault injection, a 50 K-file representative soak, and a
+live-provider canary have not been run, so E3 is only partially satisfied and
+the highest fully satisfied combined level remains E2.
 
 The earlier [Phase-A report](atomic-graph-publication-phase-a-2026-07-15.md) is
 a historical design checkpoint. The current delivered architecture is in
@@ -167,14 +169,15 @@ They are not a general product score.
 | E0 — static contract | **Pass, local** | Model/migration constraints, state invariants, lint/compile and diff checks for the implemented boundary; this does not execute a service-backed workflow |
 | E1 — unit behavior | **Pass, local** | Stage isolation, write-once seal, base-generation conflict, idempotent replay, invalid lifecycle combinations, overlay materialization, identity-map refresh, and revision/currentness checks |
 | E2 — mock/offline integration | **Pass, local** | SQLite integration, mock worker/provider/reader concurrency, structured-flow replay, and offline PostgreSQL SQL compilation across focused publication, overlay, lifecycle, source-reader, finding, summary, flow, artifact, and comparison suites |
-| E3 — live boundary canary | **Not run** | No recorded real PostgreSQL/Redis CI run for the combined branch, hard process-kill/restart exercise, or live-provider canary |
+| E3 — live boundary canary | **Partial, CI** | [CI run 29425571596](https://github.com/evelynn/Mnemos/actions/runs/29425571596) passed PostgreSQL 16, Redis 7, Alembic upgrade/downgrade/upgrade, .NET and TypeScript analyzer builds, 2,313 pytest cases (20 skipped), 29 integration-test collection checks, 76 PR-138 real-execution collection checks, and the production Docker build. Hard process-kill/restart and a live-provider canary remain unrun, so this is not a full E3 pass. |
 | E4 — representative workflow | **Not run** | No current-build 50 K-file representative repository soak, production-like upgrade rehearsal, or end-to-end measured provider/consumer workflow |
 
 Focused local suites include the graph-publication Phase-A/Phase-B red-team,
 graph-overlay, publication-lifecycle, MCP/current-reader, source-snapshot,
 summary/finding-currentness, flow-contract, artifact, and run-comparison tests.
-Their names are stable evidence pointers; this report intentionally does not
-freeze a test count or claim a final full-suite/CI total.
+Their names are stable evidence pointers. The exact service-backed count above
+is tied to the linked immutable CI run rather than presented as a permanent
+suite-size claim.
 
 ## 8. Remaining limitations
 
