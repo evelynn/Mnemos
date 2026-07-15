@@ -12,10 +12,11 @@ Design notes:
   ``before`` so a force-push that re-uses an old ``after`` SHA (e.g. a
   revert-of-revert) still creates a fresh job instead of being eaten by
   ARQ's dedup window.
-* Per-branch jobs ride a dedicated ``_queue_name`` so a worker only
-  processes one push for a given branch at a time. This preserves the
-  user-visible ordering "the analysis you see is the one for the latest
-  push you sent on this branch".
+* Jobs use the worker's fixed queue.  Dynamic queue names are not discovered
+  by ARQ workers and previously left every webhook run permanently queued.
+  The worker is deliberately single-job until project-scoped locking exists.
+* Only the project's configured default-branch ref is indexed. Mixing feature
+  branch pushes into one current graph would flap facts and multiply load.
 * MR open / merge events are *not* enqueued from here. Once the MR is
   merged the resulting commit shows up as a push to the target branch,
   which we already handle. Pre-merge "preview" analyses are out of
@@ -24,9 +25,12 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -34,6 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
+from app.config import get_settings
 from app.db import get_session
 from app.models.auth import PlatformSetting
 from app.models.graph import AnalysisRun
@@ -41,6 +46,7 @@ from app.models.projects import Project
 from app.orchestrator.queue import get_queue
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+log = logging.getLogger(__name__)
 
 _SETTING_KEY = "gitlab_webhook_secret"
 # Label used when storing the GitLab webhook secret in the encrypted
@@ -58,21 +64,32 @@ async def _secret(db: AsyncSession) -> str | None:
     from app.models.auth import Secret
     from app.safety.crypto import decrypt
 
-    enc = (
-        await db.execute(select(Secret).where(Secret.label == _SECRET_LABEL))
-    ).scalar_one_or_none()
-    if enc is not None:
+    encrypted_rows = (
+        await db.execute(
+            select(Secret)
+            .where(
+                Secret.label == _SECRET_LABEL,
+                Secret.organization_id.is_(None),
+            )
+            .limit(2)
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    # Only platform-owned legacy rows are authoritative. Tenant-owned rows
+    # using the reserved label are ignored even if they predate the CRUD
+    # guard, and an ambiguous platform state fails closed.
+    if len(encrypted_rows) > 1:
+        log.error("multiple platform GitLab webhook secrets; refusing webhook auth")
+        return None
+    if encrypted_rows:
+        enc = encrypted_rows[0]
         try:
             return decrypt(enc.ciphertext, enc.iv)
         except Exception:  # noqa: BLE001
-            # A failed decrypt is a configuration problem — log loud
-            # but don't crash the receiver. Falls through to the
-            # legacy PlatformSetting path so a bad rotation doesn't
-            # silently strand all webhook traffic.
-            import logging
-            logging.getLogger(__name__).exception(
-                "gitlab_webhook_secret decrypt failed"
-            )
+            # A configured encrypted secret that cannot decrypt is ambiguous
+            # authority. Do not silently fall back to plaintext legacy state.
+            log.exception("gitlab_webhook_secret decrypt failed")
+            return None
 
     row = (
         await db.execute(
@@ -122,14 +139,11 @@ def _job_id(project_id: uuid.UUID, before: str, after: str, ref: str) -> str:
     return "webhook:" + hashlib.sha256(raw).hexdigest()
 
 
-def _queue_name(project_id: uuid.UUID, ref: str) -> str:
-    """Per-branch serialization queue.
-
-    A single worker dequeues from this name at most once at a time so
-    two near-simultaneous pushes on the same branch don't race each
-    other and clobber an in-flight analysis run's outputs.
-    """
-    return f"ingest:{project_id}:{ref}"
+def _default_branch_ref(default_branch: str) -> str:
+    branch = default_branch.strip()
+    if branch.startswith("refs/heads/"):
+        return branch
+    return f"refs/heads/{branch}"
 
 
 @router.post("/gitlab")
@@ -158,6 +172,10 @@ async def gitlab_webhook(
     body = await request.json()
     object_kind = body.get("object_kind")
     project_path = (body.get("project") or {}).get("path_with_namespace")
+    ref: str | None = None
+    default_branch_ref: str | None = None
+    before: str | None = None
+    after: str | None = None
 
     enqueued: dict[str, Any] | None = None
     # For a push event that fails to enqueue, this records *why* — a
@@ -174,43 +192,90 @@ async def gitlab_webhook(
         before = str(body.get("before") or "")
         after = str(body.get("after") or "")
         ref = str(body.get("ref") or "")
+        if project is not None:
+            default_branch_ref = _default_branch_ref(project.default_branch)
         if project is None:
             skip_reason = "project_not_registered"
         elif not after or not ref:
             skip_reason = "malformed_push_payload"
-        if project is not None and after and ref:
+        elif ref != default_branch_ref:
+            # The persisted graph represents the configured default branch.
+            # Enqueuing feature-branch pushes would make current facts flap
+            # between unrelated histories and multiply load during bursts.
+            skip_reason = "non_default_branch"
+        elif not get_settings().source_mirror_root.strip():
+            skip_reason = "source_mirror_not_configured"
+        if project is not None and after and ref and skip_reason is None:
+            job_id = _job_id(project.id, before, after, ref)
             run = AnalysisRun(
+                id=uuid.uuid4(),
                 project_id=project.id,
                 status="queued",
                 triggered_by=f"webhook:gitlab:{x_gitlab_event_uuid or 'unknown'}",
                 git_sha=after,
                 scope="incremental",
+                stats={
+                    "job_id": job_id,
+                    "queued_mode": "deterministic_index",
+                    "source": "configured_git_mirror",
+                    "webhook_ref": ref,
+                    "default_branch_ref": default_branch_ref,
+                },
             )
             db.add(run)
             await db.commit()
             await db.refresh(run)
 
-            queue = await get_queue()
-            await queue.enqueue_job(
-                "run_ingest",
-                str(project.id),
-                str(run.id),
-                # Webhook-driven runs don't ship a source_path — the worker
-                # checks out the mirror at ``after`` itself.
-                "",
-                {"scope": "incremental", "git_sha": after, "ref": ref},
-                _job_id=_job_id(project.id, before, after, ref),
-                _queue_name=_queue_name(project.id, ref),
-                # Small defer lets the GitLab side flush any post-receive
-                # state before the analyzer mirrors the new commits.
-                _defer_by=5,
-            )
-            enqueued = {
-                "run_id": str(run.id),
-                "ref": ref,
-                "after": after,
-                "before": before,
-            }
+            try:
+                queue = await get_queue()
+                job = await queue.enqueue_job(
+                    "run_ingest",
+                    str(project.id),
+                    str(run.id),
+                    # Webhook-driven runs don't ship a source_path — the worker
+                    # checks out the mirror at ``after`` itself.
+                    "",
+                    {
+                        "scope": "incremental",
+                        "git_sha": after,
+                        "ref": ref,
+                        "summarize": False,
+                        "agent_extract_limit": 0,
+                    },
+                    _job_id=job_id,
+                    # Small defer lets the GitLab side flush any post-receive
+                    # state before the analyzer mirrors the new commits.
+                    _defer_by=5,
+                )
+            except asyncio.CancelledError:
+                run.status = "failed"
+                run.completed_at = datetime.now(tz=timezone.utc)
+                run.error_log = "analysis_enqueue_cancelled"
+                await asyncio.shield(db.commit())
+                raise
+            except Exception as exc:  # noqa: BLE001 — terminalize the row
+                log.exception("webhook analysis enqueue failed run_id=%s", run.id)
+                run.status = "failed"
+                run.completed_at = datetime.now(tz=timezone.utc)
+                run.error_log = f"analysis_enqueue_failed:{type(exc).__name__}"
+                await db.commit()
+                skip_reason = "analysis_enqueue_failed"
+            else:
+                if job is None:
+                    # ARQ refused a duplicate id. Keep an auditable terminal
+                    # row, never a queued ghost with no backing job.
+                    run.status = "cancelled"
+                    run.completed_at = datetime.now(tz=timezone.utc)
+                    run.error_log = "duplicate_webhook_job"
+                    await db.commit()
+                    skip_reason = "duplicate_push"
+                else:
+                    enqueued = {
+                        "run_id": str(run.id),
+                        "ref": ref,
+                        "after": after,
+                        "before": before,
+                    }
 
     # A push that should have enqueued but didn't gets a distinct
     # ``webhook.skipped`` action so an operator can filter the audit
@@ -225,6 +290,10 @@ async def gitlab_webhook(
             "event_uuid": x_gitlab_event_uuid,
             "object_kind": object_kind,
             "project": project_path,
+            "ref": ref,
+            "default_branch_ref": default_branch_ref,
+            "before": before,
+            "after": after,
             "enqueued": enqueued,
             "skip_reason": skip_reason,
         },

@@ -14,9 +14,9 @@ Closes the 13th-round audit's A1 / A4 / A5 / A7 Critical findings:
   refuses any disabled account; the session table is *not* purged
   from here because the cron sweep handles that.
 
-Multi-tenant note: users are scoped by ``organization_id``; the
-listing endpoint only returns users in the caller's org. A future
-P3 follow-up will add multi-org membership.
+Multi-tenant note: users are scoped by an exact, non-NULL
+``organization_id``. Org-less admins have no tenant-management authority.
+A future P3 follow-up may add explicit multi-org membership.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from app.auth.passwords import PasswordPolicyError, hash_password
 from app.auth.rbac import require_admin
 from app.db import get_session
 from app.models.auth import User
+from app.user_scope import UserScopeNotFound, resolve_managed_user
 
 router = APIRouter(tags=["users"])
 
@@ -129,6 +130,24 @@ def _out(u: User) -> UserOut:
         created_at=u.created_at,
         updated_at=u.updated_at,
     )
+
+
+async def _managed_user_in_actor_org(
+    db: AsyncSession,
+    actor: User,
+    user_id: uuid.UUID,
+) -> User:
+    """Lock an exactly same-org user; org-less/cross/missing all 404."""
+
+    try:
+        return await resolve_managed_user(
+            db,
+            actor_organization_id=actor.organization_id,
+            user_id=user_id,
+            for_update=True,
+        )
+    except UserScopeNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +248,8 @@ async def list_users(
     only shows them when the admin explicitly asks for the audit
     history.
     """
+    if user.organization_id is None:
+        return []
     stmt = select(User).where(User.organization_id == user.organization_id)
     if not include_disabled:
         stmt = stmt.where(User.disabled_at.is_(None))
@@ -249,6 +270,11 @@ async def create_user(
     cross-tenant create from this endpoint. Email uniqueness is
     enforced by the DB index; username uniqueness by the column.
     """
+    if actor.organization_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="organization_required",
+        )
     # Pre-flight uniqueness checks for clearer error messages.
     if body.email is not None:
         existing_email = (
@@ -312,11 +338,7 @@ async def change_role(
     * An admin cannot demote themselves — otherwise the org could
       end up with zero admins (recoverable only via CLI).
     """
-    target = (
-        await db.execute(select(User).where(User.id == user_id))
-    ).scalar_one_or_none()
-    if target is None or target.organization_id != actor.organization_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    target = await _managed_user_in_actor_org(db, actor, user_id)
     if target.id == actor.id and body.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -346,11 +368,7 @@ async def disable_user(
 
     Same org-isolation + self-disable guard as ``change_role``.
     """
-    target = (
-        await db.execute(select(User).where(User.id == user_id))
-    ).scalar_one_or_none()
-    if target is None or target.organization_id != actor.organization_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    target = await _managed_user_in_actor_org(db, actor, user_id)
     if target.id == actor.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -383,11 +401,7 @@ async def enable_user(
     """Re-enable a soft-deleted user. Useful when an account was
     disabled on suspicion and the suspicion turned out to be a
     false alarm; cheaper than reissuing credentials."""
-    target = (
-        await db.execute(select(User).where(User.id == user_id))
-    ).scalar_one_or_none()
-    if target is None or target.organization_id != actor.organization_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    target = await _managed_user_in_actor_org(db, actor, user_id)
     if target.disabled_at is not None:
         target.disabled_at = None
         await db.commit()

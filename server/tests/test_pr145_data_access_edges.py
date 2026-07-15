@@ -37,7 +37,11 @@ def test_code_data_access_becomes_reads_writes_edges_to_data_entities():
     assert ("WRITES", "data:orders") in kinds, "bare table name -> data: id"
     assert ("READS", "data:customers") in kinds, "already-prefixed id kept"
     # data-access edge from a symbol not extracted in this file is dropped
-    assert all(e["data"]["source_id"] == "python:h.py::handle" for e in edges)
+    assert all(
+        e["data"]["source_id"].startswith("agent-symbol:python:")
+        for e in edges
+    )
+    assert all(e["data"]["source_id"] != "python:h.py::handle" for e in edges)
     assert all(e["data"]["certainty"] == "inferred" for e in edges)
 
 

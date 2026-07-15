@@ -2007,8 +2007,8 @@
     "Copy link": "링크 복사",
     "Link copied.": "링크가 복사되었습니다.",
     "Password": "비밀번호",
-    "Enter your username. If an account exists, an admin will receive a reset link to share with you. The platform never sends the token by email automatically.":
-      "사용자명을 입력하세요. 계정이 존재하면 관리자가 재설정 링크를 받아 공유합니다. 플랫폼은 이메일을 자동 발송하지 않습니다.",
+    "Enter your username. This installation has no secure password-reset delivery channel, so no reset credential will be issued. Contact an administrator to recover access.":
+      "사용자명을 입력하세요. 이 설치에는 안전한 비밀번호 재설정 전달 채널이 없으므로 재설정 자격 증명을 발급하지 않습니다. 접근 복구는 관리자에게 문의하세요.",
     "Pick a new password. Minimum 12 characters with at least one letter and one digit.":
       "새 비밀번호를 선택하세요. 최소 12자, 영문자 + 숫자 각 1개 이상.",
     "Choose a username and password to finish setting up your account.":
@@ -2022,8 +2022,8 @@
     "Password updated. You can now sign in with the new password.":
       "비밀번호가 변경되었습니다. 새 비밀번호로 로그인할 수 있습니다.",
     "Account created. Redirecting to sign in…": "계정이 생성되었습니다. 로그인 페이지로 이동합니다…",
-    "If the account exists, an admin can now retrieve a reset token from the audit log.":
-      "계정이 존재한다면 관리자가 감사 로그에서 재설정 토큰을 받을 수 있습니다.",
+    "If the account exists, contact an administrator to recover access. No reset credential was issued.":
+      "계정이 존재한다면 접근 복구는 관리자에게 문의하세요. 재설정 자격 증명은 발급되지 않았습니다.",
     // PR-47 — Phase 4 polish.
     "Session expired. Redirecting to sign in…": "세션이 만료되었습니다. 로그인 페이지로 이동합니다…",
     "Export CSV": "CSV 내보내기",
@@ -2331,8 +2331,6 @@
       "소스 루트 (심화 분석 활성화)",
     "The state machine each plan moves through. Reject feedback loops back to draft so the author can revise. Regenerate re-opens the plan for the analyser to redraft from scratch.":
       "각 계획이 거치는 상태 기계입니다. Reject 의 피드백은 초안으로 되돌아가 작성자가 수정하게 하고, Regenerate 는 분석기가 처음부터 다시 작성하도록 계획을 다시 엽니다.",
-    "Token issued. Ask an admin to send it to you, or open the reset link directly:":
-      "토큰이 발급되었습니다. 관리자에게 전달을 요청하거나, 재설정 링크를 직접 여세요:",
     "Trace as a process (FE→BE→DB)":
       "프로세스로 추적 (FE→BE→DB)",
     "Traced":

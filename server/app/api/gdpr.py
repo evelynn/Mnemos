@@ -30,8 +30,27 @@ from app.auth.rbac import require_admin
 from app.db import get_session
 from app.models.audit import AuditLog
 from app.models.auth import ApiKey, User
+from app.user_scope import UserScopeNotFound, resolve_managed_user
 
 router = APIRouter(prefix="/api/v1/gdpr", tags=["gdpr"])
+
+
+async def _gdpr_user_in_actor_org(
+    db: AsyncSession,
+    actor: User,
+    user_id: uuid.UUID,
+    *,
+    for_update: bool = False,
+) -> User:
+    try:
+        return await resolve_managed_user(
+            db,
+            actor_organization_id=actor.organization_id,
+            user_id=user_id,
+            for_update=for_update,
+        )
+    except UserScopeNotFound as exc:
+        raise HTTPException(status_code=404, detail="not_found") from exc
 
 
 @router.get("/users/{user_id}/export")
@@ -40,11 +59,7 @@ async def export_user(
     db: AsyncSession = Depends(get_session),
     actor: User = Depends(require_admin),
 ) -> dict[str, Any]:
-    user = (
-        await db.execute(select(User).where(User.id == user_id))
-    ).scalar_one_or_none()
-    if user is None:
-        raise HTTPException(status_code=404, detail="not_found")
+    user = await _gdpr_user_in_actor_org(db, actor, user_id)
 
     api_keys = (
         await db.execute(select(ApiKey).where(ApiKey.user_id == user_id))
@@ -83,7 +98,7 @@ async def export_user(
                 "id": str(a.id),
                 "action": a.action,
                 "target": a.target,
-                "created_at": a.created_at.isoformat() if a.created_at else None,
+                "created_at": a.occurred_at.isoformat() if a.occurred_at else None,
                 "details": a.details,
             }
             for a in audit_entries
@@ -97,11 +112,12 @@ async def erase_user(
     db: AsyncSession = Depends(get_session),
     actor: User = Depends(require_admin),
 ) -> dict[str, Any]:
-    user = (
-        await db.execute(select(User).where(User.id == user_id))
-    ).scalar_one_or_none()
-    if user is None:
-        raise HTTPException(status_code=404, detail="not_found")
+    user = await _gdpr_user_in_actor_org(
+        db,
+        actor,
+        user_id,
+        for_update=True,
+    )
 
     # Refuse to self-delete — an admin locking themselves out mid-session
     # is the kind of accident that should never happen in one click.
@@ -117,7 +133,7 @@ async def erase_user(
         .values(actor=redacted_actor, details=None)
     )
     await db.execute(delete(ApiKey).where(ApiKey.user_id == user_id))
-    await db.execute(delete(User).where(User.id == user_id))
+    await db.delete(user)
     await db.commit()
 
     await audit_record(

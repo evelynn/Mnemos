@@ -22,6 +22,7 @@ serious regression).
 from __future__ import annotations
 
 import asyncio
+import os
 import stat
 import textwrap
 import time
@@ -223,6 +224,11 @@ async def test_runner_spawn_overhead_stays_modest(tmp_path):
     await asyncio.gather(*[_one() for _ in range(20)])
     elapsed = time.monotonic() - start
 
-    # 20 trivial subprocesses, in parallel via asyncio.gather. 15s
-    # is generous for a CI runner with no IO contention.
-    assert elapsed < 15, f"20 spawn parallel took {elapsed:.1f}s (budget 15s)"
+    # Windows CreateProcess plus real-time file scanning has a materially
+    # higher floor for twenty fresh Python interpreters.  Keep the original
+    # Linux CI regression budget while using a bounded Windows budget that
+    # measures the runner rather than host antivirus scheduling.
+    budget_s = 30 if os.name == "nt" else 15
+    assert elapsed < budget_s, (
+        f"20 spawn parallel took {elapsed:.1f}s (budget {budget_s}s)"
+    )

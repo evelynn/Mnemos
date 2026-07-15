@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import sys
 import uuid
 
 from mcp.server import Server
@@ -30,11 +31,28 @@ if os.environ.get("MNEMOS_LOCAL_MODE") == "1" or os.environ.get(
 from app.artifacts import build_project_index, build_task_context_pack
 from app.audit.logger import record as audit_record
 from app.db import SessionLocal
+from app.graph_publication import (
+    GraphGenerationChanged,
+    GraphHeadMissing,
+    GraphHeadNeedsRebuild,
+    GraphPublicationInvariantError,
+    GraphReadStamp,
+    read_graph_stamp,
+    revalidate_graph_stamp,
+)
 from app.mcp.data_queries import (
     get_column_stats,
     get_data_entity,
     get_sample_data,
     search_data,
+)
+from app.mcp.auth import (
+    MCP_AUTHENTICATION_INVALID_CODE as MCP_AUTHENTICATION_INVALID_CODE,
+    MCPAuthContext,
+    MCPAuthenticationError,
+    mcp_authentication_error,
+    resolve_mcp_auth_context,
+    revalidate_mcp_auth_context,
 )
 from app.mcp.dev_tools import (
     edit_file_in_worktree,
@@ -56,6 +74,10 @@ from app.mcp.queries import (
     list_flows,
     search_symbols,
 )
+from app.safety.tokens import hash_token
+
+GRAPH_SNAPSHOT_UNAVAILABLE_CODE = "graph_snapshot_unavailable"
+GRAPH_SNAPSHOT_CHANGED_CODE = "graph_snapshot_changed_retry"
 
 _TOOLS = [
     Tool(
@@ -72,7 +94,7 @@ _TOOLS = [
         inputSchema={
             "type": "object",
             "properties": {
-                "top_k": {"type": "integer", "default": 25},
+                "top_k": {"type": "integer", "default": 10},
             },
         },
     ),
@@ -275,20 +297,24 @@ _TOOLS = [
     Tool(
         name="read_file",
         description=(
-            "Read a file from the platform's repo mirror at /var/lib/mnemos/repos. "
-            "Supply start_line + end_line to stream a window of a huge file; "
-            "omitted range returns the first 2000 lines plus truncated=true.\n\n"
+            "Read a bounded file window from the immutable Git commit used by "
+            "a completed analysis run. The default is the latest completed run; "
+            "pass run_id to cite a specific historical run. Source bytes come "
+            "from the project mirror configured by SOURCE_MIRROR_ROOT via git "
+            "show, never from a mutable checkout.\n\n"
             "Use when: a graph query (search_symbols / get_symbol) gave "
             "you a file_path + line_range and you need the actual code. "
-            "This reads the platform's snapshot, NOT a live filesystem, "
-            "so what you see is the mirror at the last analysis run's "
-            "git_sha. Pin to a narrow line range to fit in the response "
-            "cap (§11.7, 50 KB)."
+            "Pass a project-relative path and a narrow line range. Absolute "
+            "paths and parent traversal are rejected. The response reports "
+            "run_id, resolved revision, path, range, and truncation. Legacy "
+            "manual/non-Git runs return an explicit provenance-unavailable "
+            "error instead of silently reading drifted source."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "project_id": {"type": "string"},
+                "run_id": {"type": "string", "nullable": True},
                 "file_path": {"type": "string"},
                 "start_line": {"type": "integer", "nullable": True},
                 "end_line": {"type": "integer", "nullable": True},
@@ -461,8 +487,11 @@ _TOOLS = [
         description=(
             "Diff the graph between two analysis runs (bitemporal): symbols / "
             "contracts / data-entities added, removed, or modified; edge-kind "
-            "deltas (CALLS/EXPOSES/READS/WRITES added & removed); and findings "
-            "first seen between the runs. Certainty is preserved per change.\n\n"
+            "deltas (CALLS/EXPOSES/READS/WRITES added & removed), plus bounded "
+            "caller impact. Only terminal runs with a valid atomic publication "
+            "receipt are accepted, and certainty is preserved per change. "
+            "Finding deltas are explicitly unavailable until findings have "
+            "immutable per-publication history.\n\n"
             "Use when: \"what changed between these two commits/analyses and "
             "what's the blast radius?\" — code review, regression triage, "
             "release notes. This is history-aware analysis: a re-indexing tool "
@@ -487,8 +516,9 @@ _TOOLS = [
             "Use when: you've decided on a fix and want to start "
             "editing code. The plan must include the spec (the *why*), "
             "tasks (the *what*), and target_component_id (the *where*). "
-            "Worktree is created on approval — until then no file "
-            "edits land. After approval, edit_file_in_worktree + "
+            "The worktree is pinned to the exact published source commit "
+            "at submission; until approval no file edits land. After "
+            "approval, edit_file_in_worktree + "
             "run_in_sandbox + submit_diff is the loop."
         ),
         inputSchema={
@@ -497,9 +527,8 @@ _TOOLS = [
                 "spec": {"type": "object"},
                 "tasks": {"type": "array"},
                 "target_component_id": {"type": "string"},
-                "requester": {"type": "string"},
             },
-            "required": ["spec", "tasks", "target_component_id", "requester"],
+            "required": ["spec", "tasks", "target_component_id"],
         },
     ),
     Tool(
@@ -572,22 +601,202 @@ _TOOLS = [
     ),
 ]
 
+_KNOWN_TOOL_NAMES = frozenset(tool.name for tool in _TOOLS)
+_MUTATING_TOOL_NAMES = frozenset(
+    {
+        "submit_plan",
+        "edit_file_in_worktree",
+        "run_in_sandbox",
+        "submit_diff",
+    }
+)
+_READ_ONLY_TOOL_NAMES = frozenset(
+    {
+        "get_project_index",
+        "get_task_context_pack",
+        "search_symbols",
+        "get_symbol",
+        "find_callers",
+        "find_callees",
+        "impact_analysis",
+        "get_contract",
+        "get_data_access",
+        "read_file",
+        "get_data_entity",
+        "get_sample_data",
+        "get_column_stats",
+        "search_data",
+        "list_findings",
+        "get_module_summary",
+        "list_flows",
+        "find_runtime_path",
+        "compare_runs",
+    }
+)
+# Existing tools must be explicitly classified.  Adding a future data refresh
+# or write tool requires placing it in the mutation set before it is exposed.
+assert _KNOWN_TOOL_NAMES == _READ_ONLY_TOOL_NAMES | _MUTATING_TOOL_NAMES
+_REVISION_LOCKED_DEV_MUTATIONS = _MUTATING_TOOL_NAMES
 
-def build_server(project_id: uuid.UUID) -> Server:
+MCP_AUTHORIZATION_DENIED_CODE = "mcp_authorization_denied"
+MCP_PROJECT_MISMATCH_CODE = "mcp_project_mismatch"
+
+
+def _can_call_tool(context: MCPAuthContext, name: str) -> bool:
+    if name in _READ_ONLY_TOOL_NAMES:
+        return context.role in {"viewer", "operator", "admin"}
+    if name in _MUTATING_TOOL_NAMES:
+        return context.role in {"operator", "admin"}
+    return False
+
+
+def _authorization_error() -> dict:
+    return {
+        "schema": "mnemos.error.v1",
+        "error": MCP_AUTHORIZATION_DENIED_CODE,
+        "retryable": False,
+    }
+
+
+def _project_argument_matches(
+    context: MCPAuthContext,
+    arguments: dict,
+) -> bool:
+    supplied = arguments.get("project_id")
+    if supplied is None:
+        return True
+    try:
+        return uuid.UUID(str(supplied)) == context.project_id
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+def _requires_published_graph(name: str, arguments: dict) -> bool:
+    """Whether a tool would consume or act on the mutable current graph."""
+
+    if name not in _KNOWN_TOOL_NAMES or name == "get_project_index":
+        return False
+    # A caller that pins read_file to a completed run knowingly requests one
+    # historical source generation and does not consume the current graph.
+    return not (name == "read_file" and bool(arguments.get("run_id")))
+
+
+def _graph_snapshot_unavailable_error(exc: Exception) -> dict:
+    return {
+        "schema": "mnemos.error.v1",
+        "error": GRAPH_SNAPSHOT_UNAVAILABLE_CODE,
+        "reason": str(exc),
+        "repair": {
+            "required": True,
+            "scope": "full",
+            "action": "publish one successful staged full source analysis",
+        },
+    }
+
+
+def _graph_snapshot_changed_error(
+    stamp: GraphReadStamp, exc: GraphGenerationChanged
+) -> dict:
+    return {
+        "schema": "mnemos.error.v1",
+        "error": GRAPH_SNAPSHOT_CHANGED_CODE,
+        "reason": str(exc),
+        "retryable": True,
+        "snapshot": {
+            "generation": stamp.generation,
+            "overlay_generation": stamp.overlay_generation,
+            "run_id": str(stamp.current_run_id),
+            "published_at": stamp.published_at.isoformat(),
+        },
+    }
+
+
+def build_server(auth_context: MCPAuthContext) -> Server:
+    project_id = auth_context.project_id
     server: Server = Server("mnemos")
 
     @server.list_tools()
     async def _list_tools() -> list[Tool]:
-        return _TOOLS
+        async with SessionLocal() as db:
+            try:
+                await revalidate_mcp_auth_context(
+                    db,
+                    context=auth_context,
+                )
+            except MCPAuthenticationError:
+                return []
+        return [
+            tool for tool in _TOOLS if _can_call_tool(auth_context, tool.name)
+        ]
 
     @server.call_tool()
     async def _call_tool(name: str, arguments: dict) -> list[TextContent]:
         async with SessionLocal() as db:
+            try:
+                await revalidate_mcp_auth_context(
+                    db,
+                    context=auth_context,
+                    lock=name in _MUTATING_TOOL_NAMES,
+                )
+            except MCPAuthenticationError:
+                return [
+                    TextContent(
+                        type="text",
+                        text=_cap_response(mcp_authentication_error()),
+                    )
+                ]
+            if not _can_call_tool(auth_context, name):
+                return [
+                    TextContent(
+                        type="text",
+                        text=_cap_response(_authorization_error()),
+                    )
+                ]
+            if not _project_argument_matches(auth_context, arguments):
+                return [
+                    TextContent(
+                        type="text",
+                        text=_cap_response(
+                            {
+                                "schema": "mnemos.error.v1",
+                                "error": MCP_PROJECT_MISMATCH_CODE,
+                                "retryable": False,
+                            }
+                        ),
+                    )
+                ]
+            stamp: GraphReadStamp | None = None
+            # ``READ COMMITTED`` can cross a publication between statements.
+            # Pin before dispatch and revalidate after the final graph query;
+            # changed source or overlay revision discards the result instead
+            # of returning a mixed tool payload. The project index and an
+            # explicitly pinned historical file remain available for
+            # diagnosis/recovery.
+            if _requires_published_graph(name, arguments):
+                try:
+                    stamp = await read_graph_stamp(db, project_id=project_id)
+                except (
+                    GraphHeadMissing,
+                    GraphHeadNeedsRebuild,
+                    GraphPublicationInvariantError,
+                ) as exc:
+                    result = _graph_snapshot_unavailable_error(exc)
+                    await audit_record(
+                        actor=auth_context.actor,
+                        action=f"mcp.tool.{name}",
+                        target=str(project_id),
+                        project_id=project_id,
+                        details={
+                            "arguments": arguments,
+                            "blocked_by": GRAPH_SNAPSHOT_UNAVAILABLE_CODE,
+                        },
+                    )
+                    return [TextContent(type="text", text=_cap_response(result))]
             if name == "get_project_index":
                 result = await build_project_index(
                     db,
                     project_id=project_id,
-                    top_k=int(arguments.get("top_k", 25)),
+                    top_k=int(arguments.get("top_k", 10)),
                 )
             elif name == "get_task_context_pack":
                 result = await build_task_context_pack(
@@ -661,10 +870,12 @@ def build_server(project_id: uuid.UUID) -> Server:
                 from app.mcp.file_read import read_project_file
 
                 result = await read_project_file(
+                    db,
                     project_id=project_id,
                     file_path=arguments["file_path"],
                     start_line=arguments.get("start_line"),
                     end_line=arguments.get("end_line"),
+                    run_id=arguments.get("run_id"),
                 )
             elif name == "get_data_entity":
                 result = await get_data_entity(
@@ -735,15 +946,18 @@ def build_server(project_id: uuid.UUID) -> Server:
             elif name == "submit_plan":
                 result = await submit_plan_tool(
                     db,
+                    auth_context=auth_context,
                     project_id=project_id,
                     spec=arguments["spec"],
                     tasks=arguments["tasks"],
                     target_component_id=arguments["target_component_id"],
-                    requester=arguments["requester"],
+                    requester=auth_context.actor,
                 )
             elif name == "edit_file_in_worktree":
                 result = await edit_file_in_worktree(
                     db,
+                    auth_context=auth_context,
+                    expected_project_id=project_id,
                     plan_id=uuid.UUID(arguments["plan_id"]),
                     file_path=arguments["file_path"],
                     edits=arguments["edits"],
@@ -751,6 +965,8 @@ def build_server(project_id: uuid.UUID) -> Server:
             elif name == "run_in_sandbox":
                 result = await run_in_sandbox_tool(
                     db,
+                    auth_context=auth_context,
+                    expected_project_id=project_id,
                     plan_id=uuid.UUID(arguments["plan_id"]),
                     command=arguments["command"],
                     timeout_sec=int(arguments.get("timeout_sec", 300)),
@@ -758,6 +974,8 @@ def build_server(project_id: uuid.UUID) -> Server:
             elif name == "submit_diff":
                 result = await submit_diff_tool(
                     db,
+                    auth_context=auth_context,
+                    expected_project_id=project_id,
                     plan_id=uuid.UUID(arguments["plan_id"]),
                     task_id=arguments["task_id"],
                     diff=arguments.get("diff"),
@@ -766,8 +984,17 @@ def build_server(project_id: uuid.UUID) -> Server:
                 )
             else:
                 result = {"error": f"unknown tool: {name}"}
+            # Dev mutations lock GraphHead -> AnalysisRun -> Plan internally
+            # and hold that boundary through their commit/external action.
+            # Replacing an already-committed success with a generic retryable
+            # read error would make an MCP client repeat the side effect.
+            if stamp is not None and name not in _REVISION_LOCKED_DEV_MUTATIONS:
+                try:
+                    await revalidate_graph_stamp(db, stamp=stamp)
+                except GraphGenerationChanged as exc:
+                    result = _graph_snapshot_changed_error(stamp, exc)
             await audit_record(
-                actor="claude_code:mcp",
+                actor=auth_context.actor,
                 action=f"mcp.tool.{name}",
                 target=str(project_id),
                 project_id=project_id,
@@ -819,13 +1046,15 @@ def _cap_response(result, max_bytes: int = _MAX_RESPONSE_BYTES) -> str:
                 txt2 = json.dumps(shrunk, default=str)
                 if len(txt2.encode("utf-8")) <= max_bytes:
                     return txt2
-            return json.dumps({
+            empty = json.dumps({
                 biggest_key: [],
                 "response_truncated": True,
                 "truncated_field": biggest_key,
                 "truncated_kept": 0,
                 "truncated_total": biggest_len,
             })
+            if len(empty.encode("utf-8")) <= max_bytes:
+                return empty
 
     if isinstance(result, list):
         total = len(result)
@@ -844,46 +1073,69 @@ def _cap_response(result, max_bytes: int = _MAX_RESPONSE_BYTES) -> str:
             if len(txt2.encode("utf-8")) <= max_bytes:
                 return txt2
 
-    return json.dumps({
+    fallback = json.dumps({
         "response_truncated": True,
         "reason": "scalar_exceeds_cap",
     })
+    if len(fallback.encode("utf-8")) <= max_bytes:
+        return fallback
+    # Production uses 50 KiB, so this branch exists only for a caller passing
+    # an artificially tiny cap. Preserve the hard byte invariant even then.
+    return "{}" if max_bytes >= 2 else ""
 
 
-def _require_mcp_token() -> None:
+def _require_mcp_token() -> str:
     """Fail-closed startup gate (spec §11.6).
 
     A bare ``ggoss-mcp --project <uuid>`` over stdio used to grant any
     process that could spawn the binary full read of that project,
-    including data tools. The server now requires
-    ``MNEMOS_MCP_TOKEN`` to be set in the environment — the platform
-    sets it when it intentionally launches the MCP server; an
-    operator running it by hand sets it themselves. An unset env is a
-    misconfiguration and the binary refuses to start.
+    including data tools. Stdio receives ``MNEMOS_MCP_TOKEN`` through
+    the environment, hashes it immediately, and ``_run`` resolves that
+    digest to an active project-scoped API key. An unset or unbound
+    credential is a misconfiguration and the binary refuses to start.
     """
-    import os
-    import sys
-
-    if not os.environ.get("MNEMOS_MCP_TOKEN"):
+    # Read-once: remove the bearer from the process environment immediately so
+    # later subprocesses, diagnostics, or libraries cannot inherit it.
+    raw_token = os.environ.pop("MNEMOS_MCP_TOKEN", None)
+    if not raw_token:
         sys.stderr.write(
             "{\"level\":\"error\",\"message\":\"MNEMOS_MCP_TOKEN_required\","
             "\"recoverable\":false}\n"
         )
         sys.exit(2)
+    token_hash = hash_token(raw_token)
+    del raw_token
+    return token_hash
 
 
-async def _run(project_id: uuid.UUID) -> None:
-    server = build_server(project_id)
+async def _run(project_id: uuid.UUID, *, token_hash: str) -> None:
+    try:
+        async with SessionLocal() as db:
+            auth_context = await resolve_mcp_auth_context(
+                db,
+                token_hash=token_hash,
+                expected_project_id=project_id,
+            )
+    except Exception:  # noqa: BLE001 - startup must fail closed on DB/auth faults
+        # Do not distinguish random/revoked/cross-project credentials and never
+        # include the raw token or digest in stderr.
+        sys.stderr.write(
+            "{\"level\":\"error\",\"message\":\"MNEMOS_MCP_AUTH_invalid\","
+            "\"recoverable\":false}\n"
+        )
+        raise SystemExit(2) from None
+
+    server = build_server(auth_context)
     async with stdio_server() as (reader, writer):
         await server.run(reader, writer, server.create_initialization_options())
 
 
 def main() -> None:
-    _require_mcp_token()
+    token_hash = _require_mcp_token()
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True, help="project UUID")
     args = parser.parse_args()
-    asyncio.run(_run(uuid.UUID(args.project)))
+    asyncio.run(_run(uuid.UUID(args.project), token_hash=token_hash))
 
 
 if __name__ == "__main__":

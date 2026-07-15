@@ -31,6 +31,11 @@ from app.safety.pii import (
 
 logger = logging.getLogger(__name__)
 
+# Included in persisted DataSample policy provenance.  Bump this value when
+# the platform-wide masking defaults or validator/replacement semantics
+# change so samples captured by an older engine fail closed until refreshed.
+MASKING_ENGINE_POLICY_VERSION = "mnemos.masking-engine.v1"
+
 FULL_MASK_COLUMNS = re.compile(
     r"(?i)\b(password|token|secret|api[_-]?key|ssn|rrn)\b"
 )

@@ -19,9 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import uuid
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -29,14 +27,17 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.ask import _entity_name, _short_path
+from app.api.graph_guard import require_readable_current_graph
 from app.api.llm_providers import (
     any_provider_available,
     available_providers,
     default_provider,
     is_provider_available,
+    output_token_limit_capability,
     provider_chat,
     resolve_config,
 )
+from app.mcp.file_read import read_project_file
 from app.models.graph import Node
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
@@ -47,10 +48,33 @@ from app.mcp.queries import get_data_access, get_symbol, search_symbols
 
 log = logging.getLogger("mnemos.chat")
 
+# Chat is an on-demand consumer of the graph, not permission to put a whole
+# conversation or repository into one provider request.  These are character
+# ceilings because every provider adapter receives text.  The final ceiling is
+# checked against the exact prompt string; the two section budgets select only
+# complete history messages and complete graph-context records.
+CHAT_HISTORY_MAX_CHARS = 10_000
+CHAT_CONTEXT_MAX_CHARS = 8_000
+CHAT_OVERVIEW_MAX_CHARS = 2_000
+CHAT_PROMPT_MAX_CHARS = 24_000
+CHAT_CODE_TOTAL_MAX_CHARS = 6_000
+CHAT_CODE_ITEM_MAX_CHARS = 1_600
+CHAT_REWRITE_MAX_OUTPUT_TOKENS = 128
+CHAT_ANSWER_MAX_OUTPUT_TOKENS = 1_200
+
+REWRITE_MIN_TERMS = 3
+REWRITE_MAX_TERMS = 8
+REWRITE_MAX_TERM_CHARS = 64
+REWRITE_OVERVIEW_MAX_CHARS = 1_000
+REWRITE_PROMPT_MAX_CHARS = 6_000
+
 router = APIRouter(
     prefix="/api/v1/projects/{project_id}",
     tags=["chat"],
-    dependencies=[Depends(require_project_org())],
+    dependencies=[
+        Depends(require_project_org()),
+        Depends(require_readable_current_graph, scope="function"),
+    ],
 )
 
 # Provider listing is project-independent (it reports which AIs are
@@ -67,6 +91,7 @@ async def list_chat_providers(
     Chat tab populates its selector from this."""
     cfg = await resolve_config(db)
     return {"providers": available_providers(cfg), "default": default_provider(cfg)}
+
 
 _SYSTEM = (
     "You are Mnemos, a senior software analyst embedded in a SOURCE-CODE "
@@ -95,49 +120,59 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     history: list[ChatMessage] = Field(default_factory=list, max_length=20)
     provider: str | None = Field(
-        default=None, max_length=32,
-        description="AI provider id (openai/gemini/claudecode/atlas); "
-                    "None = first configured",
+        default=None,
+        max_length=32,
+        description="AI provider id (openai/gemini/claudecode/atlas); None = first configured",
     )
     source_root: str | None = Field(
-        default=None, description="Repo root; enables source-code context"
+        default=None,
+        description=(
+            "Deprecated and ignored. Source is read only from the immutable "
+            "snapshot bound to the completed analysis run."
+        ),
     )
     top_k: int = Field(default=6, ge=1, le=12)
     timeout_s: int = Field(default=180, ge=10, le=300)
 
 
-def _resolve_source_root(given: str | None) -> str | None:
-    """Request value wins; otherwise the deploy-wide default so the chat
-    has code context without the operator pasting a path every time."""
-    root = given or os.environ.get("MNEMOS_CHAT_SOURCE_ROOT") or None
-    if root and Path(root).is_dir():
-        return root
-    return None
-
-
 async def _project_overview(
-    db: AsyncSession, project_id: uuid.UUID, *,
-    max_contracts: int = 60, max_entities: int = 40,
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    *,
+    max_contracts: int = 60,
+    max_entities: int = 40,
 ) -> dict:
     """The project's shape from the analysis — counts, the API surface
     (HTTP endpoints / contracts) and the data tables. This is what lets
     the chat answer high-level questions ("what is this project's
     purpose / process flow?") that no single symbol match can."""
     counts = dict(
-        (await db.execute(
-            select(Node.kind, func.count()).where(
-                Node.project_id == project_id, Node.valid_to.is_(None)
-            ).group_by(Node.kind)
-        )).all()
+        (
+            await db.execute(
+                select(Node.kind, func.count())
+                .where(Node.project_id == project_id, Node.valid_to.is_(None))
+                .group_by(Node.kind)
+            )
+        ).all()
     )
 
     async def _names(kind: str, limit: int) -> list[str]:
-        rows = (await db.execute(
-            select(Node).where(
-                Node.project_id == project_id, Node.valid_to.is_(None),
-                Node.kind == kind,
-            ).order_by(Node.id).limit(limit)
-        )).scalars().all()
+        rows = (
+            (
+                await db.execute(
+                    select(Node)
+                    .where(
+                        Node.project_id == project_id,
+                        Node.valid_to.is_(None),
+                        Node.kind == kind,
+                    )
+                    .order_by(Node.id)
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
         return [str((r.data or {}).get("name") or r.id) for r in rows]
 
     return {
@@ -148,53 +183,80 @@ async def _project_overview(
 
 
 def _render_overview(ov: dict) -> str:
+    return "\n".join(_overview_items(ov))
+
+
+def _overview_items(ov: dict) -> list[str]:
+    """Render independently droppable overview facts.
+
+    Endpoint and entity names are graph data.  Keeping each as its own item
+    lets the prompt packer omit an oversized/low-priority tail without cutting
+    an identifier in half.
+    """
+
     c = ov.get("counts") or {}
-    lines = [
+    items = [
         f"- Graph: {c.get('Symbol', 0)} code symbols, "
         f"{c.get('Contract', 0)} API endpoints, "
         f"{c.get('DataEntity', 0)} data tables, "
         f"{c.get('Component', 0)} components."
     ]
-    if ov.get("contracts"):
-        lines.append("- API endpoints (the system's external surface — read "
-                     "these to infer the project's purpose and request flow):")
-        lines.append("  " + "; ".join(ov["contracts"]))
-    if ov.get("entities"):
-        lines.append("- Data tables (the persisted domain model): "
-                     + ", ".join(ov["entities"]))
-    return "\n".join(lines)
+    items.extend(f"- API endpoint: {name}" for name in ov.get("contracts") or [])
+    items.extend(f"- Data table: {name}" for name in ov.get("entities") or [])
+    return items
 
 
-def _read_code(source_root: str, file: str | None, line: int | None,
-               max_chars: int = 1800) -> str | None:
-    """A slice of the symbol's source — from a little before its
-    definition line through the body — joined under ``source_root``."""
-    if not source_root or not file:
-        return None
-    rel = _short_path(file) or file
-    path = Path(source_root) / rel
-    if not path.is_file():
-        # ``_short_path`` may have trimmed a leading segment; try the raw
-        # relative file as given.
-        path = Path(source_root) / file.replace("\\", "/")
-        if not path.is_file():
-            return None
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    lines = text.splitlines()
-    start = max(0, (line or 1) - 3)
-    snippet = "\n".join(lines[start:start + 70])
-    return snippet[:max_chars]
+def _pack_complete_text_items(
+    items: list[str], *, max_chars: int, separator: str = "\n"
+) -> tuple[list[str], dict]:
+    """Keep complete strings within an exact character budget."""
+
+    selected: list[str] = []
+    used = 0
+    for item in items:
+        addition = len(item) + (len(separator) if selected else 0)
+        if used + addition > max(0, max_chars):
+            continue
+        selected.append(item)
+        used += addition
+    return selected, {
+        "provided_items": len(items),
+        "included_items": len(selected),
+        "omitted_items": len(items) - len(selected),
+        "included_chars": used,
+        "max_chars": max(0, max_chars),
+        "truncated": len(selected) != len(items),
+    }
+
+
+def _complete_line_excerpt(text: str, max_chars: int) -> tuple[str | None, bool]:
+    """Select only whole source lines; never slice through a giant line."""
+
+    if max_chars <= 0:
+        return None, bool(text)
+    selected: list[str] = []
+    used = 0
+    lines = text.splitlines(keepends=True)
+    for line in lines:
+        if used + len(line) > max_chars:
+            break
+        selected.append(line)
+        used += len(line)
+    excerpt = "".join(selected).rstrip("\r\n")
+    return (excerpt or None), len(selected) != len(lines)
 
 
 async def _build_context(
-    db: AsyncSession, project_id: uuid.UUID, hits: list[dict],
-    source_root: str | None, total_cap: int = 9000,
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    hits: list[dict],
+    total_cap: int = CHAT_CODE_TOTAL_MAX_CHARS,
 ) -> list[dict]:
-    """Per-hit graph facts + a code slice, capped so the prompt stays
-    bounded on a huge project."""
+    """Build graph records with whole-line source excerpts.
+
+    This function bounds source reads.  ``_pack_chat_context`` separately
+    enforces the exact final context budget across complete records.
+    """
     out: list[dict] = []
     used = 0
     seen_files: set[str] = set()
@@ -223,46 +285,163 @@ async def _build_context(
             "callees": int(nb.get("callees_count") or 0),
         }
         # Read each file's code once; cheaper and avoids repeating bodies.
-        code = None
-        if source_root and loc.get("file") and loc["file"] not in seen_files:
-            code = _read_code(source_root, loc.get("file"), line)
-            if code:
-                seen_files.add(loc["file"])
-                entry["code"] = code
-                used += len(code)
+        if used < total_cap and loc.get("file") and loc["file"] not in seen_files:
+            window = await read_project_file(
+                db,
+                project_id=project_id,
+                file_path=loc["file"],
+                start_line=max(1, int(line or 1) - 2),
+                end_line=max(1, int(line or 1) - 2) + 69,
+            )
+            seen_files.add(loc["file"])
+            source = window.get("content")
+            if isinstance(source, str) and source:
+                per_item_cap = min(
+                    CHAT_CODE_ITEM_MAX_CHARS,
+                    max(0, total_cap - used),
+                )
+                code, truncated = _complete_line_excerpt(source, per_item_cap)
+                if code:
+                    entry["code"] = code
+                    used += len(code)
+                entry["_code_source_chars"] = len(source)
+                entry["_code_truncated"] = truncated or code is None
         out.append(entry)
-        if used >= total_cap:
-            break
     return out
 
 
+def _render_context_item(c: dict) -> str:
+    loc = f"{c['file']}:{c['line']}" if c.get("file") else "(location unknown)"
+    head = f"### {c.get('name')} ({c.get('kind') or 'symbol'}) — {loc}"
+    lines = [head]
+    if c.get("signature"):
+        lines.append(f"signature: `{c['signature']}`")
+    if c.get("writes"):
+        lines.append("writes: " + ", ".join(c["writes"]))
+    if c.get("reads"):
+        lines.append("reads: " + ", ".join(c["reads"]))
+    lines.append(f"called from {c['callers']} place(s); calls {c['callees']} symbol(s).")
+    if c.get("code"):
+        lines.append("```\n" + c["code"] + "\n```")
+    return "\n".join(lines)
+
+
 def _render_context(ctx: list[dict]) -> str:
-    parts = []
-    for c in ctx:
-        loc = f"{c['file']}:{c['line']}" if c.get("file") else "(location unknown)"
-        head = f"### {c.get('name')} ({c.get('kind') or 'symbol'}) — {loc}"
-        lines = [head]
-        if c.get("signature"):
-            lines.append(f"signature: `{c['signature']}`")
-        if c.get("writes"):
-            lines.append("writes: " + ", ".join(c["writes"]))
-        if c.get("reads"):
-            lines.append("reads: " + ", ".join(c["reads"]))
-        lines.append(f"called from {c['callers']} place(s); calls {c['callees']} symbol(s).")
-        if c.get("code"):
-            lines.append("```\n" + c["code"] + "\n```")
-        parts.append("\n".join(lines))
+    parts = [_render_context_item(item) for item in ctx]
     return "\n\n".join(parts) if parts else "(no matching symbols found)"
 
 
-def _build_prompt(history: list[ChatMessage], context: str, question: str) -> str:
-    convo = ""
-    if history:
-        convo = "## Conversation so far\n" + "\n".join(
-            f"{m.role}: {m.content}" for m in history
-        ) + "\n\n"
-    return (
-        f"{convo}# Analysis context for the selected project\n{context}\n\n"
+def _pack_chat_context(
+    overview: dict,
+    context: list[dict],
+    *,
+    max_chars: int = CHAT_CONTEXT_MAX_CHARS,
+) -> tuple[str, list[dict], dict]:
+    """Pack complete overview facts and symbol records into one context."""
+
+    overview_heading = "## Project overview\n"
+    symbol_heading = "\n\n## Most relevant symbols for this question\n"
+    fixed_chars = len(overview_heading) + len(symbol_heading)
+    overview_budget = min(
+        CHAT_OVERVIEW_MAX_CHARS,
+        max(0, max_chars - fixed_chars),
+    )
+    overview_items, overview_meta = _pack_complete_text_items(
+        _overview_items(overview), max_chars=overview_budget
+    )
+    overview_text = "\n".join(overview_items)
+    prefix = overview_heading + overview_text + symbol_heading
+
+    included: list[dict] = []
+    rendered: list[str] = []
+    code_omitted = 0
+    symbol_items_skipped_for_budget = 0
+    provided_with_code = sum(bool(item.get("code")) for item in context)
+    for item in context:
+        candidate = dict(item)
+        block = _render_context_item(candidate)
+        addition = len(block) + (2 if rendered else 0)
+        if len(prefix) + sum(len(value) for value in rendered) + 2 * max(
+            0, len(rendered) - 1
+        ) + addition > max_chars and candidate.get("code"):
+            candidate.pop("code", None)
+            block = _render_context_item(candidate)
+            addition = len(block) + (2 if rendered else 0)
+            code_omitted += 1
+        rendered_chars = sum(len(value) for value in rendered) + 2 * max(0, len(rendered) - 1)
+        if len(prefix) + rendered_chars + addition > max_chars:
+            # A very large signature/path/metadata record must not prevent a
+            # later, smaller symbol from using the remaining context budget.
+            # Skip the complete record; never slice machine-grounding facts.
+            symbol_items_skipped_for_budget += 1
+            continue
+        included.append(candidate)
+        rendered.append(block)
+
+    if not rendered:
+        empty = "(no matching symbols found)"
+        if len(prefix) + len(empty) <= max_chars:
+            rendered.append(empty)
+
+    text = prefix + "\n\n".join(rendered)
+    metadata = {
+        "max_chars": max_chars,
+        "actual_chars": len(text),
+        "provided_symbol_items": len(context),
+        "included_symbol_items": len(included),
+        "omitted_symbol_items": len(context) - len(included),
+        "symbol_items_skipped_for_budget": symbol_items_skipped_for_budget,
+        "provided_code_items": provided_with_code,
+        "included_code_items": sum(bool(item.get("code")) for item in included),
+        "code_items_omitted_for_budget": code_omitted,
+        "source_code_items_truncated": sum(bool(item.get("_code_truncated")) for item in included),
+        "overview": overview_meta,
+    }
+    metadata["truncated"] = bool(
+        metadata["omitted_symbol_items"]
+        or metadata["code_items_omitted_for_budget"]
+        or metadata["source_code_items_truncated"]
+        or overview_meta["truncated"]
+    )
+    if len(text) > max_chars:
+        raise AssertionError("chat context exceeded complete-item budget")
+    return text, included, metadata
+
+
+def _pack_history(history: list[ChatMessage], *, max_chars: int) -> tuple[list[str], dict]:
+    """Keep the most recent complete messages, preserving their order."""
+
+    rendered = [f"{message.role}: {message.content}" for message in history]
+    selected_reversed: list[str] = []
+    used = 0
+    for item in reversed(rendered):
+        addition = len(item) + (1 if selected_reversed else 0)
+        if used + addition > max(0, max_chars):
+            continue
+        selected_reversed.append(item)
+        used += addition
+    selected = list(reversed(selected_reversed))
+    return selected, {
+        "provided_items": len(rendered),
+        "included_items": len(selected),
+        "omitted_items": len(rendered) - len(selected),
+        "original_chars": sum(len(item) for item in rendered) + max(0, len(rendered) - 1),
+        "included_chars": used,
+        "max_chars": max(0, max_chars),
+        "truncated": len(selected) != len(rendered),
+    }
+
+
+def _build_bounded_prompt(
+    history: list[ChatMessage],
+    context: str,
+    question: str,
+    *,
+    max_chars: int = CHAT_PROMPT_MAX_CHARS,
+    system: str = "",
+) -> tuple[str, dict]:
+    tail = (
+        f"# Analysis context for the selected project\n{context}\n\n"
         f"## Operator's question\n{question}\n\n"
         "Answer using the analysis context above (project overview + relevant "
         "symbols + code). For a high-level question (purpose, architecture, "
@@ -271,6 +450,38 @@ def _build_prompt(history: list[ChatMessage], context: str, question: str) -> st
         "file:line. If something the question genuinely needs is absent from "
         "the context, say so — never invent endpoints, tables, or paths."
     )
+    prompt_ceiling = max(0, max_chars - len(system))
+    if len(tail) > prompt_ceiling:
+        raise ValueError("chat_prompt_fixed_sections_exceed_budget")
+
+    history_heading = "## Conversation so far\n"
+    history_suffix = "\n\n"
+    available = min(
+        CHAT_HISTORY_MAX_CHARS,
+        max(
+            0,
+            prompt_ceiling - len(tail) - len(history_heading) - len(history_suffix),
+        ),
+    )
+    history_items, history_meta = _pack_history(history, max_chars=available)
+    convo = history_heading + "\n".join(history_items) + history_suffix if history_items else ""
+    prompt = convo + tail
+    if len(system) + len(prompt) > max_chars:
+        raise AssertionError("chat prompt exceeded complete-item budget")
+    return prompt, {
+        "max_chars": max_chars,
+        "actual_chars": len(prompt),
+        "system_chars": len(system),
+        "provider_input_chars": len(system) + len(prompt),
+        "history": history_meta,
+        "truncated": history_meta["truncated"],
+    }
+
+
+def _build_prompt(history: list[ChatMessage], context: str, question: str) -> str:
+    """Compatibility wrapper for callers that only need the prompt text."""
+
+    return _build_bounded_prompt(history, context, question)[0]
 
 
 # Korean (and other non-ASCII) code concepts → the English keywords that
@@ -359,9 +570,7 @@ def _merge_hits(a: list[dict], b: list[dict], top_k: int) -> list[dict]:
         cur = by_id.get(sid)
         if cur is None or float(h.get("score") or 0) > float(cur.get("score") or 0):
             by_id[sid] = h
-    return sorted(
-        by_id.values(), key=lambda h: float(h.get("score") or 0), reverse=True
-    )[:top_k]
+    return sorted(by_id.values(), key=lambda h: float(h.get("score") or 0), reverse=True)[:top_k]
 
 
 _WEAK_SCORE = 10.0
@@ -371,16 +580,97 @@ def _has_korean(text: str) -> bool:
     return any("가" <= c <= "힣" for c in text or "")
 
 
-def _weak_recall(question: str, hits: list[dict]) -> bool:
+def _weak_recall(
+    question: str,
+    hits: list[dict],
+    *,
+    static_expansion_hits: list[dict] | None = None,
+) -> bool:
     """Should we spend an LLM call to rewrite the query into search terms?
 
-    The lexical tokenizer drops Korean entirely, so a concept question never
-    reaches the right symbol (validated: "도구 호출 차단" → 0 recall, score-0
-    noise). Fire when the question contains Korean, or when even the top lexical
-    hit is weak (the deterministic ranker found nothing solid).
+    An unmapped Korean question still needs translation even when an unrelated
+    English homonym scored highly.  A mapped Korean concept, however, first gets
+    a free deterministic expansion; a strong hit from *that expansion* makes a
+    second provider call pure waste.  English questions use the merged lexical
+    score directly.
     """
     top = float(hits[0].get("score") or 0) if hits else 0.0
-    return _has_korean(question) or top < _WEAK_SCORE
+    if _has_korean(question):
+        if static_expansion_hits is None:
+            return True
+        expanded_top = (
+            float(static_expansion_hits[0].get("score") or 0) if static_expansion_hits else 0.0
+        )
+        return expanded_top < _WEAK_SCORE
+    return top < _WEAK_SCORE
+
+
+class RewriteTermsContractError(ValueError):
+    """Safe diagnostic for the provider → search-term JSON boundary."""
+
+
+def _actual_shape(value) -> str:  # noqa: ANN001
+    if isinstance(value, str):
+        return f"str(len={len(value)})"
+    if isinstance(value, (list, dict, tuple)):
+        return f"{type(value).__name__}(len={len(value)})"
+    return type(value).__name__
+
+
+def _normalize_rewrite_terms(payload) -> list[str]:  # noqa: ANN001
+    """Return the sole bounded rewrite representation or reject it."""
+
+    if not isinstance(payload, list):
+        raise RewriteTermsContractError(f"$: expected JSON array, got {_actual_shape(payload)}")
+    if not REWRITE_MIN_TERMS <= len(payload) <= REWRITE_MAX_TERMS:
+        raise RewriteTermsContractError(
+            f"$: expected {REWRITE_MIN_TERMS}..{REWRITE_MAX_TERMS} terms, "
+            f"got list(len={len(payload)})"
+        )
+    canonical: list[str] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(payload):
+        if not isinstance(raw, str):
+            raise RewriteTermsContractError(
+                f"$[{index}]: expected string up to "
+                f"{REWRITE_MAX_TERM_CHARS} chars, got {_actual_shape(raw)}"
+            )
+        term = " ".join(raw.split())
+        if not term or len(term) > REWRITE_MAX_TERM_CHARS:
+            raise RewriteTermsContractError(
+                f"$[{index}]: expected non-empty string up to "
+                f"{REWRITE_MAX_TERM_CHARS} chars, got str(len={len(term)})"
+            )
+        marker = term.casefold()
+        if marker in seen:
+            raise RewriteTermsContractError(
+                f"$[{index}]: duplicate normalized term; emit unique terms"
+            )
+        seen.add(marker)
+        canonical.append(term)
+    return canonical
+
+
+def _parse_rewrite_terms(text: str) -> list[str]:
+    """Parse exact JSON or the one documented ``json`` fence dialect."""
+
+    if not isinstance(text, str):
+        raise RewriteTermsContractError(f"$: expected provider text, got {_actual_shape(text)}")
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        if not lines or lines[0].strip().lower() not in {"```", "```json"}:
+            raise RewriteTermsContractError("$: unsupported fenced payload")
+        if len(lines) < 3 or lines[-1].strip() != "```":
+            raise RewriteTermsContractError("$: unterminated JSON fence")
+        candidate = "\n".join(lines[1:-1]).strip()
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        raise RewriteTermsContractError(
+            f"$@char{exc.pos}: invalid JSON; return one JSON array only"
+        ) from exc
+    return _normalize_rewrite_terms(payload)
 
 
 async def _llm_search_terms(
@@ -393,7 +683,10 @@ async def _llm_search_terms(
     lexical search can actually match. Returns ``[]`` on any failure so the caller
     falls back to the lexical hits + static map — never raises into the request.
     """
-    ov = _render_overview(overview)[:1500]
+    overview_items, _ = _pack_complete_text_items(
+        _overview_items(overview), max_chars=REWRITE_OVERVIEW_MAX_CHARS
+    )
+    ov = "\n".join(overview_items)
     system = (
         "You turn a user's natural-language question (often Korean) into English "
         "code-search terms for THIS project. Output ONLY a JSON array of 3-8 short "
@@ -401,24 +694,32 @@ async def _llm_search_terms(
         "likely to appear in the source. No prose."
     )
     prompt = f"## Project\n{ov}\n\n## Question\n{question}\n\nJSON array:"
+    if len(system) + len(prompt) > REWRITE_PROMPT_MAX_CHARS:
+        log.warning(
+            "chat: rewrite prompt exceeds complete-item budget (%d > %d)",
+            len(system) + len(prompt),
+            REWRITE_PROMPT_MAX_CHARS,
+        )
+        return []
     try:
         raw = await provider_chat(
-            provider, cfg, system=system, prompt=prompt,
+            provider,
+            cfg,
+            system=system,
+            prompt=prompt,
             timeout_s=min(timeout_s, 90),
+            max_output_tokens=CHAT_REWRITE_MAX_OUTPUT_TOKENS,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("chat: search-term rewrite failed: %s", exc)
         return []
     if not raw:
         return []
-    i, j = raw.find("["), raw.rfind("]")
-    if i >= 0 and j > i:
-        try:
-            arr = json.loads(raw[i : j + 1])
-            return [str(t).strip() for t in arr if str(t).strip()][:8]
-        except (ValueError, TypeError):
-            pass
-    return []
+    try:
+        return _parse_rewrite_terms(raw)
+    except RewriteTermsContractError as exc:
+        log.warning("chat: search-term rewrite contract rejected: %s", exc)
+        return []
 
 
 @router.post("/chat", dependencies=[Depends(require_operator)])
@@ -433,50 +734,69 @@ async def chat(
         raise HTTPException(status_code=503, detail="llm_unavailable")
     provider = body.provider or default_provider(cfg)
     if not is_provider_available(provider, cfg):
-        raise HTTPException(
-            status_code=400, detail=f"provider_not_configured:{provider}"
-        )
+        raise HTTPException(status_code=400, detail=f"provider_not_configured:{provider}")
 
     # Retrieve a *broad* grounded candidate pool, then let the composing LLM
     # pick — top-k=6 alone buried the right symbol behind English homonyms
     # (e.g. "block" → channel gates instead of `beforeToolCall`).
     broad = max(body.top_k, 24)
-    hits = await search_symbols(
-        db, project_id=project_id, query=body.message, top_k=broad
-    )
+    hits = await search_symbols(db, project_id=project_id, query=body.message, top_k=broad)
     # Fast, free static concept map (common Korean concepts → English).
     expanded = _expand_terms(body.message)
+    static_hits: list[dict] | None = None
     if expanded:
-        extra = await search_symbols(
+        static_hits = await search_symbols(
             db, project_id=project_id, query=" ".join(expanded), top_k=broad
         )
-        hits = _merge_hits(hits, extra, broad)
+        hits = _merge_hits(hits, static_hits, broad)
     overview = await _project_overview(db, project_id)
     # The deterministic tokenizer can't bridge Korean→symbol names, so when
     # recall is weak the LLM rewrites the question into project-grounded English
     # search terms (validated: surfaces `beforeToolCall` / `safe_schedule_*`
     # that a Korean concept query otherwise misses entirely).
-    if _weak_recall(body.message, hits):
-        terms = await _llm_search_terms(
+    rewrite_attempted = False
+    rewrite_terms: list[str] = []
+    rewrite_needed = _weak_recall(
+        body.message,
+        hits,
+        static_expansion_hits=static_hits,
+    )
+    if rewrite_needed:
+        rewrite_attempted = True
+        rewrite_terms = await _llm_search_terms(
             body.message, overview, provider, cfg, body.timeout_s
         )
-        if terms:
+        if rewrite_terms:
             more = await search_symbols(
-                db, project_id=project_id, query=" ".join(terms), top_k=broad
+                db,
+                project_id=project_id,
+                query=" ".join(rewrite_terms),
+                top_k=broad,
             )
             hits = _merge_hits(hits, more, broad)
     # Feed a broadened set (was top-6) so the LLM selects the relevant symbols.
     hits = hits[: max(body.top_k, 12)]
-    source_root = _resolve_source_root(body.source_root)
-    ctx = await _build_context(db, project_id, hits, source_root)
-    context_md = (
-        "## Project overview\n" + _render_overview(overview)
-        + "\n\n## Most relevant symbols for this question\n" + _render_context(ctx)
+    ctx = await _build_context(db, project_id, hits)
+    context_md, included_ctx, context_meta = _pack_chat_context(
+        overview,
+        ctx,
     )
-    prompt = _build_prompt(body.history, context_md, body.message)
+    used_code = any(bool(item.get("code")) for item in included_ctx)
+    prompt, prompt_meta = _build_bounded_prompt(
+        body.history,
+        context_md,
+        body.message,
+        system=_SYSTEM,
+    )
+    output_capability = output_token_limit_capability(provider, cfg)
 
     reply = await provider_chat(
-        provider, cfg, system=_SYSTEM, prompt=prompt, timeout_s=body.timeout_s
+        provider,
+        cfg,
+        system=_SYSTEM,
+        prompt=prompt,
+        timeout_s=body.timeout_s,
+        max_output_tokens=CHAT_ANSWER_MAX_OUTPUT_TOKENS,
     )
     if reply is None:
         raise HTTPException(status_code=503, detail="llm_call_failed")
@@ -486,18 +806,46 @@ async def chat(
         action="qa.chat",
         target=body.message[:120],
         project_id=project_id,
-        details={"symbols": [c.get("name") for c in ctx], "code": bool(source_root),
-                 "provider": provider, "expanded": expanded},
+        details={
+            "symbols": [c.get("name") for c in included_ctx],
+            "code": used_code,
+            "provider": provider,
+            "expanded": expanded,
+            "rewrite_attempted": rewrite_attempted,
+            "prompt_chars": prompt_meta["provider_input_chars"],
+            "prompt_truncated": bool(prompt_meta["truncated"] or context_meta["truncated"]),
+        },
     )
 
+    truncation = {
+        "truncated": bool(prompt_meta["truncated"] or context_meta["truncated"]),
+        "prompt": prompt_meta,
+        "context": context_meta,
+    }
     return {
         "reply": reply,
         "provider": provider,
         "context": [
-            {"name": c.get("name"), "kind": c.get("kind"),
-             "file": c.get("file"), "line": c.get("line")}
-            for c in ctx
+            {
+                "name": c.get("name"),
+                "kind": c.get("kind"),
+                "file": c.get("file"),
+                "line": c.get("line"),
+            }
+            for c in included_ctx
         ],
-        "used_code": bool(source_root),
+        "used_code": used_code,
         "expanded": expanded,
+        "rewrite": {
+            "attempted": rewrite_attempted,
+            "terms": rewrite_terms,
+            "skipped_by_strong_static_expansion": bool(
+                _has_korean(body.message) and static_hits is not None and not rewrite_needed
+            ),
+        },
+        "truncation": truncation,
+        "output_budget": {
+            "requested_max_tokens": CHAT_ANSWER_MAX_OUTPUT_TOKENS,
+            **output_capability,
+        },
     }

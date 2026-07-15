@@ -21,6 +21,63 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+# Analyzer output is intentionally bounded at the subprocess boundary.  The
+# queue prevents a fast analyzer from making the platform retain an entire
+# repository's JSONL in memory, while the stream limit is large enough for a
+# single source symbol with rich metadata.  Records larger than this are a
+# contract violation: analyzers should split them instead of asking the
+# orchestrator to accept an unbounded line.
+DEFAULT_QUEUE_MAXSIZE = 256
+DEFAULT_MAX_RECORD_BYTES = 1024 * 1024
+DEFAULT_STREAM_LIMIT_BYTES = DEFAULT_MAX_RECORD_BYTES + 64 * 1024
+DEFAULT_TIMEOUT_S = 30 * 60.0
+DEFAULT_TERMINATE_GRACE_S = 1.0
+
+
+class AnalyzerError(RuntimeError):
+    """Base class for explicit analyzer execution failures.
+
+    ``partial_records`` is populated by :meth:`AnalyzerRunner.run_collect`.
+    Streaming callers already received those records before the exception and
+    therefore do not need the runner to retain another copy.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.partial_records: tuple[RunRecord, ...] = ()
+
+
+class AnalyzerProcessError(AnalyzerError):
+    """The analyzer process exited with a non-zero status."""
+
+    def __init__(self, binary: str, exit_code: int) -> None:
+        self.binary = binary
+        self.exit_code = exit_code
+        super().__init__(
+            f"analyzer_process_failed: {binary!r} exited with code {exit_code}"
+        )
+
+
+class AnalyzerTimeoutError(AnalyzerError):
+    """The analyzer exceeded its wall-clock execution budget."""
+
+    def __init__(self, binary: str, timeout_s: float) -> None:
+        self.binary = binary
+        self.timeout_s = timeout_s
+        super().__init__(
+            f"analyzer_timeout: {binary!r} exceeded {timeout_s:g}s wall timeout"
+        )
+
+
+class AnalyzerOutputError(AnalyzerError):
+    """The analyzer violated the bounded JSONL stream contract."""
+
+    def __init__(self, binary: str, stream: str, detail: str) -> None:
+        self.binary = binary
+        self.stream = stream
+        super().__init__(f"analyzer_output_error: {binary!r} {stream}: {detail}")
+
+
 # PR-153 — run the pure-stdlib in-repo analyzers without Docker. The basic
 # (non-Docker) configuration ships the analyzer source under ``analyzers/``;
 # ggoss-py needs only Python's ``ast`` so it runs directly from source. When
@@ -124,6 +181,35 @@ def inrepo_script(binary: str) -> Path | None:
     return entry[1] if entry else None
 
 
+def _host_binary_prefix(binary: str) -> list[str] | None:
+    """Resolve an installed binary into its host execution prefix.
+
+    Windows ``CreateProcess`` does not honour Unix shebangs.  Supporting an
+    explicitly configured Python script here keeps the analyzer contract
+    portable and mirrors what POSIX does automatically.  We inspect only the
+    first line and only for a path the caller already selected as its binary.
+    """
+
+    explicit = Path(binary).expanduser()
+    resolved = str(explicit.resolve()) if explicit.is_file() else shutil.which(binary)
+    if resolved is None:
+        return None
+    if os.name != "nt":
+        return [resolved]
+
+    path = Path(resolved)
+    try:
+        with path.open("rb") as handle:
+            first_line = handle.readline(256).lower()
+    except OSError:
+        first_line = b""
+    if path.suffix.lower() in {".py", ".pyw"} or (
+        first_line.startswith(b"#!") and b"python" in first_line
+    ):
+        return [sys.executable, resolved]
+    return [resolved]
+
+
 
 # Subset of the platform's own env that an analyzer subprocess is
 # allowed to see. Everything outside this set is stripped so a future
@@ -175,6 +261,47 @@ class RunRecord:
     payload: dict
 
 
+@dataclass(frozen=True)
+class _Terminal:
+    """Private queue marker emitted after both pipes have been drained."""
+
+    error: AnalyzerError | None
+
+
+async def _terminate_process(
+    proc: asyncio.subprocess.Process,
+    *,
+    grace_s: float,
+) -> None:
+    """Terminate ``proc`` and escalate to kill after a short grace period.
+
+    This helper is deliberately idempotent because timeout, cancellation and
+    output-contract failure can race each other.  Waiting indefinitely in an
+    async-generator ``finally`` block was the old cancellation bug: a caller
+    could cancel analysis but still wait for the analyzer to exit naturally.
+    """
+
+    if proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        return
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace_s)
+        return
+    except TimeoutError:
+        pass
+
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+    await proc.wait()
+
+
 class AnalyzerRunner:
     """Spawns an analyzer binary (or docker-run wrapper) and yields records.
 
@@ -183,8 +310,39 @@ class AnalyzerRunner:
     sandbox manager in Week 7.
     """
 
-    def __init__(self, binary: str):
+    def __init__(
+        self,
+        binary: str,
+        *,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+        queue_maxsize: int = DEFAULT_QUEUE_MAXSIZE,
+        max_record_bytes: int = DEFAULT_MAX_RECORD_BYTES,
+        stream_limit_bytes: int = DEFAULT_STREAM_LIMIT_BYTES,
+        terminate_grace_s: float = DEFAULT_TERMINATE_GRACE_S,
+    ):
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be > 0")
+        if queue_maxsize <= 0:
+            raise ValueError("queue_maxsize must be > 0")
+        if max_record_bytes <= 0:
+            raise ValueError("max_record_bytes must be > 0")
+        if stream_limit_bytes <= max_record_bytes:
+            raise ValueError(
+                "stream_limit_bytes must be greater than max_record_bytes"
+            )
+        if terminate_grace_s <= 0:
+            raise ValueError("terminate_grace_s must be > 0")
         self.binary = binary
+        # Resolution and the Windows shebang probe are invariant for the
+        # lifetime of a runner.  Analyzer stages reuse one runner across verbs;
+        # repeating synchronous path resolution/file reads before every spawn
+        # serialized otherwise-concurrent launches and was measurable at scale.
+        self._host_prefix = _host_binary_prefix(binary)
+        self.timeout_s = float(timeout_s)
+        self.queue_maxsize = queue_maxsize
+        self.max_record_bytes = max_record_bytes
+        self.stream_limit_bytes = stream_limit_bytes
+        self.terminate_grace_s = float(terminate_grace_s)
 
     async def run(
         self,
@@ -194,12 +352,17 @@ class AnalyzerRunner:
         extra_args: list[str] | None = None,
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
+        timeout_s: float | None = None,
     ) -> AsyncIterator[RunRecord]:
+        wall_timeout_s = self.timeout_s if timeout_s is None else float(timeout_s)
+        if wall_timeout_s <= 0:
+            raise ValueError("timeout_s must be > 0")
+
         # Prefer the installed binary (production / docker). Fall back to the
         # in-repo Python source when it isn't on PATH (PR-153, docker-free).
-        resolved_binary = shutil.which(self.binary)
-        if resolved_binary is not None:
-            args = [resolved_binary, verb, str(path)]
+        host_prefix = self._host_prefix
+        if host_prefix is not None:
+            args = [*host_prefix, verb, str(path)]
         else:
             cmd = inrepo_command(self.binary)
             args = (
@@ -223,6 +386,7 @@ class AnalyzerRunner:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(cwd) if cwd else None,
                 env=proc_env,
+                limit=self.stream_limit_bytes,
             )
         except FileNotFoundError as exc:
             # PR-98: graceful degradation — when the analyzer binary
@@ -247,43 +411,167 @@ class AnalyzerRunner:
             )
             return
 
-        async def _drain(stream: asyncio.StreamReader | None, tag: str):
+        queue: asyncio.Queue[RunRecord | _Terminal] = asyncio.Queue(
+            maxsize=self.queue_maxsize
+        )
+        loop = asyncio.get_running_loop()
+        failure_signal: asyncio.Future[AnalyzerError] = loop.create_future()
+
+        def _signal_failure(error: AnalyzerError) -> None:
+            if not failure_signal.done():
+                failure_signal.set_result(error)
+
+        async def _drain(stream: asyncio.StreamReader | None, tag: str) -> None:
             if stream is None:
                 return
-            while True:
-                line = await stream.readline()
-                if not line:
-                    return
-                text = line.decode("utf-8", errors="replace").strip()
-                if not text:
-                    continue
-                try:
-                    payload = json.loads(text)
-                except json.JSONDecodeError:
-                    payload = {"raw": text, "parse_error": True}
-                await queue.put(RunRecord(stream=tag, payload=payload))
+            try:
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        return
+                    if len(line) > self.max_record_bytes:
+                        raise AnalyzerOutputError(
+                            self.binary,
+                            tag,
+                            (
+                                f"JSONL record exceeds "
+                                f"{self.max_record_bytes} byte limit"
+                            ),
+                        )
+                    text = line.decode("utf-8", errors="replace").strip()
+                    if not text:
+                        continue
+                    try:
+                        payload = json.loads(text)
+                    except json.JSONDecodeError:
+                        payload = {"raw": text, "parse_error": True}
+                    if not isinstance(payload, dict):
+                        payload = {
+                            "raw": text,
+                            "parse_error": True,
+                            "message": "JSONL record must be an object",
+                        }
+                    await queue.put(RunRecord(stream=tag, payload=payload))
+            except asyncio.CancelledError:
+                raise
+            except AnalyzerError as exc:
+                _signal_failure(exc)
+            except (ValueError, asyncio.LimitOverrunError) as exc:
+                # StreamReader.readline raises ValueError when its configured
+                # limit is crossed.  Convert it into the same explicit,
+                # bounded-output failure instead of losing the sentinel and
+                # leaving the consumer blocked forever.
+                _signal_failure(
+                    AnalyzerOutputError(
+                        self.binary,
+                        tag,
+                        f"JSONL record exceeded stream limit ({exc})",
+                    )
+                )
+            except Exception as exc:  # pragma: no cover - defensive pipe IO
+                _signal_failure(
+                    AnalyzerOutputError(
+                        self.binary,
+                        tag,
+                        f"stream read failed: {type(exc).__name__}: {exc}",
+                    )
+                )
 
-        queue: asyncio.Queue[RunRecord | None] = asyncio.Queue()
         stdout_task = asyncio.create_task(_drain(proc.stdout, "stdout"))
         stderr_task = asyncio.create_task(_drain(proc.stderr, "stderr"))
 
-        async def _sentinel():
+        async def _wait_for_completion() -> int:
+            exit_code = await proc.wait()
             await asyncio.gather(stdout_task, stderr_task)
-            await queue.put(None)
+            return exit_code
 
-        sentinel_task = asyncio.create_task(_sentinel())
+        completion_task = asyncio.create_task(_wait_for_completion())
+
+        async def _watch_timeout() -> None:
+            await asyncio.sleep(wall_timeout_s)
+            if proc.returncode is None:
+                _signal_failure(
+                    AnalyzerTimeoutError(self.binary, wall_timeout_s)
+                )
+
+        watchdog_task = asyncio.create_task(_watch_timeout())
+
+        async def _coordinate() -> None:
+            error: AnalyzerError | None = None
+            try:
+                await asyncio.wait(
+                    {completion_task, failure_signal},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                # A drain failure or wall timeout wins races with process
+                # completion: otherwise a killed process could be misreported
+                # merely as a non-zero exit and hide the actual cause.
+                if failure_signal.done():
+                    error = failure_signal.result()
+                    await _terminate_process(
+                        proc, grace_s=self.terminate_grace_s
+                    )
+                    for task in (stdout_task, stderr_task):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(
+                        stdout_task, stderr_task, return_exceptions=True
+                    )
+                    if not completion_task.done():
+                        await completion_task
+                else:
+                    exit_code = completion_task.result()
+                    if exit_code != 0:
+                        error = AnalyzerProcessError(self.binary, exit_code)
+            finally:
+                watchdog_task.cancel()
+                await asyncio.gather(watchdog_task, return_exceptions=True)
+
+            await queue.put(_Terminal(error=error))
+
+        coordinator_task = asyncio.create_task(_coordinate())
 
         try:
             while True:
                 item = await queue.get()
-                if item is None:
+                if isinstance(item, _Terminal):
+                    if item.error is not None:
+                        raise item.error
                     break
                 yield item
         finally:
-            exit_code = await proc.wait()
-            await sentinel_task
-            if exit_code != 0:
-                log.warning("analyzer %s exited %d", self.binary, exit_code)
+            # Cancellation or an early-closing consumer must never wait for a
+            # naturally exiting analyzer.  Stop it first, then tear down all
+            # bookkeeping tasks.  The short grace handles cooperative POSIX
+            # exits; Windows terminate is immediate.
+            if proc.returncode is None:
+                await _terminate_process(proc, grace_s=self.terminate_grace_s)
+
+            for task in (
+                stdout_task,
+                stderr_task,
+                completion_task,
+                watchdog_task,
+                coordinator_task,
+            ):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                stdout_task,
+                stderr_task,
+                completion_task,
+                watchdog_task,
+                coordinator_task,
+                return_exceptions=True,
+            )
 
     async def run_collect(self, verb: str, path: str | Path) -> list[RunRecord]:
-        return [rec async for rec in self.run(verb, path)]
+        records: list[RunRecord] = []
+        try:
+            async for rec in self.run(verb, path):
+                records.append(rec)
+        except AnalyzerError as exc:
+            exc.partial_records = tuple(records)
+            raise
+        return records

@@ -12,8 +12,8 @@ The platform review found two open-default ingress paths:
   and lift edges to ``exercised=true`` for another tenant (§14.3).
 
 Both now fail closed. Webhook: no secret configured → 503
-``webhook_secret_not_configured``. OTLP: no ``MNEMOS_OTLP_TOKEN`` →
-503 ``otlp_token_not_configured``; wrong / missing Bearer → 401.
+``webhook_secret_not_configured``. OTLP: no tenant-bound token configuration →
+503; wrong / missing Bearer → 401. The bearer determines the tenant.
 """
 
 from __future__ import annotations
@@ -41,15 +41,19 @@ def test_otlp_requires_bearer_token():
     body = _read(_APP / "runtime_receiver" / "router.py")
     assert "def _check_otlp_bearer(" in body
     idx = body.find("def _check_otlp_bearer(")
-    slab = body[idx:idx + 1400]
-    assert "MNEMOS_OTLP_TOKEN" in slab
+    slab = body[idx:idx + 1800]
+    assert "MNEMOS_OTLP_ORG_TOKENS" in body
+    assert "MNEMOS_OTLP_TOKEN" in body
     assert "hmac.compare_digest" in slab
-    assert '"otlp_token_not_configured"' in slab
+    # Configuration validation lives in the strict identity parser, before the
+    # constant-time bearer comparison helper.
+    assert '"otlp_token_not_configured"' in body
     assert '"invalid_otlp_token"' in slab
 
 
 def test_otlp_endpoint_calls_bearer_check():
     body = _read(_APP / "runtime_receiver" / "router.py")
     idx = body.find("async def receive_traces(")
-    slab = body[idx:idx + 600]
-    assert "_check_otlp_bearer(authorization)" in slab
+    slab = body[idx:idx + 900]
+    assert "_check_otlp_bearer(authorization, x_mnemos_organization_id)" in slab
+    assert "_require_live_organization(db, org_id)" in slab

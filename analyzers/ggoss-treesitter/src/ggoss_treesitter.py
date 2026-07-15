@@ -159,6 +159,14 @@ _SKIP_DIRS = {
 }
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    try:
+        is_junction = getattr(path, "is_junction", None)
+        return path.is_symlink() or bool(is_junction and is_junction())
+    except OSError:
+        return True
+
+
 def _envelope(record_type: str, data: dict[str, Any]) -> str:
     return json.dumps({
         "record_type": record_type,
@@ -183,15 +191,22 @@ def _ts_available() -> bool:
 
 
 def _iter_files(root: Path) -> Iterator[Path]:
+    if _is_link_or_junction(root):
+        return
     if root.is_file():
         if root.suffix.lower() in _ALL_EXTS:
             yield root
         return
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS)
+        dirnames[:] = sorted(
+            d for d in dirnames
+            if d not in _SKIP_DIRS and not d.startswith(".")
+            and not _is_link_or_junction(Path(dirpath) / d)
+        )
         for name in sorted(filenames):
-            if Path(name).suffix.lower() in _ALL_EXTS:
-                yield Path(dirpath) / name
+            path = Path(dirpath) / name
+            if path.suffix.lower() in _ALL_EXTS and not _is_link_or_junction(path):
+                yield path
 
 
 def _rel(path: Path, target: Path) -> str:
@@ -202,7 +217,8 @@ def _rel(path: Path, target: Path) -> str:
 
 
 def _component_id(target: Path) -> str:
-    return f"ts.{target.resolve().name or 'project'}"
+    name = os.environ.get("MNEMOS_PROJECT_ID") or target.resolve().name or "project"
+    return f"ts.{name}"
 
 
 # ─── AST walk ──────────────────────────────────────────────────────

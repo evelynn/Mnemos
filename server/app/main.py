@@ -21,6 +21,7 @@ from app.api import findings as findings_api
 from app.api import flow as flow_api
 from app.api import gdpr as gdpr_api
 from app.api import health as health_api
+from app.api import mcp_keys as mcp_keys_api
 from app.api import organizations as organizations_api
 from app.api import plans as plans_api
 from app.api import project_dbs as project_dbs_api
@@ -120,6 +121,7 @@ def create_app() -> FastAPI:
     app.include_router(gdpr_api.router)
     app.include_router(secrets_api.router)
     app.include_router(projects_api.router)
+    app.include_router(mcp_keys_api.router)
     app.include_router(project_dbs_api.router)
     app.include_router(analysis_api.router)
     app.include_router(artifacts_api.router)

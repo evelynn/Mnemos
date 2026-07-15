@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,10 +12,34 @@ from app.auth.deps import CurrentUser
 from app.auth.org_scope import require_project_org, resolve_project_org, same_org
 from app.auth.rbac import require_operator
 from app.db import get_session
+from app.finding_currentness import (
+    FINDING_NOT_CURRENT_CODE,
+    FindingNotCurrent,
+    lock_current_finding_for_action,
+)
 from app.mcp.queries import impact_analysis
 from app.models.findings import Finding
 from app.models.plans import Plan
-from app.sandbox.worktree import create_worktree
+from app.plan_provenance import (
+    PLAN_BASE_REVISION_MISMATCH_CODE,
+    PLAN_SOURCE_REVISION_STALE_CODE,
+    PLAN_SOURCE_REVISION_UNAVAILABLE_CODE,
+    PlanBaseRevisionMismatch,
+    PlanSourceRevision,
+    PlanSourceRevisionStale,
+    PlanSourceRevisionUnavailable,
+    bind_plan_source_revision,
+    lock_current_plan_for_action,
+    lock_current_plan_source_revision,
+)
+from app.sandbox.worktree import (
+    WorktreeRevisionError,
+    WorktreeRevisionMismatch,
+    create_worktree,
+    destroy_worktree,
+    verify_worktree_revision,
+    worktree_path,
+)
 
 router = APIRouter(tags=["plans"])
 
@@ -43,9 +67,8 @@ class PlanSubmit(BaseModel):
     tasks: list[PlanTask] = Field(..., max_length=100)
     target_component_id: str = Field(..., max_length=300)
     requester: str = Field(..., max_length=128)
-    # Optional reproducibility pin. None → worktree is created at the
-    # mirror's current HEAD; the resolved SHA is recorded in
-    # worktree_meta either way so re-runs can reference it.
+    # Optional compatibility input. None resolves to the exact canonical
+    # publication SHA; an explicit value must equal that SHA byte-for-byte.
     base_sha: str | None = Field(default=None, max_length=64)
 
 
@@ -58,6 +81,10 @@ class PlanOut(BaseModel):
     impact_report: dict[str, Any] | None
     requester: str
     worktree_path: str | None
+    source_run_id: uuid.UUID | None
+    source_git_sha: str | None
+    source_graph_generation: int | None
+    source_overlay_generation: int | None
     created_at: datetime
     approved_at: datetime | None
     approved_by: str | None
@@ -73,15 +100,55 @@ def _out(plan: Plan) -> PlanOut:
         impact_report=plan.impact_report,
         requester=plan.requester,
         worktree_path=plan.worktree_path,
+        source_run_id=plan.source_run_id,
+        source_git_sha=plan.source_git_sha,
+        source_graph_generation=plan.source_graph_generation,
+        source_overlay_generation=plan.source_overlay_generation,
         created_at=plan.created_at,
         approved_at=plan.approved_at,
         approved_by=plan.approved_by,
     )
 
 
+def _revision_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, PlanBaseRevisionMismatch):
+        detail = PLAN_BASE_REVISION_MISMATCH_CODE
+    elif isinstance(exc, PlanSourceRevisionStale):
+        detail = PLAN_SOURCE_REVISION_STALE_CODE
+    else:
+        detail = PLAN_SOURCE_REVISION_UNAVAILABLE_CODE
+    return HTTPException(status_code=409, detail=detail)
+
+
+def _worktree_http_error(exc: WorktreeRevisionError) -> HTTPException:
+    detail = (
+        "plan_worktree_revision_mismatch"
+        if isinstance(exc, WorktreeRevisionMismatch)
+        else "plan_worktree_revision_unavailable"
+    )
+    return HTTPException(status_code=409, detail=detail)
+
+
+def _revision_worktree_meta(
+    revision: PlanSourceRevision,
+    **extra: str,
+) -> dict[str, Any]:
+    return {
+        "base_sha": revision.git_sha,
+        "source_run_id": str(revision.run_id),
+        "source_graph_generation": revision.source_generation,
+        "source_overlay_generation": revision.overlay_generation,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        **extra,
+    }
+
+
 @router.post(
     "/api/v1/projects/{project_id}/plans",
-    dependencies=[Depends(require_project_org())],
+    dependencies=[
+        Depends(require_project_org()),
+        Depends(require_operator),
+    ],
 )
 async def submit_plan(
     project_id: uuid.UUID,
@@ -89,40 +156,81 @@ async def submit_plan(
     user: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> PlanOut:
-    impacts = await impact_analysis(
-        db, project_id=project_id, symbol_id=body.target_component_id, max_depth=3
-    )
     plan = Plan(
+        id=uuid.uuid4(),
         project_id=project_id,
         spec=body.spec.model_dump(),
         tasks=[t.model_dump() for t in body.tasks],
-        impact_report={
+        requester=body.requester,
+    )
+    worktree_created = False
+    try:
+        revision = await lock_current_plan_source_revision(
+            db,
+            project_id=project_id,
+            requested_base_sha=body.base_sha,
+        )
+        impacts = await impact_analysis(
+            db,
+            project_id=project_id,
+            symbol_id=body.target_component_id,
+            max_depth=3,
+        )
+        plan.impact_report = {
             "directly_affected": impacts["directly_affected"],
             "transitively_affected": impacts["transitively_affected"],
             "opaque_components_touched": impacts["opaque_components_touched"],
-        },
-        requester=body.requester,
-    )
-    db.add(plan)
-    await db.commit()
-    await db.refresh(plan)
+        }
+        bind_plan_source_revision(plan, revision)
+        db.add(plan)
+        await db.flush()
 
-    worktree = await create_worktree(plan.id, project_id, base_sha=body.base_sha)
-    plan.worktree_path = str(worktree)
-    plan.worktree_meta = {
-        "base_sha": body.base_sha,
-        "created_at": datetime.utcnow().isoformat() + "Z",
-    }
-    await db.commit()
+        worktree = await create_worktree(
+            plan.id,
+            project_id,
+            base_sha=revision.git_sha,
+        )
+        worktree_created = True
+        plan.worktree_path = str(worktree)
+        plan.worktree_meta = _revision_worktree_meta(revision)
+        await audit_record(
+            actor=f"user:{user.id}",
+            action="plan.submit",
+            target=str(plan.id),
+            project_id=project_id,
+            details={
+                "title": body.spec.title,
+                "tasks": len(body.tasks),
+                "source_run_id": str(revision.run_id),
+                "source_git_sha": revision.git_sha,
+                "source_generation": revision.source_generation,
+                "overlay_generation": revision.overlay_generation,
+            },
+            session=db,
+        )
+        # The GraphHead + AnalysisRun locks are intentionally held through
+        # this commit, so publication cannot move between review evidence,
+        # worktree verification, and durable Plan provenance.
+        await db.commit()
+    except (
+        PlanBaseRevisionMismatch,
+        PlanSourceRevisionUnavailable,
+    ) as exc:
+        await db.rollback()
+        if worktree_created:
+            await destroy_worktree(plan.id, project_id)
+        raise _revision_http_error(exc) from exc
+    except WorktreeRevisionError as exc:
+        await db.rollback()
+        if worktree_created:
+            await destroy_worktree(plan.id, project_id)
+        raise _worktree_http_error(exc) from exc
+    except Exception:
+        await db.rollback()
+        if worktree_created:
+            await destroy_worktree(plan.id, project_id)
+        raise
     await db.refresh(plan)
-
-    await audit_record(
-        actor=f"user:{user.id}",
-        action="plan.submit",
-        target=str(plan.id),
-        project_id=project_id,
-        details={"title": body.spec.title, "tasks": len(body.tasks)},
-    )
     return _out(plan)
 
 
@@ -149,21 +257,44 @@ async def plan_from_finding(
     the ultrareview pipeline still gates the eventual diff. This
     just removes the transcription step.
     """
-    finding = (
-        await db.execute(select(Finding).where(Finding.id == finding_id))
-    ).scalar_one_or_none()
-    if finding is None:
+    finding_ref = (
+        await db.execute(
+            select(Finding.project_id).where(Finding.id == finding_id)
+        )
+    ).one_or_none()
+    if finding_ref is None:
         raise HTTPException(status_code=404, detail="finding_not_found")
     # Org isolation — the finding's project must be in the caller's org.
     from app.models.projects import Project
 
     project = (
         await db.execute(
-            select(Project).where(Project.id == finding.project_id)
+            select(Project.id, Project.organization_id).where(
+                Project.id == finding_ref.project_id
+            )
         )
-    ).scalar_one_or_none()
-    if project is None or project.organization_id != user.organization_id:
+    ).one_or_none()
+    if project is None or not same_org(user, project.organization_id):
         raise HTTPException(status_code=404, detail="finding_not_found")
+    try:
+        finding = await lock_current_finding_for_action(
+            db,
+            project_id=finding_ref.project_id,
+            finding_id=finding_id,
+        )
+        revision = await lock_current_plan_source_revision(
+            db,
+            project_id=finding_ref.project_id,
+        )
+    except FindingNotCurrent as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=FINDING_NOT_CURRENT_CODE,
+        ) from exc
+    except PlanSourceRevisionUnavailable as exc:
+        await db.rollback()
+        raise _revision_http_error(exc) from exc
 
     subject = finding.subject_node_id or (
         str(finding.subject_edge_id) if finding.subject_edge_id else ""
@@ -200,6 +331,7 @@ async def plan_from_finding(
         max_depth=3,
     )
     plan = Plan(
+        id=uuid.uuid4(),
         project_id=finding.project_id,
         spec=spec,
         tasks=tasks,
@@ -211,27 +343,49 @@ async def plan_from_finding(
         },
         requester=f"user:{user.id}",
     )
-    db.add(plan)
-    await db.commit()
+    bind_plan_source_revision(plan, revision)
+    worktree_created = False
+    try:
+        db.add(plan)
+        await db.flush()
+        worktree = await create_worktree(
+            plan.id,
+            finding.project_id,
+            base_sha=revision.git_sha,
+        )
+        worktree_created = True
+        plan.worktree_path = str(worktree)
+        plan.worktree_meta = {
+            **_revision_worktree_meta(revision),
+            "from_finding": str(finding.id),
+        }
+        await audit_record(
+            actor=f"user:{user.id}",
+            action="plan.from_finding",
+            target=str(plan.id),
+            project_id=finding.project_id,
+            details={
+                "finding_id": str(finding.id),
+                "kind": finding.kind,
+                "source_run_id": str(revision.run_id),
+                "source_git_sha": revision.git_sha,
+                "source_generation": revision.source_generation,
+                "overlay_generation": revision.overlay_generation,
+            },
+            session=db,
+        )
+        await db.commit()
+    except WorktreeRevisionError as exc:
+        await db.rollback()
+        if worktree_created:
+            await destroy_worktree(plan.id, finding.project_id)
+        raise _worktree_http_error(exc) from exc
+    except Exception:
+        await db.rollback()
+        if worktree_created:
+            await destroy_worktree(plan.id, finding.project_id)
+        raise
     await db.refresh(plan)
-
-    worktree = await create_worktree(plan.id, finding.project_id, base_sha=None)
-    plan.worktree_path = str(worktree)
-    plan.worktree_meta = {
-        "base_sha": None,
-        "created_at": datetime.utcnow().isoformat() + "Z",
-        "from_finding": str(finding.id),
-    }
-    await db.commit()
-    await db.refresh(plan)
-
-    await audit_record(
-        actor=f"user:{user.id}",
-        action="plan.from_finding",
-        target=str(plan.id),
-        project_id=finding.project_id,
-        details={"finding_id": str(finding.id), "kind": finding.kind},
-    )
     return _out(plan)
 
 
@@ -263,7 +417,7 @@ async def plans_for_finding(
             select(Project).where(Project.id == finding.project_id)
         )
     ).scalar_one_or_none()
-    if project is None or project.organization_id != user.organization_id:
+    if project is None or not same_org(user, project.organization_id):
         raise HTTPException(status_code=404, detail="finding_not_found")
 
     rows = (
@@ -341,19 +495,46 @@ async def decide_plan(
     user: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> PlanOut:
-    plan = await _plan_in_user_org(db, user, plan_id)
+    plan_ref = await _plan_in_user_org(db, user, plan_id)
+    try:
+        plan, revision = await lock_current_plan_for_action(
+            db,
+            plan_id=plan_id,
+            project_id=plan_ref.project_id,
+        )
+    except (PlanSourceRevisionStale, PlanSourceRevisionUnavailable) as exc:
+        await db.rollback()
+        raise _revision_http_error(exc) from exc
+    if body.status == "approve":
+        try:
+            expected_path = worktree_path(plan.id)
+            if plan.worktree_path != str(expected_path):
+                raise WorktreeRevisionMismatch(
+                    "stored Plan worktree path is not the plan-scoped path"
+                )
+            await verify_worktree_revision(plan.id, revision.git_sha)
+        except WorktreeRevisionError as exc:
+            await db.rollback()
+            raise _worktree_http_error(exc) from exc
     status_map = {"approve": "approved", "reject": "rejected", "regenerate": "pending_approval"}
     plan.status = status_map[body.status]
     if body.status == "approve":
-        plan.approved_at = datetime.utcnow()
+        plan.approved_at = datetime.now(timezone.utc)
         plan.approved_by = f"user:{user.id}"
     plan.feedback = body.feedback
-    await db.commit()
-    await db.refresh(plan)
     await audit_record(
         actor=f"user:{user.id}",
         action=f"plan.{body.status}",
         target=str(plan.id),
         project_id=plan.project_id,
+        details={
+            "source_run_id": str(revision.run_id),
+            "source_git_sha": revision.git_sha,
+            "source_generation": revision.source_generation,
+            "overlay_generation": revision.overlay_generation,
+        },
+        session=db,
     )
+    await db.commit()
+    await db.refresh(plan)
     return _out(plan)

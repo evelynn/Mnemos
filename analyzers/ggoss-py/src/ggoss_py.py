@@ -45,7 +45,9 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -82,19 +84,53 @@ _SKIP_DIRS = {
 }
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    """Return true for POSIX links and Windows directory junctions."""
+
+    try:
+        is_junction = getattr(path, "is_junction", None)
+        return path.is_symlink() or bool(is_junction and is_junction())
+    except OSError:
+        # An unreadable/replaced entry is not safe to traverse.
+        return True
+
+
 def _iter_py_files(root: Path) -> Iterator[Path]:
     """Yield .py files under root, skipping common generated /
     third-party trees. Matches what an operator would expect to
     see in a graph view of their codebase."""
+    if _is_link_or_junction(root):
+        return
     if root.is_file() and root.suffix == ".py":
         yield root
         return
     for dirpath, dirnames, filenames in os.walk(root):
         # Mutate dirnames in place so os.walk skips them entirely.
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _SKIP_DIRS and not d.startswith(".")
+            and not _is_link_or_junction(Path(dirpath) / d)
+        ]
         for name in filenames:
-            if name.endswith(".py"):
-                yield Path(dirpath) / name
+            path = Path(dirpath) / name
+            if name.endswith(".py") and not _is_link_or_junction(path):
+                yield path
+
+
+def _parse_python_source(source: str, *, filename: str) -> ast.Module:
+    """Parse without leaking non-fatal compiler warnings to JSONL stderr.
+
+    Invalid-escape warnings do not make a file unparsable, but supported
+    Python versions can emit them while building the AST.  Analyzer stderr is
+    a machine channel, so an unstructured warning there is interpreted as a
+    coverage failure.  Real ``SyntaxError`` exceptions remain visible to each
+    verb's existing diagnostic policy.
+    """
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        warnings.simplefilter("ignore", DeprecationWarning)
+        return ast.parse(source, filename=filename)
 
 
 # ─── symbol extraction ─────────────────────────────────────────────
@@ -109,7 +145,7 @@ def _symbol_id(rel_path: str, name: str, lineno: int) -> str:
 def _component_id(target: Path) -> str:
     """Top-level project name as the component id — matches the
     convention ggoss-ts uses for monorepo packages."""
-    name = target.resolve().name or "py-project"
+    name = os.environ.get("MNEMOS_PROJECT_ID") or target.resolve().name or "py-project"
     return f"py.{name}"
 
 
@@ -488,7 +524,7 @@ def cmd_symbols(target: Path, out_stream) -> None:
     for path in _iter_py_files(target):
         try:
             src = path.read_text(encoding="utf-8", errors="replace")
-            tree = ast.parse(src, filename=str(path))
+            tree = _parse_python_source(src, filename=str(path))
         except SyntaxError as exc:
             # Match ggoss-ts behaviour: emit a recoverable error
             # record on stderr, continue with the next file.
@@ -498,7 +534,7 @@ def cmd_symbols(target: Path, out_stream) -> None:
                 "recoverable": True,
             }) + "\n")
             continue
-        rel = str(path.resolve())
+        rel = path.resolve().relative_to(target).as_posix()
         symbols = _walk_symbols(tree, rel)
         for s in symbols:
             out_stream.write(_envelope("symbol", {
@@ -543,10 +579,10 @@ def cmd_calls(target: Path, out_stream) -> None:
     for path in _iter_py_files(target):
         try:
             src = path.read_text(encoding="utf-8", errors="replace")
-            tree = ast.parse(src, filename=str(path))
+            tree = _parse_python_source(src, filename=str(path))
         except SyntaxError:
             continue
-        rel = str(path.resolve())
+        rel = path.resolve().relative_to(target).as_posix()
         symbols = _walk_symbols(tree, rel)
         files.append((rel, tree, symbols))
         for s in symbols:
@@ -668,10 +704,10 @@ def cmd_contracts(target: Path, out_stream) -> None:
     for path in _iter_py_files(target):
         try:
             src = path.read_text(encoding="utf-8", errors="replace")
-            tree = ast.parse(src, filename=str(path))
+            tree = _parse_python_source(src, filename=str(path))
         except SyntaxError:
             continue
-        rel = str(path.resolve())
+        rel = path.resolve().relative_to(target).as_posix()
         symbols = _walk_symbols(tree, rel)
         sym_by_line: dict[int, _Symbol] = {s.line: s for s in symbols}
 
@@ -738,17 +774,15 @@ def _deco_framework(deco: ast.expr) -> str:
 # - Schema-qualification falls to the merge layer (DB analyzers emit
 #   schema-qualified entities; this one emits ``data.<table>``).
 
-import re as _re
-
-_SQL_VERB_RE = _re.compile(
+_SQL_VERB_RE = re.compile(
     r"^\s*(SELECT|INSERT|UPDATE|DELETE)\s+",
-    _re.IGNORECASE | _re.MULTILINE,
+    re.IGNORECASE | re.MULTILINE,
 )
 _SQL_TABLE_RE = {
-    "SELECT": _re.compile(r"\bFROM\s+([A-Za-z_][\w.]*)", _re.IGNORECASE),
-    "INSERT": _re.compile(r"\bINTO\s+([A-Za-z_][\w.]*)", _re.IGNORECASE),
-    "UPDATE": _re.compile(r"\bUPDATE\s+([A-Za-z_][\w.]*)", _re.IGNORECASE),
-    "DELETE": _re.compile(r"\bFROM\s+([A-Za-z_][\w.]*)", _re.IGNORECASE),
+    "SELECT": re.compile(r"\bFROM\s+([A-Za-z_][\w.]*)", re.IGNORECASE),
+    "INSERT": re.compile(r"\bINTO\s+([A-Za-z_][\w.]*)", re.IGNORECASE),
+    "UPDATE": re.compile(r"\bUPDATE\s+([A-Za-z_][\w.]*)", re.IGNORECASE),
+    "DELETE": re.compile(r"\bFROM\s+([A-Za-z_][\w.]*)", re.IGNORECASE),
 }
 _VERB_TO_KIND = {
     "SELECT": "READS", "INSERT": "WRITES",
@@ -798,10 +832,10 @@ def cmd_data_access(target: Path, out_stream) -> None:
     for path in _iter_py_files(target):
         try:
             src = path.read_text(encoding="utf-8", errors="replace")
-            tree = ast.parse(src, filename=str(path))
+            tree = _parse_python_source(src, filename=str(path))
         except SyntaxError:
             continue
-        rel = str(path.resolve())
+        rel = path.resolve().relative_to(target).as_posix()
         symbols = _walk_symbols(tree, rel)
         sym_by_qname: dict[str, _Symbol] = {s.qual_name: s for s in symbols}
         emitted_entities: set[str] = set()

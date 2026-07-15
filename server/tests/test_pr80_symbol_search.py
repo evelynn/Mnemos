@@ -108,6 +108,7 @@ def test_get_symbol_returns_l1_summary():
         Path(__file__).resolve().parents[1] / "app" / "mcp" / "queries.py"
     ).read_text(encoding="utf-8")
     idx = body.find("async def get_symbol(")
-    slab = body[idx:idx + 2200]
+    next_def = body.find("\nasync def ", idx + 1)
+    slab = body[idx:next_def if next_def != -1 else None]
     assert '"l1_summary"' in slab
     assert "Summary.level == 1" in slab

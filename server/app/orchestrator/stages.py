@@ -22,6 +22,7 @@ stage closes as ``partial``.
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from datetime import datetime, timezone
@@ -32,6 +33,15 @@ from sqlalchemy import update
 from app.db import SessionLocal
 from app.models.stages import AnalysisStage
 from app.orchestrator.progress import ProgressBus
+
+_MAX_STAGE_ERROR_CHARS = 2048
+
+
+def _bounded_stage_error(value: Any) -> str:
+    text = str(value)
+    if len(text) <= _MAX_STAGE_ERROR_CHARS:
+        return text
+    return text[: _MAX_STAGE_ERROR_CHARS - 16] + "\n...[truncated]"
 
 
 class StageBudgetExceeded(Exception):
@@ -50,6 +60,7 @@ class StageTracker:
         position: int = 0,
         items_total: int = 0,
         time_budget_sec: int | None = None,
+        suppress_budget_exceeded: bool = True,
     ) -> None:
         self._bus = bus
         self._run_id = run_id
@@ -60,11 +71,13 @@ class StageTracker:
         self._items_total = items_total
         self._items_done = 0
         self._budget = time_budget_sec
+        self._suppress_budget_exceeded = suppress_budget_exceeded
         self._started_at: float | None = None
         self._stats: dict[str, Any] = {}
         self._stage_id: uuid.UUID | None = None
         self._publish_every = 25
         self._last_publish = 0
+        self._partial_reason: str | None = None
 
     async def __aenter__(self) -> "StageTracker":
         async with SessionLocal() as session:
@@ -98,8 +111,25 @@ class StageTracker:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
+        if exc_type is not None and (
+            issubclass(exc_type, asyncio.CancelledError)
+            or exc_type.__name__ == "AnalysisCancelled"
+        ):
+            await self._close("cancelled", error_log="analysis_cancelled")
+            await self._bus.publish(
+                self._run_id,
+                {
+                    "event": "stage_cancelled",
+                    "stage_id": str(self._stage_id),
+                    "name": self._name,
+                    "items_done": self._items_done,
+                    "items_total": self._items_total,
+                },
+            )
+            return False
         if exc_type is StageBudgetExceeded:
-            await self._close("partial", error_log=str(exc))
+            bounded_error = _bounded_stage_error(exc)
+            await self._close("partial", error_log=bounded_error)
             await self._bus.publish(
                 self._run_id,
                 {
@@ -112,16 +142,33 @@ class StageTracker:
                     "reason": "budget_exceeded",
                 },
             )
-            return True  # swallow
+            return self._suppress_budget_exceeded
         if exc_type is not None:
-            await self._close("failed", error_log=str(exc))
+            bounded_error = _bounded_stage_error(exc)
+            await self._close("failed", error_log=bounded_error)
             await self._bus.publish(
                 self._run_id,
                 {
                     "event": "stage_failed",
                     "stage_id": str(self._stage_id),
                     "name": self._name,
-                    "error": str(exc),
+                    "error": bounded_error,
+                },
+            )
+            return False
+        if self._partial_reason is not None:
+            bounded_reason = _bounded_stage_error(self._partial_reason)
+            await self._close("partial", error_log=bounded_reason)
+            await self._bus.publish(
+                self._run_id,
+                {
+                    "event": "stage_partial",
+                    "stage_id": str(self._stage_id),
+                    "name": self._name,
+                    "items_done": self._items_done,
+                    "items_total": self._items_total,
+                    "stats": self._stats,
+                    "reason": bounded_reason,
                 },
             )
             return False
@@ -145,6 +192,11 @@ class StageTracker:
 
     def set_stats(self, stats: dict[str, Any]) -> None:
         self._stats = dict(stats)
+
+    def mark_partial(self, reason: str) -> None:
+        """Close an otherwise non-throwing stage as explicitly incomplete."""
+
+        self._partial_reason = reason
 
     async def increment(self, amount: int = 1) -> None:
         self._items_done += amount

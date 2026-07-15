@@ -1,14 +1,9 @@
-"""PR-179 — admin API for the Chat tab's AI-provider configuration.
+"""Platform-owned AI-provider configuration endpoints.
 
-Backs the "AI 제공자" Settings section so an operator configures providers
-in the GUI instead of editing env vars and restarting. API keys are stored
-encrypted in the ``Secret`` table (reusing the platform's KMS); model names
-and Atlas's base URL go in the global ``PlatformSetting`` row
-``chat_providers``. ``llm_providers.resolve_config`` reads both back (DB
-over env) at chat time.
-
-Admin-only. Keys are write-only over this API — a GET never returns a
-stored key, only whether one is present.
+Provider settings and keys are global, but Mnemos currently has no distinct
+platform-admin principal.  All routes in this module therefore fail closed
+with ``platform_admin_required``. Runtime provider resolution remains in
+``llm_providers`` for environment- or operator-provisioned configuration.
 """
 
 from __future__ import annotations
@@ -42,6 +37,12 @@ from app.models.auth import PlatformSetting, Secret, User
 from app.safety.crypto import encrypt
 
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
+
+
+def _require_platform_admin() -> None:
+    """No platform-admin role exists, so global config APIs stay disabled."""
+
+    raise HTTPException(status_code=403, detail="platform_admin_required")
 
 
 class ProviderConfigUpdate(BaseModel):
@@ -88,8 +89,8 @@ async def get_provider_config(
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Per-provider config status for the Settings UI. Never returns a
-    stored API key — only ``has_key`` and the last-test outcome."""
+    """Reject access until a real platform-admin principal exists."""
+    _require_platform_admin()
     cfg = await resolve_config(db)
     secs = (
         await db.execute(select(Secret).where(Secret.label.like(SECRET_PREFIX + "%")))
@@ -108,6 +109,8 @@ async def put_provider_config(
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_session),
 ) -> dict:
+    """Reject mutation until a real platform-admin principal exists."""
+    _require_platform_admin()
     if provider not in PROVIDER_ORDER:
         raise HTTPException(status_code=404, detail="unknown_provider")
 
@@ -176,8 +179,8 @@ async def test_provider_config(
     user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Live-validate the provider's key/base_url and return the models it
-    exposes (the UI refreshes its dropdown from this)."""
+    """Reject live tests until a real platform-admin principal exists."""
+    _require_platform_admin()
     if provider not in PROVIDER_ORDER:
         raise HTTPException(status_code=404, detail="unknown_provider")
     cfg = await resolve_config(db)

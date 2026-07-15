@@ -68,14 +68,18 @@ def test_fix_b_sample_route_not_shadowed_by_detail_route():
 
     from starlette.routing import Match
 
-    from app.main import app
+    # FastAPI 0.135 keeps included routers as lazy ``_IncludedRouter``
+    # wrappers on the top-level app.  Match against the owning router so this
+    # regression test still checks the route precedence itself rather than a
+    # framework-private flattening detail.
+    from app.api.data import router
 
     pid = str(uuid.uuid4())
     path = f"/api/v1/projects/{pid}/data_entities/data:foo.bar.Orders/sample"
     scope = {"type": "http", "method": "GET", "path": path, "headers": []}
 
     matched = None
-    for route in app.router.routes:
+    for route in router.routes:
         try:
             m, _ = route.matches(scope)
         except Exception:  # noqa: BLE001
@@ -104,14 +108,18 @@ def test_fix_c_progress_bus_uses_fakeredis_in_local_mode():
     assert is_local_mode(), "test misconfigured: not in local mode"
 
     bus = ProgressBus()
-    # The client must come from fakeredis, never a real redis connection.
-    assert "fakeredis" in type(bus._client).__module__, (
-        f"ProgressBus dialed {type(bus._client).__module__} instead of fakeredis "
-        f"in local mode"
-    )
+    # Client resolution is deliberately lazy: constructing one bus per SSE
+    # request must neither connect nor allocate a new Redis pool.
+    assert bus._client is None
 
     async def _publish_round_trip() -> None:
         # Pre-fix this raised redis.exceptions.ConnectionError (Errno 111).
         await bus.publish(uuid.uuid4(), {"event": "run_started"})
+        # The shared client must still come from fakeredis in local mode,
+        # never from a newly-created real Redis connection.
+        assert "fakeredis" in type(bus._client).__module__, (
+            f"ProgressBus dialed {type(bus._client).__module__} instead of "
+            "fakeredis in local mode"
+        )
 
     asyncio.run(_publish_round_trip())

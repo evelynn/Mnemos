@@ -63,17 +63,19 @@ def test_roi_accepts_days_window():
 
 
 def test_roi_open_risk_not_windowed():
-    """open_risk_remaining is a live snapshot — it must be counted
-    before the window filter, not skipped for old findings."""
+    """Open risk is exact-head current state and never time-windowed."""
     body = _read(_APP / "api" / "findings.py")
     idx = body.find("async def findings_roi(")
     slab = body[idx:idx + 3800]
-    open_at = slab.find("open_risk_remaining += risk")
-    window_at = slab.find("if window_start is not None and (")
-    assert open_at != -1 and window_at != -1
-    # The open-risk accumulation + continue happens before the
-    # terminal-state window filter.
-    assert open_at < window_at
+    assert "current_findings_select(project_id)" in slab
+    assert 'Finding.status.in_(("open", "acknowledged"))' in slab
+    assert "func.sum(Finding.risk_score)" in slab
+    # The current-head aggregate has no generated/resolved timestamp filter;
+    # only terminal historical flow metrics use ``window_start``.
+    current_start = slab.find("open_risk_stmt =")
+    current_end = slab.find("open_risk_remaining =", current_start)
+    assert current_start != -1 and current_end != -1
+    assert "window_start" not in slab[current_start:current_end]
 
 
 # ---------------------------------------------------------------------------

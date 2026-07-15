@@ -48,10 +48,12 @@ async def resolve_project_db(
     from app.models.projects import ProjectDB
 
     result = await session.execute(
-        select(ProjectDB).where(
+        select(ProjectDB)
+        .where(
             ProjectDB.project_id == project_id,
             ProjectDB.component_id == component_id,
         )
+        .execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
 

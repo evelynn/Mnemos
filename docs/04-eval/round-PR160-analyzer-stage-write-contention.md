@@ -1,5 +1,10 @@
 # Round PR-160 — 결정적 분석 스테이지가 진행 보고 전에 그래프 행을 커밋 (docker-free SQLite 쓰기 경합)
 
+> **Historical round record.** 아래의 analyzer→current graph INSERT 경로는
+> 당시 구현이다. 현재 ingest는 run-scoped staging에 기록한 뒤 sealed
+> coverage와 atomic publication으로 current head를 교체한다. 이 문서는
+> SQLite 경합의 역사적 재현 증거로만 사용한다.
+
 작성: 2026-06-15 · 브랜치 `main` · 이전 commit `321e8ca` (PR-159 머지)
 트리거: 중단된 자율 라운드 재개. docker-free 결정적 분석(PR-153 in-repo `ggoss-py`)이
 실제 행을 스트리밍하게 되면서, PR-141 이 에이전트 스테이지에만 적용했던

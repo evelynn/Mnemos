@@ -5,7 +5,8 @@ PR-138d fixed three tz-naive datetime comparison crashes in
 rest of the codebase for the same pattern and locks the fix:
 
 - ``UserInvite.expires_at < now`` in onboarding.py (invite accept)
-- ``PasswordResetToken.expires_at < now`` in onboarding.py (reset)
+- password-reset expiry now runs inside a DB predicate, avoiding a Python
+  naive/aware comparison entirely
 
 The bug shape is universal: the model declares
 ``DateTime(timezone=True)`` (PG returns aware), but SQLite has no
@@ -50,7 +51,17 @@ from app.models.onboarding import PasswordResetToken, UserInvite  # noqa: E402
 async def session() -> AsyncIterator[AsyncSession]:
     eng = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with eng.begin() as c:
-        await c.run_sync(Base.metadata.create_all)
+        await c.run_sync(
+            lambda connection: Base.metadata.create_all(
+                connection,
+                tables=[
+                    _org.Organization.__table__,
+                    User.__table__,
+                    UserInvite.__table__,
+                    PasswordResetToken.__table__,
+                ],
+            )
+        )
     Sess = sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
     async with Sess() as s:
         yield s
@@ -80,18 +91,19 @@ def test_onboarding_module_coerces_naive_expires_before_compare():
         Path(__file__).resolve().parents[1]
         / "app" / "api" / "onboarding.py"
     ).read_text(encoding="utf-8")
-    # Each accept-invite + consume-reset block must replace naive
-    # expires_at with a tzinfo-aware datetime.
-    for marker in (
-        "accept_invite",
-        "consume_password_reset",
-    ):
+    # Invite acceptance still performs a Python comparison and must coerce the
+    # SQLite-naive value. Password-reset consumption compares in SQL instead.
+    for marker in ("accept_invite",):
         idx = src.find("async def " + marker)
         assert idx >= 0, f"{marker} handler missing"
         body = src[idx:idx + 2500]
         assert "tzinfo is None" in body or "tzinfo=timezone.utc" in body, (
             f"{marker} no longer coerces naive expires_at"
         )
+    reset_idx = src.find("async def consume_password_reset")
+    reset_body = src[reset_idx:reset_idx + 5000]
+    assert "PasswordResetToken.expires_at > now" in reset_body
+    assert ".returning(PasswordResetToken.user_id)" in reset_body
 
 
 @pytest.mark.asyncio
@@ -186,6 +198,12 @@ def test_no_unguarded_expires_at_lt_now_in_api():
         src = f.read_text(encoding="utf-8")
         for m in pattern.finditer(src):
             line = src.count("\n", 0, m.start()) + 1
+            expression_start = src.rfind("\n", 0, m.start()) + 1
+            expression = src[expression_start:m.end()]
+            # ORM class attributes are compiled into a DB-side comparison;
+            # Python never compares the datetime values.
+            if "PasswordResetToken.expires_at" in expression:
+                continue
             window_start = max(0, m.start() - 300)
             window = src[window_start:m.start()]
             # The fix pattern: a recent ``.replace(tzinfo=timezone.utc)``

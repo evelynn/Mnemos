@@ -6,10 +6,9 @@ operation, kind)``. This module:
 
 * Walks a span tree (per trace) the receiver hands us, resolving
   caller/callee pairs through ``parent_span_id``.
-* For each ``(caller, callee, kind)`` triple that matches an
-  existing ``Edge``, upserts ``Edge.data.exercised = "true"`` and
-  ``Edge.data.last_seen_at`` so downstream queries can filter on
-  the ``runtime_exercised`` flag.
+* For each ``(caller, callee, kind)`` triple that matches an existing
+  ``Edge``, advances a durable logical-edge runtime overlay and materializes
+  its ``exercised`` fields for legacy readers.
 * For triples that don't resolve (early-arrival span, project not
   yet registered, etc.), buffers a RuntimeObservation row so the
   next analysis run's merge stage replays them.
@@ -26,10 +25,15 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.graph_overlays import (
+    advance_overlay_generation_once,
+    lock_ready_graph_for_overlay_write,
+    record_runtime_observation_for_edge,
+)
 from app.models.graph import Edge
 from app.models.runtime import RuntimeObservation
 
@@ -257,13 +261,15 @@ async def reconcile_observations(
 ) -> dict[str, int]:
     """Match buffered observations against this project's edges.
 
-    For each observation whose ``service`` maps to a Node with kind
-    ``Service`` *and* whose ``operation`` matches an outgoing Edge of
-    the documented kind, mark the edge ``exercised: true`` (preserve
-    the existing ``data`` JSONB), set ``last_seen_at``, and bump
-    ``hit_count`` if present.
+    For each observation whose operation matches a current edge of the
+    documented kind, advance a durable logical-edge overlay.  A graph-head
+    lock linearizes the whole reconciliation with source promotion, while an
+    observation cursor makes cumulative ``seen_count`` replay idempotent.
+    Candidate route comparisons always go through ``_operation_matches(...)``
+    so templated and literal HTTP paths use the same normalization contract.
 
-    Returns ``{"matched": N, "unmatched": M}``.
+    Returns ``{"matched": N, "unmatched": M, "new_hits": D}``, where
+    ``new_hits`` excludes counts already consumed by a prior replay.
 
     The strategy is intentionally conservative — the merge stage that
     runs after L0 extraction calls this; a real cross-language graph
@@ -281,9 +287,18 @@ async def reconcile_observations(
         )
     ).scalars().all()
 
+    if not obs_rows:
+        return {"matched": 0, "unmatched": 0, "new_hits": 0}
+
+    # The HTTP/read guard is not a write fence.  Hold the head lock before
+    # selecting current edges so promotion is strictly before or after this
+    # reconciliation, never interleaved with a physical bitemporal version.
+    head = await lock_ready_graph_for_overlay_write(db, project_id=project_id)
+
     matched = 0
     unmatched = 0
-    now = datetime.now(tz=timezone.utc)
+    new_hits = 0
+    overlay_changed = False
     for obs in obs_rows:
         edge_q = (
             select(Edge)
@@ -324,19 +339,23 @@ async def reconcile_observations(
         if hit is None:
             unmatched += 1
             continue
-        new_data = dict(hit.data or {})
-        new_data["exercised"] = "true"
-        new_data["last_seen_at"] = now.isoformat()
-        new_data["hit_count"] = int(new_data.get("hit_count", 0)) + obs.seen_count
-        await db.execute(
-            update(Edge)
-            .where(Edge.id == hit.id, Edge.valid_from == hit.valid_from)
-            .values(data=new_data)
-        )
-        # Mark this observation as reconciled by pinning its
-        # project_id (in case it came in before the project was
-        # registered). The 14-day retention sweep will clean it up.
+        # Pin early-arrival evidence before inserting the cursor.  Migration
+        # 0028's composite FK then proves the cursor cannot attach an
+        # observation consumed by a different project.
         if obs.project_id is None:
             obs.project_id = project_id
+        write = await record_runtime_observation_for_edge(
+            db,
+            project_id=project_id,
+            edge=hit,
+            observation_id=obs.id,
+            observation_seen_count=obs.seen_count,
+            first_seen_at=obs.first_seen_at,
+            last_seen_at=obs.last_seen_at,
+        )
+        new_hits += write.new_hits
+        overlay_changed = overlay_changed or write.changed
         matched += 1
-    return {"matched": matched, "unmatched": unmatched}
+    if overlay_changed:
+        await advance_overlay_generation_once(db, head=head)
+    return {"matched": matched, "unmatched": unmatched, "new_hits": new_hits}

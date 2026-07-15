@@ -6,7 +6,6 @@ the "product complete" state.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 _SERVER = Path(__file__).resolve().parents[1]
@@ -26,15 +25,15 @@ def _read(p: Path) -> str:
 
 def test_light_accent_passes_wcag_aa():
     """The accent has to clear AA's 4.5:1 floor on white. History:
-    #1f6feb (4.18:1, failed) → #0a5fc7 (4.74:1, PR-48) → #4f46e5
-    (indigo-600, 6.29:1, PR-165 shadcn redesign)."""
+    Nord #5e81ac was only 4.03:1; #4c6f93 keeps the palette while clearing
+    the floor at roughly 5.25:1."""
     body = _read(_STATIC / "app.css")
     # The new value must be the one in the light :root block.
     light_idx = body.find(":root {")
     end = body.find(":root[data-theme=\"dark\"]")
     light_block = body[light_idx:end]
-    assert "--accent:               #4f46e5" in light_block, (
-        "light --accent must be #4f46e5 (indigo-600, 6.29:1 on white)"
+    assert "--accent:               #4c6f93" in light_block, (
+        "light --accent must be #4c6f93 (about 5.25:1 on white)"
     )
 
 
@@ -56,8 +55,8 @@ def _relative_luminance(rgb: tuple[int, int, int]) -> float:
 
 def test_light_accent_contrast_arithmetic():
     """Belt-and-braces: actually compute the ratio against white
-    and assert it's at least 4.5:1. Tracks the live accent (#4f46e5)."""
-    accent_l = _relative_luminance(_hex_to_rgb("#4f46e5"))
+    and assert it's at least 4.5:1. Tracks the live accent (#4c6f93)."""
+    accent_l = _relative_luminance(_hex_to_rgb("#4c6f93"))
     white_l = _relative_luminance(_hex_to_rgb("#ffffff"))
     ratio = (max(accent_l, white_l) + 0.05) / (min(accent_l, white_l) + 0.05)
     assert ratio >= 4.5, f"accent on white = {ratio:.2f}:1, want ≥ 4.5"
@@ -105,11 +104,11 @@ def test_readme_records_team_product_phase():
 def test_readme_records_current_state():
     body = _read(_README)
     assert "**Current state**" in body
-    # Test counts are stated in the "N unit + M integration" shape; the
-    # numbers themselves move with the suite, so pin the shape only.
-    assert re.search(r"[\d,]+ unit \+ \d+ integration", body)
+    # The remediation charter deliberately avoids presenting a moving test
+    # count as production-readiness evidence.
+    assert "Do not infer production readiness from" in body
     # Spec §2 still fully preserved.
-    assert "10 of 10" in body
+    assert "10. Single-operator-friendly" in body
 
 
 # ---------------------------------------------------------------------------

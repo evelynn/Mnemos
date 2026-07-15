@@ -4,7 +4,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select, update
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +14,11 @@ from app.db import get_session
 from app.models.auth import Secret, User
 from app.safety.crypto import decrypt, encrypt
 from app.safety.probe import probe_tcp
+from app.secret_scope import (
+    SecretScopeNotFound,
+    is_global_reserved_secret_label,
+    resolve_org_secret,
+)
 
 router = APIRouter(prefix="/api/v1/secrets", tags=["secrets"])
 
@@ -57,6 +62,26 @@ def _to_out(s: Secret) -> SecretOut:
     )
 
 
+async def _secret_in_user_org(
+    db: AsyncSession,
+    user: User,
+    secret_id: uuid.UUID,
+    *,
+    for_update: bool = False,
+) -> Secret:
+    """Resolve a Secret without revealing missing/cross-org/legacy state."""
+
+    try:
+        return await resolve_org_secret(
+            db,
+            organization_id=user.organization_id,
+            secret_id=secret_id,
+            for_update=for_update,
+        )
+    except SecretScopeNotFound as exc:
+        raise HTTPException(status_code=404, detail="not_found") from exc
+
+
 @router.get("")
 async def list_secrets(
     user: User = Depends(require_admin),
@@ -64,15 +89,12 @@ async def list_secrets(
 ) -> list[SecretOut]:
     # Admin-only AND scoped to the caller's org: the old route returned
     # every tenant's ciphertext metadata to any logged-in user (§2.8).
-    # Pre-PR-88 rows have ``organization_id IS NULL`` and are treated
-    # as belonging to the legacy default-org pool — visible to any
-    # admin, since they predate org isolation.
+    # Secret ownership is fail-closed: NULL legacy rows are not a global
+    # credential pool and must be explicitly assigned before use.
     stmt = select(Secret).order_by(Secret.created_at.desc())
-    if user.organization_id is not None:
-        stmt = stmt.where(
-            (Secret.organization_id == user.organization_id)
-            | Secret.organization_id.is_(None)
-        )
+    if user.organization_id is None:
+        return []
+    stmt = stmt.where(Secret.organization_id == user.organization_id)
     result = await db.execute(stmt)
     return [_to_out(s) for s in result.scalars().all()]
 
@@ -83,6 +105,16 @@ async def create_secret(
     db: AsyncSession = Depends(get_session),
     user: User = Depends(require_admin),
 ) -> SecretOut:
+    if user.organization_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="organization_required",
+        )
+    if is_global_reserved_secret_label(body.label):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="reserved_global_secret_label",
+        )
     ciphertext, iv = encrypt(body.value)
     secret = Secret(
         label=body.label,
@@ -116,11 +148,15 @@ async def update_secret(
     db: AsyncSession = Depends(get_session),
     user: User = Depends(require_admin),
 ) -> SecretOut:
-    secret = (
-        await db.execute(select(Secret).where(Secret.id == secret_id))
-    ).scalar_one_or_none()
-    if secret is None:
-        raise HTTPException(status_code=404, detail="not_found")
+    secret = await _secret_in_user_org(db, user, secret_id, for_update=True)
+    if is_global_reserved_secret_label(secret.label) or (
+        body.label is not None
+        and is_global_reserved_secret_label(body.label)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="reserved_global_secret_label",
+        )
     if body.label is not None:
         secret.label = body.label
     if body.value is not None:
@@ -145,9 +181,8 @@ async def delete_secret(
     db: AsyncSession = Depends(get_session),
     user: User = Depends(require_admin),
 ) -> None:
-    result = await db.execute(delete(Secret).where(Secret.id == secret_id))
-    if result.rowcount == 0:
-        raise HTTPException(status_code=404, detail="not_found")
+    secret = await _secret_in_user_org(db, user, secret_id, for_update=True)
+    await db.delete(secret)
     await db.commit()
     await audit_record(
         actor=f"user:{user.id}", action="secret.delete", target=str(secret_id)
@@ -167,11 +202,7 @@ async def test_secret(
     process isolated from production DBs). This endpoint catches the
     common misconfigurations (bad host, wrong port, firewall) up front.
     """
-    secret = (
-        await db.execute(select(Secret).where(Secret.id == secret_id))
-    ).scalar_one_or_none()
-    if secret is None:
-        raise HTTPException(status_code=404, detail="not_found")
+    secret = await _secret_in_user_org(db, user, secret_id, for_update=True)
     try:
         plaintext = decrypt(secret.ciphertext, secret.iv)
     except Exception as exc:  # noqa: BLE001
@@ -180,7 +211,10 @@ async def test_secret(
         now = datetime.utcnow()
         await db.execute(
             update(Secret)
-            .where(Secret.id == secret_id)
+            .where(
+                Secret.id == secret_id,
+                Secret.organization_id == user.organization_id,
+            )
             .values(last_tested_at=now, last_test_result=message)
         )
         await db.commit()
@@ -203,7 +237,10 @@ async def test_secret(
     now = datetime.utcnow()
     await db.execute(
         update(Secret)
-        .where(Secret.id == secret_id)
+        .where(
+            Secret.id == secret_id,
+            Secret.organization_id == user.organization_id,
+        )
         .values(last_tested_at=now, last_test_result=message)
     )
     await db.commit()

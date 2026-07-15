@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import os
 import uuid as _uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -45,8 +47,11 @@ from app.models import findings as _findings  # noqa: E402,F401
 from app.models import graph as _graph  # noqa: E402,F401
 from app.models import organization as _org  # noqa: E402,F401
 from app.models.auth import User  # noqa: E402
+from app.models.organization import Organization  # noqa: E402
+from app.models.graph import AnalysisRun, GraphHead  # noqa: E402
 from app.models.plans import DiffSubmission, Plan  # noqa: E402
 from app.models.projects import Project  # noqa: E402
+from app.testing.graph_publication import published_run_fields  # noqa: E402
 
 
 def _blocked_report():
@@ -97,22 +102,68 @@ async def test_blocked_diff_cannot_be_approved_without_break_glass(monkeypatch):
 
         return _MR()
 
+    async def _valid_worktree(*_a, **_k):
+        return Path("/tmp/wt")
+
+    async def _reviewed_diff(*_a, **_k):
+        return "--- a\n+++ b\n"
+
     monkeypatch.setattr(diffs, "audit_record", _noop_audit)
     monkeypatch.setattr(diffs, "run_pipeline", _fake_pipeline)
     monkeypatch.setattr(diffs, "create_mr_from_worktree", _fake_mr)
+    monkeypatch.setattr(diffs, "verify_worktree_revision", _valid_worktree)
+    monkeypatch.setattr(diffs, "compute_diff", _reviewed_diff)
+    monkeypatch.setattr(diffs, "worktree_path", lambda _plan_id: Path("/tmp/wt"))
 
     async with Sess() as session:
         org_id = _uuid.uuid4()
+        session.add(
+            Organization(id=org_id, slug="pr161", display_name="PR 161")
+        )
+        await session.flush()
         project = Project(
             id=_uuid.uuid4(), name="p", gitlab_project_id=7,
             gitlab_url="http://x", default_branch="main",
             languages=["python"], organization_id=org_id,
         )
         session.add(project)
+        await session.flush()
+        published_at = datetime.now(tz=timezone.utc)
+        run = AnalysisRun(
+            id=_uuid.uuid4(),
+            project_id=project.id,
+            status="completed",
+            triggered_by="test:pr161",
+            git_sha="a" * 40,
+            scope="full",
+            started_at=published_at - timedelta(seconds=2),
+            completed_at=published_at,
+            **published_run_fields(
+                generation=1,
+                published_at=published_at,
+                coverage_sealed_at=published_at - timedelta(seconds=1),
+            ),
+        )
+        session.add(run)
+        await session.flush()
+        session.add(
+            GraphHead(
+                project_id=project.id,
+                current_run_id=run.id,
+                generation=1,
+                overlay_generation=0,
+                state="ready",
+                published_at=published_at,
+            )
+        )
         plan = Plan(
             id=_uuid.uuid4(), project_id=project.id, status="approved",
             spec={"title": "t"}, tasks=[], requester="r",
-            worktree_path="/tmp/wt",
+            worktree_path=str(Path("/tmp/wt")),
+            source_run_id=run.id,
+            source_git_sha="a" * 40,
+            source_graph_generation=1,
+            source_overlay_generation=0,
         )
         session.add(plan)
         user = User(

@@ -112,16 +112,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build platform image
-        run: docker build -t mnemos-platform:ci server/
+        # The runtime image now bundles the in-repo analyzers, so its build
+        # context must include both server/ and analyzers/.
+        run: docker build -f server/Dockerfile -t mnemos-platform:ci .
+      # Export so downstream jobs can reuse without rebuilding.
+      - name: Save image tarball
+        run: docker save mnemos-platform:ci -o /tmp/platform.tar
       - name: Upload platform image as artefact
         uses: actions/upload-artifact@v4
         with:
           name: platform-image
           path: /tmp/platform.tar
-          if-no-files-found: ignore
-      # Export so downstream jobs can reuse without rebuilding.
-      - name: Save image tarball
-        run: docker save mnemos-platform:ci -o /tmp/platform.tar
+          if-no-files-found: error
 
   sbom-and-scan:
     runs-on: ubuntu-latest

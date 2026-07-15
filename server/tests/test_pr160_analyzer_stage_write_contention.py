@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -81,7 +82,12 @@ async def test_analyzer_stage_commits_before_progress_flush(tmp_path, monkeypatc
         organization, plans, projects, runtime, samples, stages,
     )
     from app.models.base import Base
-    from app.models.graph import Node
+    from app.graph_publication import (
+        bootstrap_graph_head,
+        capture_graph_base_generation,
+    )
+    from app.models.graph import AnalysisRun, GraphNodeStage
+    from app.models.projects import Project
     import app.orchestrator.jobs as jobs
     import app.orchestrator.stages as stages_mod
 
@@ -100,8 +106,40 @@ async def test_analyzer_stage_commits_before_progress_flush(tmp_path, monkeypatc
 
     n_records = 120
     monkeypatch.setattr(jobs, "runner_for", lambda _lang: _FakeRunner(n_records))
+    # This test injects a runner deliberately; do not let the host's optional
+    # in-repo-analyzer setting turn the synthetic stage into a no_analyzer skip.
+    monkeypatch.setattr(jobs, "analyzer_available", lambda _lang: True)
 
     pid = uuid.uuid4()
+    run_id = uuid.uuid4()
+    async with Session() as session:
+        session.add(
+            Project(
+                id=pid,
+                name="stage-contention",
+                gitlab_project_id=160,
+                gitlab_url="https://example.invalid/stage-contention",
+                default_branch="main",
+                languages=["python"],
+            )
+        )
+        session.add(
+            AnalysisRun(
+                id=run_id,
+                project_id=pid,
+                status="running",
+                triggered_by="test",
+                git_sha="a" * 40,
+                scope="incremental",
+                started_at=datetime.now(tz=timezone.utc),
+            )
+        )
+        await session.flush()
+        await bootstrap_graph_head(session, project_id=pid)
+        await capture_graph_base_generation(
+            session, project_id=pid, run_id=run_id
+        )
+        await session.commit()
 
     # Spy: at the moment progress is reported, how many nodes are committed and
     # visible from an independent connection? Must always be > 0 — i.e. the
@@ -113,7 +151,12 @@ async def test_analyzer_stage_commits_before_progress_flush(tmp_path, monkeypatc
         async with Session() as probe:
             count = (
                 await probe.execute(
-                    select(func.count()).select_from(Node).where(Node.project_id == pid)
+                    select(func.count())
+                    .select_from(GraphNodeStage)
+                    .where(
+                        GraphNodeStage.project_id == pid,
+                        GraphNodeStage.run_id == run_id,
+                    )
                 )
             ).scalar_one()
         visible_at_increment.append(count)
@@ -123,12 +166,19 @@ async def test_analyzer_stage_commits_before_progress_flush(tmp_path, monkeypatc
 
     totals = {"symbols": 0, "edges": 0, "contracts": 0, "data_entities": 0, "errors": 0}
     await jobs._run_analyzer_stage(
-        _StubBus(), pid, uuid.uuid4(), "python", "symbols", str(tmp_path), 1, totals
+        _StubBus(), pid, run_id, "python", "symbols", str(tmp_path), 1, totals
     )
 
     # Every streamed symbol persisted and counted.
     async with Session() as s:
-        nodes = (await s.execute(select(Node).where(Node.project_id == pid))).scalars().all()
+        nodes = (
+            await s.execute(
+                select(GraphNodeStage).where(
+                    GraphNodeStage.project_id == pid,
+                    GraphNodeStage.run_id == run_id,
+                )
+            )
+        ).scalars().all()
     assert len(nodes) == n_records
     assert totals["symbols"] == n_records
 

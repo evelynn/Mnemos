@@ -4,14 +4,21 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
+from app.api.graph_guard import require_readable_current_graph
 from app.auth.deps import CurrentUser
 from app.auth.org_scope import require_project_org, resolve_project_org, same_org
 from app.auth.rbac import require_operator
 from app.db import get_session
+from app.finding_currentness import (
+    FINDING_NOT_CURRENT_CODE,
+    FindingNotCurrent,
+    current_findings_select,
+    lock_current_finding_for_action,
+)
 from app.merge.findings import run_all
 from app.models.findings import Finding
 
@@ -71,7 +78,10 @@ def _out(f: Finding) -> FindingOut:
 
 @router.get(
     "/api/v1/projects/{project_id}/findings",
-    dependencies=[Depends(require_project_org())],
+    dependencies=[
+        Depends(require_project_org()),
+        Depends(require_readable_current_graph, scope="function"),
+    ],
 )
 async def list_findings(
     project_id: uuid.UUID,
@@ -89,11 +99,7 @@ async def list_findings(
     "what changed most recently?" instead. ``sort=recent`` keeps
     the old behaviour for anyone who wants it.
     """
-    stmt = (
-        select(Finding)
-        .where(Finding.project_id == project_id)
-        .limit(max(1, min(limit, 500)))
-    )
+    stmt = current_findings_select(project_id).limit(max(1, min(limit, 500)))
     if sort == "recent":
         stmt = stmt.order_by(Finding.last_seen_at.desc())
     else:
@@ -120,8 +126,10 @@ async def patch_finding(
     db: AsyncSession = Depends(get_session),
 ) -> FindingOut:
     f = (
-        await db.execute(select(Finding).where(Finding.id == finding_id))
-    ).scalar_one_or_none()
+        await db.execute(
+            select(Finding.project_id).where(Finding.id == finding_id)
+        )
+    ).one_or_none()
     if f is None:
         raise HTTPException(status_code=404, detail="not_found")
     # This route keys off finding_id, so require_project_org (which
@@ -131,6 +139,19 @@ async def patch_finding(
     org_id = await resolve_project_org(db, f.project_id)
     if not same_org(user, org_id):
         raise HTTPException(status_code=404, detail="not_found")
+    project_id = f.project_id
+    try:
+        f = await lock_current_finding_for_action(
+            db,
+            project_id=project_id,
+            finding_id=finding_id,
+        )
+    except FindingNotCurrent as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=FINDING_NOT_CURRENT_CODE,
+        ) from exc
     f.status = body.status
     now = datetime.now(tz=timezone.utc)
     # PR-50 — record the acknowledged → resolved lifecycle timestamps
@@ -178,7 +199,10 @@ async def rebuild_findings(
 
 @router.get(
     "/api/v1/projects/{project_id}/findings/summary",
-    dependencies=[Depends(require_project_org())],
+    dependencies=[
+        Depends(require_project_org()),
+        Depends(require_readable_current_graph, scope="function"),
+    ],
 )
 async def findings_summary(
     project_id: uuid.UUID,
@@ -214,9 +238,7 @@ async def findings_summary(
     from app.merge.risk import priority_label
 
     rows = (
-        await db.execute(
-            select(Finding).where(Finding.project_id == project_id)
-        )
+        await db.execute(current_findings_select(project_id))
     ).scalars().all()
 
     by_priority = {"P1": 0, "P2": 0, "P3": 0, "P4": 0}
@@ -389,7 +411,10 @@ async def findings_trend(
 
 @router.get(
     "/api/v1/projects/{project_id}/findings/roi",
-    dependencies=[Depends(require_project_org())],
+    dependencies=[
+        Depends(require_project_org()),
+        Depends(require_readable_current_graph, scope="function"),
+    ],
 )
 async def findings_roi(
     project_id: uuid.UUID,
@@ -411,12 +436,9 @@ async def findings_roi(
     ``days`` windows the flow metrics (risk eliminated, precision,
     spend) to the recent period — ``0`` means all-time. Without it a
     mature project's headline numbers freeze and stop reflecting
-    current effort. ``open_risk_remaining`` is always a live snapshot.
+    current effort. ``open_risk_remaining`` is a live snapshot only of
+    findings validated against the exact ready source+overlay head.
     """
-    import os
-
-    from app.models.findings import Summary
-
     window_start: datetime | None = None
     if days > 0:
         window_start = datetime.now(tz=timezone.utc) - timedelta(
@@ -432,13 +454,12 @@ async def findings_roi(
     ).all()
     risk_eliminated = 0
     findings_resolved = 0
-    open_risk_remaining = 0
     false_positive_count = 0
     for status_val, risk, resolved_at in rows:
         risk = int(risk or 0)
         if status_val in {"open", "acknowledged"}:
-            # Live snapshot — never windowed.
-            open_risk_remaining += risk
+            # Open risk is computed separately from the exact current-head
+            # view. Historical/null-marker open rows must not leak into it.
             continue
         # Terminal states are windowed: a finding triaged outside the
         # window doesn't count toward recent ROI / precision.
@@ -457,15 +478,26 @@ async def findings_roi(
         elif status_val == "false_positive":
             false_positive_count += 1
 
-    token_stmt = select(Summary.tokens_used).where(
-        Summary.project_id == project_id,
-        Summary.superseded_by.is_(None),
+    open_risk_stmt = (
+        current_findings_select(project_id)
+        .where(Finding.status.in_(("open", "acknowledged")))
+        .with_only_columns(func.coalesce(func.sum(Finding.risk_score), 0))
+    )
+    open_risk_remaining = int(
+        (await db.execute(open_risk_stmt)).scalar_one()
+    )
+
+    from app.models.findings import LLMCall
+
+    token_stmt = select(func.coalesce(func.sum(LLMCall.tokens_used), 0)).where(
+        LLMCall.project_id == project_id,
     )
     if window_start is not None:
-        token_stmt = token_stmt.where(Summary.generated_at >= window_start)
-    token_rows = (await db.execute(token_stmt)).all()
-    total_tokens = sum(int(t or 0) for (t,) in token_rows)
-    rate = float(os.environ.get("MNEMOS_LLM_USD_PER_MTOK", "3.0"))
+        token_stmt = token_stmt.where(LLMCall.generated_at >= window_start)
+    total_tokens = int((await db.execute(token_stmt)).scalar_one())
+    from app.extractor.cost import rate_usd_per_mtok
+
+    rate = rate_usd_per_mtok()
     estimated_usd = round((total_tokens / 1_000_000.0) * rate, 4)
 
     triaged = findings_resolved + false_positive_count

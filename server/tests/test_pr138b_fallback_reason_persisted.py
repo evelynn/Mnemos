@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid as _uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import AsyncIterator
 
 import pytest
@@ -28,6 +29,23 @@ from sqlalchemy.orm import sessionmaker
 
 from app.testing.sqlite_polyglot import install_polyglot
 
+
+def _pin_graph(monkeypatch) -> None:  # noqa: ANN001
+    async def fake_read(_session, *, project_id):  # noqa: ANN001
+        return SimpleNamespace(
+            project_id=project_id, generation=1, overlay_generation=0
+        )
+
+    async def fake_lock(_session, **kwargs):  # noqa: ANN001
+        assert kwargs["expected_generation"] == 1
+        assert kwargs["expected_overlay_generation"] == 0
+        return SimpleNamespace(source_generation=1, overlay_generation=0)
+
+    monkeypatch.setattr("app.extractor.runner.read_graph_stamp", fake_read)
+    monkeypatch.setattr(
+        "app.extractor.runner.lock_ready_summary_generation", fake_lock
+    )
+
 install_polyglot()
 
 from app.models.base import Base  # noqa: E402
@@ -36,7 +54,7 @@ from app.models import audit as _audit  # noqa: E402,F401
 from app.models import findings as _findings  # noqa: E402,F401
 from app.models import graph as _graph  # noqa: E402,F401
 from app.models import organization as _org  # noqa: E402,F401
-from app.models.findings import Summary  # noqa: E402
+from app.models.findings import LLMCall, Summary  # noqa: E402
 from app.models.graph import Node  # noqa: E402
 from app.models.projects import Project  # noqa: E402
 
@@ -86,6 +104,7 @@ def test_migration_0024_is_present_and_round_trippable():
 async def test_l1_runner_persists_fallback_reason_when_budget_trips(
     session, monkeypatch,
 ):
+    _pin_graph(monkeypatch)
     monkeypatch.setenv("MNEMOS_LLM_USD_PER_MTOK", "3.0")
     monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", "0.01")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -101,13 +120,26 @@ async def test_l1_runner_persists_fallback_reason_when_budget_trips(
         certainty="asserted", data={"name": "f"}, created_by=["t"],
     ))
     # 5M tokens already spent → over the $0.01 cap.
-    session.add(Summary(
+    old_summary = Summary(
         id=_uuid.uuid4(), project_id=proj.id, level=1,
         target_id="sym:old", summary="x", detailed="x",
         claims=[], open_questions=[],
         model_used="claude-sonnet-4-6", tokens_used=5_000_000,
         generated_at=datetime.now(tz=timezone.utc) - timedelta(minutes=5),
-    ))
+    )
+    session.add(old_summary)
+    session.add(
+        LLMCall(
+            id=old_summary.id,
+            project_id=proj.id,
+            target_id=old_summary.target_id,
+            level=old_summary.level,
+            model_used=old_summary.model_used,
+            tokens_used=old_summary.tokens_used,
+            status="legacy_summary",
+            generated_at=old_summary.generated_at,
+        )
+    )
     await session.commit()
 
     from app.extractor.agent import Extractor
@@ -133,6 +165,7 @@ async def test_happy_path_leaves_fallback_reason_null(session, monkeypatch):
     """The column is null when the LLM call actually succeeded.
     We simulate success by patching the extractor to return a
     populated ExtractorResult with no fallback_reason."""
+    _pin_graph(monkeypatch)
     monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
 
     proj = Project(
@@ -153,7 +186,15 @@ async def test_happy_path_leaves_fallback_reason_null(session, monkeypatch):
         async def summarize(self, level, target_id, evidence):
             return ExtractorResult(
                 summary="ok", detailed="ok",
-                claims=[], open_questions=[],
+                claims=[{
+                    "claim": "The symbol exists.",
+                    "evidence": [{
+                        "kind": "node",
+                        "node_id": evidence[0]["node_id"],
+                        "certainty": evidence[0]["certainty"],
+                    }],
+                }],
+                open_questions=[],
                 model_used="claude-sonnet-4-6",
                 tokens_used=1234,
                 fallback_reason="",

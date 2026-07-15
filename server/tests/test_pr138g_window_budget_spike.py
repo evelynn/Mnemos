@@ -37,7 +37,9 @@ from app.models import findings as _findings  # noqa: E402,F401
 from app.models import graph as _graph  # noqa: E402,F401
 from app.models import organization as _org  # noqa: E402,F401
 from app.models.findings import Summary  # noqa: E402
+from app.models.graph import AnalysisRun, GraphHead  # noqa: E402
 from app.models.projects import Project  # noqa: E402
+from app.testing.graph_publication import published_run_fields  # noqa: E402
 
 
 @pytest_asyncio.fixture
@@ -52,12 +54,36 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 
 async def _seed_project(s: AsyncSession) -> Project:
+    now = datetime.now(tz=timezone.utc)
     p = Project(
         id=_uuid.uuid4(), name="x", gitlab_project_id=1,
         gitlab_url="https://x", default_branch="main",
         languages=["py"],
     )
     s.add(p)
+    run = AnalysisRun(
+        id=_uuid.uuid4(),
+        project_id=p.id,
+        status="completed",
+        triggered_by="test:fallback-breakdown",
+        git_sha="a" * 40,
+        scope="full",
+        started_at=now,
+        completed_at=now,
+        **published_run_fields(generation=1, published_at=now),
+    )
+    s.add(run)
+    await s.flush()
+    s.add(
+        GraphHead(
+            project_id=p.id,
+            current_run_id=run.id,
+            generation=1,
+            overlay_generation=0,
+            state="ready",
+            published_at=now,
+        )
+    )
     await s.commit()
     return p
 
@@ -79,6 +105,9 @@ async def _add_summary(
         ),
         tokens_used=100,
         fallback_reason=fallback_reason,
+        validated_graph_generation=1,
+        validated_overlay_generation=0,
+        validated_at=when,
         generated_at=when,
     )
     s.add(row)

@@ -16,6 +16,7 @@ import ts from "typescript";
 
 const SOURCE_NAME = "ggoss-ts";
 const SOURCE_VERSION = "1.0.0";
+let _analysisRoot = process.cwd();
 
 function envelope(recordType, data) {
   return JSON.stringify({
@@ -78,12 +79,14 @@ const _TEST_DIRS = new Set([
 function walkFiles(dir, exts, opts = {}, collected = []) {
   let entries;
   try {
+    if (fs.lstatSync(dir).isSymbolicLink()) return collected;
     entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch (err) {
     reportError(dir, err.message);
     return collected;
   }
   for (const e of entries) {
+    if (e.isSymbolicLink()) continue;
     if (e.name.startsWith(".") || _SKIP_DIRS.has(e.name)) continue;
     if (opts.skipTests && _TEST_DIRS.has(e.name)) continue;
     const full = path.join(dir, e.name);
@@ -132,10 +135,15 @@ function componentId(target) {
     const pkg = JSON.parse(
       fs.readFileSync(path.join(target, "package.json"), "utf-8"),
     );
-    return `svc.${pkg.name ?? path.basename(target)}`;
+    return `svc.${pkg.name ?? process.env.MNEMOS_PROJECT_ID ?? path.basename(target)}`;
   } catch {
-    return `svc.${path.basename(target)}`;
+    return `svc.${process.env.MNEMOS_PROJECT_ID ?? path.basename(target)}`;
   }
+}
+
+function sourceRelative(fileName) {
+  const rel = path.relative(_analysisRoot, path.resolve(fileName));
+  return rel.split(path.sep).join("/");
 }
 
 const _PROGRAM_OPTS = {
@@ -202,7 +210,7 @@ function buildProgram(target) {
 
 function symbolIdFor(sf, node, name) {
   const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
-  return `ts:${path.basename(sf.fileName)}:${name}@${line + 1}:${character + 1}`;
+  return `ts:${sourceRelative(sf.fileName)}:${name}@${line + 1}:${character + 1}`;
 }
 
 function visibilityOf(node) {
@@ -223,7 +231,7 @@ function emitSymbol(out, sf, node, kind, name, compId) {
     component_id: compId,
     signature: node.getText(sf).slice(0, 400),
     location: {
-      file: sf.fileName,
+      file: sourceRelative(sf.fileName),
       line: start.line + 1,
       col: start.character + 1,
     },
@@ -903,7 +911,7 @@ function emitDataAccess(out, sf, fnNode, rawEntity, access, site, seen) {
   }
   const callerId = fnNode
     ? symbolIdFor(sf, fnNode, fnNode.name?.text ?? "<anonymous>")
-    : `ts:${path.basename(sf.fileName)}:<module>`;
+    : `ts:${sourceRelative(sf.fileName)}:<module>`;
   writeLine(
     out,
     envelope("edge", {
@@ -1045,6 +1053,7 @@ async function main() {
   }
 
   const { target, outPath } = parseCommon(rest);
+  if (target) _analysisRoot = path.resolve(target);
 
   try {
     switch (verb) {

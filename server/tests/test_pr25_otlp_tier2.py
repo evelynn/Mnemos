@@ -153,11 +153,11 @@ def test_receiver_calls_buffer_observations():
     assert "Week-6 merge v2" not in body
 
 
-def test_receiver_resolves_org_from_header():
+def test_receiver_resolves_org_from_token_and_only_confirms_header():
     body = (_ROOT / "app" / "runtime_receiver" / "router.py").read_text("utf-8")
-    # Org context arrives via the documented custom header — OTLP
-    # itself doesn't carry tenant info.
-    assert "X-Mnemos-Organization-Id" in body or "x_mnemos_organization_id" in body
+    assert "MNEMOS_OTLP_ORG_TOKENS" in body
+    assert "otlp_organization_mismatch" in body
+    assert "return bound_org" in body
 
 
 def test_receiver_handles_buffer_errors_gracefully():
@@ -170,11 +170,11 @@ def test_receiver_handles_buffer_errors_gracefully():
 def test_jobs_calls_reconcile_after_findings_rebuild():
     body = (_ROOT / "app" / "orchestrator" / "jobs.py").read_text("utf-8")
     assert "reconcile_observations" in body
-    # Reconcile runs *after* rebuild_findings — otherwise the
-    # freshly-built edge set isn't visible.
+    # Reconcile runs *before* rebuild_findings so runtime-confirmed overlay
+    # evidence is visible to the freshly-built finding set.
     rebuild_idx = body.find("rebuild_findings(session, project_id)")
     reconcile_idx = body.find("reconcile_observations(")
-    assert 0 < rebuild_idx < reconcile_idx
+    assert 0 < reconcile_idx < rebuild_idx
 
 
 def test_runtime_observation_model_has_required_columns():

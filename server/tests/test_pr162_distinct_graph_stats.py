@@ -79,13 +79,15 @@ async def test_run_stats_counts_distinct_current_graph():
         # used to report).
         assert totals["data_entities"] == 3
 
-        # The table itself: 3 rows (1 current + 2 superseded history versions).
+        # Semantic no-op ingestion no longer creates bitemporal churn for
+        # identical payloads.  All three ingest attempts therefore resolve to
+        # the same current row.
         total_rows = (await s.execute(
             select(func.count()).where(Node.project_id == pid, Node.kind == "DataEntity"))).scalar()
         current_rows = (await s.execute(
             select(func.count()).where(Node.project_id == pid, Node.kind == "DataEntity",
                                        Node.valid_to.is_(None)))).scalar()
-        assert total_rows == 3 and current_rows == 1
+        assert total_rows == 1 and current_rows == 1
 
         # The fix: headline = distinct current graph.
         inv = await _graph_inventory(s, pid)

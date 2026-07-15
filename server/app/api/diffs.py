@@ -1,12 +1,10 @@
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import text
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
@@ -14,11 +12,33 @@ from app.auth.deps import CurrentUser
 from app.auth.org_scope import same_org
 from app.auth.rbac import require_operator
 from app.db import get_session
-from app.gitlab_client.mr import create_mr_from_worktree
+from app.gitlab_client.mr import MRPayloadChanged, create_mr_from_worktree
+from app.graph_publication import (
+    GraphGenerationChanged,
+    GraphPublicationError,
+)
 from app.models.auth import User
-from app.models.plans import DiffSubmission, Plan
+from app.models.plans import DiffBreakGlassGrant, DiffSubmission, Plan
 from app.models.projects import Project
 from app.obs.metrics import break_glass_grants_total
+from app.plan_provenance import (
+    PlanSourceRevisionError,
+    lock_current_plan_for_action,
+)
+from app.review_revision import (
+    ReviewRevisionStale,
+    bind_review_revision,
+    lock_review_graph_revision,
+    read_review_graph_stamp,
+    require_review_revision,
+)
+from app.sandbox.worktree import (
+    WorktreeRevisionError,
+    WorktreeRevisionMismatch,
+    compute_diff,
+    verify_worktree_revision,
+    worktree_path,
+)
 from app.safety.review import run_pipeline
 from app.safety.tokens import hash_token as _hash_token
 
@@ -83,6 +103,10 @@ class DiffOut(BaseModel):
     submitted_at: datetime
     gitlab_mr_iid: int | None
     gitlab_mr_url: str | None
+    review_run_id: uuid.UUID | None = None
+    review_source_generation: int | None = None
+    review_overlay_generation: int | None = None
+    review_git_sha: str | None = None
 
 
 def _out(d: DiffSubmission) -> DiffOut:
@@ -98,6 +122,10 @@ def _out(d: DiffSubmission) -> DiffOut:
         submitted_at=d.submitted_at,
         gitlab_mr_iid=d.gitlab_mr_iid,
         gitlab_mr_url=d.gitlab_mr_url,
+        review_run_id=d.review_run_id,
+        review_source_generation=d.review_source_generation,
+        review_overlay_generation=d.review_overlay_generation,
+        review_git_sha=d.review_git_sha,
     )
 
 
@@ -115,12 +143,93 @@ async def submit_diff(
     # minimum.
     plan = await _resolve_plan_in_user_org(db, body.plan_id, user)
 
+    try:
+        review_stamp = await read_review_graph_stamp(
+            db,
+            project_id=plan.project_id,
+        )
+    except GraphPublicationError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "canonical_graph_revision_unavailable",
+                "message": "Gate-B review requires a published graph revision",
+            },
+        ) from exc
     report = await run_pipeline(
         db,
         project_id=plan.project_id,
         plan_id=plan.id,
         diff=body.diff,
     )
+    try:
+        review_revision = await lock_review_graph_revision(
+            db,
+            project_id=plan.project_id,
+            expected_stamp=review_stamp,
+        )
+    except GraphGenerationChanged as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "graph_revision_changed_during_review",
+                "message": "The graph changed during review; submit again",
+            },
+        ) from exc
+    except GraphPublicationError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "canonical_graph_revision_unavailable",
+                "message": "Gate-B review requires a published graph revision",
+            },
+        ) from exc
+    try:
+        plan, _plan_revision = await lock_current_plan_for_action(
+            db,
+            plan_id=plan.id,
+            project_id=plan.project_id,
+        )
+    except PlanSourceRevisionError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "plan_source_revision_stale",
+                "message": "Recreate the plan against the current graph revision",
+            },
+        ) from exc
+    if plan.status not in {"approved", "executing"}:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="plan_not_approved")
+    expected_worktree = worktree_path(plan.id)
+    try:
+        if plan.worktree_path != str(expected_worktree):
+            raise WorktreeRevisionMismatch(
+                "stored Plan worktree path is not the plan-scoped path"
+            )
+        await verify_worktree_revision(plan.id, plan.source_git_sha or "")
+    except WorktreeRevisionError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "plan_worktree_revision_mismatch",
+                "message": "Recreate the Plan worktree at its authorized commit",
+            },
+        ) from exc
+    if await compute_diff(plan.id) != body.diff:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "worktree_diff_changed_since_review",
+                "message": "Submit and review the current worktree diff again",
+            },
+        )
     # auto_review_findings is the LIST of findings (each {rule, severity,
     # message, …}) — the shape the model, the GUI and DiffOut all expect.
     # Storing report.as_jsonable() (the whole {verdict, passes, findings}
@@ -136,7 +245,11 @@ async def submit_diff(
         auto_review_findings=review_findings,
         status="blocked" if report.verdict == "blocked" else "pending_approval",
     )
+    bind_review_revision(submission, review_revision)
     db.add(submission)
+    # lock_review_graph_revision holds GraphHead -> AnalysisRun through this
+    # commit, so neither source publication nor an overlay writer can move the
+    # revision between post-compute validation and verdict persistence.
     await db.commit()
     await db.refresh(submission)
     await audit_record(
@@ -148,6 +261,10 @@ async def submit_diff(
             "verdict": report.verdict,
             "findings": len(report.findings),
             "by_pass": {p.name: len(p.findings) for p in report.passes},
+            "review_run_id": str(review_revision.run_id),
+            "review_source_generation": review_revision.source_generation,
+            "review_overlay_generation": review_revision.overlay_generation,
+            "review_git_sha": review_revision.git_sha,
         },
     )
     return _out(submission)
@@ -202,6 +319,78 @@ async def approve_submission(
                     "grant via /diff_submissions/{id}/break_glass_grant first"
                 ),
             )
+
+    try:
+        review_revision = await lock_review_graph_revision(
+            db,
+            project_id=plan.project_id,
+        )
+    except GraphPublicationError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "canonical_graph_revision_unavailable",
+                "message": "Approval requires a published graph revision",
+            },
+        ) from exc
+
+    try:
+        plan, _plan_revision = await lock_current_plan_for_action(
+            db,
+            plan_id=plan.id,
+            project_id=plan.project_id,
+        )
+    except PlanSourceRevisionError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "plan_source_revision_stale",
+                "message": "Recreate the plan against the current graph revision",
+            },
+        ) from exc
+    if plan.worktree_path is None:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="plan_or_worktree_missing")
+
+    # Refresh under a row lock after taking the canonical graph locks. This
+    # prevents concurrent approval/grant issuance from changing status or
+    # verdict provenance while the MR side effect is being authorized.
+    submission = (
+        await db.execute(
+            select(DiffSubmission)
+            .where(DiffSubmission.id == submission_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    if submission.status not in {"blocked", "pending_approval"}:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="submission_not_approvable",
+        )
+    try:
+        require_review_revision(submission, review_revision)
+    except ReviewRevisionStale as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "review_graph_revision_stale",
+                "message": "Run Gate-B review again against the current graph",
+            },
+        ) from exc
+
+    consumed_grant: tuple[Any, Any] | None = None
+    if submission.status == "blocked":
+        # The pre-lock token check above guarantees this is present. Keep the
+        # local assertion explicit so type narrowing cannot weaken the gate.
+        token = body.break_glass_token if body else None
+        if not token:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail="break_glass_token_required")
         approver_actor = f"user:{user.id}"
         # Single SQL statement enforces:
         #   - matching token (sha256 hash)
@@ -213,71 +402,130 @@ async def approve_submission(
         # If any condition fails, RETURNING yields no row and we surface
         # a 409 without leaking which condition failed.
         consume = await db.execute(
-            text(
-                """
-                UPDATE diff_break_glass_grants
-                   SET consumed_at = now(), consumed_by = :approver
-                 WHERE token_hash = :token_hash
-                   AND submission_id = :submission_id
-                   AND consumed_at IS NULL
-                   AND expires_at > now()
-                   AND issued_by <> :approver
-                 RETURNING id, issued_by
-                """
-            ),
-            {
-                "token_hash": _hash_token(token),
-                "submission_id": submission.id,
-                "approver": approver_actor,
-            },
+            update(DiffBreakGlassGrant)
+            .where(
+                DiffBreakGlassGrant.token_hash == _hash_token(token),
+                DiffBreakGlassGrant.submission_id == submission.id,
+                DiffBreakGlassGrant.consumed_at.is_(None),
+                DiffBreakGlassGrant.expires_at > func.now(),
+                DiffBreakGlassGrant.issued_by != approver_actor,
+                DiffBreakGlassGrant.review_run_id == review_revision.run_id,
+                DiffBreakGlassGrant.review_source_generation
+                == review_revision.source_generation,
+                DiffBreakGlassGrant.review_overlay_generation
+                == review_revision.overlay_generation,
+                DiffBreakGlassGrant.review_git_sha == review_revision.git_sha,
+            )
+            .values(consumed_at=func.now(), consumed_by=approver_actor)
+            .returning(
+                DiffBreakGlassGrant.id,
+                DiffBreakGlassGrant.issued_by,
+            )
         )
         row = consume.first()
         if row is None:
+            await db.rollback()
             raise HTTPException(
                 status_code=409,
-                detail="break_glass_invalid_or_self_issued_or_expired",
+                detail="break_glass_invalid_or_stale_or_self_issued_or_expired",
             )
-        # Only increment after the UPDATE confirmed a real consumption
-        # — if the row was None (expired / self-issued / wrong token) we
-        # never reach this line, so the counter cannot be juked by
-        # invalid attempts.
-        break_glass_grants_total.labels(action="consumed").inc()
-        await audit_record(
-            actor=approver_actor,
-            action="diff.break_glass.consume",
-            target=str(submission.id),
-            project_id=plan.project_id,
-            details={
-                "grant_id": str(row[0]),
-                "issued_by": row[1],
-                "consumed_at": datetime.now(tz=timezone.utc).isoformat(),
+        consumed_grant = (row[0], row[1])
+
+    # The reviewed payload and the files that create_mr_from_worktree will
+    # commit must be byte-identical. The Plan row lock serializes this check
+    # with MCP edits; a mismatch rolls back an uncommitted grant consumption.
+    current_diff = await compute_diff(plan.id)
+    if current_diff != submission.diff:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "worktree_diff_changed_since_review",
+                "message": "Submit and review the current worktree diff again",
             },
         )
 
-    mr = await create_mr_from_worktree(
-        db,
-        project_id=plan.project_id,
-        worktree=Path(plan.worktree_path),
-        plan_title=(plan.spec or {}).get("title", "Mnemos change"),
-        task_id=submission.task_id,
-        description=(plan.spec or {}).get("motivation", ""),
-    )
+    expected_worktree = worktree_path(plan.id)
+    try:
+        if plan.worktree_path != str(expected_worktree):
+            raise WorktreeRevisionMismatch(
+                "stored Plan worktree path is not the plan-scoped path"
+            )
+        await verify_worktree_revision(plan.id, plan.source_git_sha or "")
+    except WorktreeRevisionError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "plan_worktree_revision_mismatch",
+                "message": "Recreate the Plan worktree at its authorized commit",
+            },
+        ) from exc
+
+    try:
+        mr = await create_mr_from_worktree(
+            db,
+            project_id=plan.project_id,
+            worktree=expected_worktree,
+            plan_title=(plan.spec or {}).get("title", "Mnemos change"),
+            task_id=submission.task_id,
+            description=(plan.spec or {}).get("motivation", ""),
+            expected_diff=submission.diff,
+        )
+    except MRPayloadChanged as exc:
+        # The grant update and approval state are still uncommitted here.
+        # Rollback makes a late filesystem/index race retryable without
+        # consuming break-glass authority or recording a false approval.
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "worktree_diff_changed_since_review",
+                "message": "Submit and review the current worktree diff again",
+            },
+        ) from exc
 
     submission.status = "approved" if mr.ok else "approved_no_mr"
-    submission.approved_at = datetime.utcnow()
+    submission.approved_at = datetime.now(tz=timezone.utc)
     submission.approved_by = f"user:{user.id}"
     submission.gitlab_mr_iid = mr.iid
     submission.gitlab_mr_url = mr.url
     await db.commit()
     await db.refresh(submission)
+    if consumed_grant is not None:
+        break_glass_grants_total.labels(action="consumed").inc()
 
     await audit_record(
         actor=f"user:{user.id}",
         action="diff.approve",
         target=str(submission.id),
         project_id=plan.project_id,
-        details={"mr_iid": mr.iid, "mr_url": mr.url, "mr_message": mr.message},
+        details={
+            "mr_iid": mr.iid,
+            "mr_url": mr.url,
+            "mr_message": mr.message,
+            "review_run_id": str(review_revision.run_id),
+            "review_source_generation": review_revision.source_generation,
+            "review_overlay_generation": review_revision.overlay_generation,
+            "review_git_sha": review_revision.git_sha,
+        },
     )
+    if consumed_grant is not None:
+        await audit_record(
+            actor=f"user:{user.id}",
+            action="diff.break_glass.consume",
+            target=str(submission.id),
+            project_id=plan.project_id,
+            details={
+                "grant_id": str(consumed_grant[0]),
+                "issued_by": consumed_grant[1],
+                "consumed_at": datetime.now(tz=timezone.utc).isoformat(),
+                "review_run_id": str(review_revision.run_id),
+                "review_source_generation": review_revision.source_generation,
+                "review_overlay_generation": review_revision.overlay_generation,
+                "review_git_sha": review_revision.git_sha,
+            },
+        )
     return _out(submission)
 
 
@@ -289,7 +537,7 @@ async def reject_submission(
 ) -> DiffOut:
     submission, _plan = await _resolve_submission_in_user_org(db, submission_id, user)
     submission.status = "rejected"
-    submission.approved_at = datetime.utcnow()
+    submission.approved_at = datetime.now(tz=timezone.utc)
     submission.approved_by = f"user:{user.id}"
     await db.commit()
     await db.refresh(submission)
@@ -315,6 +563,8 @@ async def list_submissions_filtered(
     plan that 5 belongs to). Filters are intentionally narrow — just
     verdict + a cap — to keep the index path predictable.
     """
+    if user.organization_id is None:
+        return []
     stmt = (
         select(DiffSubmission)
         .join(Plan, Plan.id == DiffSubmission.plan_id)
@@ -342,9 +592,12 @@ async def list_submissions_filtered(
 @router.get("/api/v1/plans/{plan_id}/submissions")
 async def list_plan_submissions(
     plan_id: uuid.UUID,
-    _: CurrentUser,
+    user: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> list[DiffOut]:
+    # Resolve the parent first: submissions inherit the Plan's project/org
+    # boundary, and a bare Plan UUID must never disclose cross-tenant diffs.
+    await _resolve_plan_in_user_org(db, plan_id, user)
     rows = (
         await db.execute(
             select(DiffSubmission)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid as _uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import AsyncIterator
 
 import pytest
@@ -30,13 +31,30 @@ from app.testing.sqlite_polyglot import install_polyglot
 
 install_polyglot()
 
+
+def _pin_graph(monkeypatch) -> None:  # noqa: ANN001
+    async def fake_read(_session, *, project_id):  # noqa: ANN001
+        return SimpleNamespace(
+            project_id=project_id, generation=1, overlay_generation=0
+        )
+
+    async def fake_lock(_session, **kwargs):  # noqa: ANN001
+        assert kwargs["expected_generation"] == 1
+        assert kwargs["expected_overlay_generation"] == 0
+        return SimpleNamespace(source_generation=1, overlay_generation=0)
+
+    monkeypatch.setattr("app.extractor.runner.read_graph_stamp", fake_read)
+    monkeypatch.setattr(
+        "app.extractor.runner.lock_ready_summary_generation", fake_lock
+    )
+
 from app.models.base import Base  # noqa: E402
 from app.models import auth as _auth  # noqa: E402,F401
 from app.models import audit as _audit  # noqa: E402,F401
 from app.models import findings as _findings  # noqa: E402,F401
 from app.models import graph as _graph  # noqa: E402,F401
 from app.models import organization as _org  # noqa: E402,F401
-from app.models.findings import Summary  # noqa: E402
+from app.models.findings import LLMCall, Summary  # noqa: E402
 from app.models.graph import Node  # noqa: E402
 from app.models.projects import Project  # noqa: E402
 
@@ -82,6 +100,19 @@ async def _seed(session: AsyncSession) -> Project:
         generated_at=datetime.now(tz=timezone.utc) - timedelta(minutes=5),
     )
     session.add(busted)
+    session.add(
+        LLMCall(
+            id=busted.id,
+            project_id=proj.id,
+            analysis_run_id=None,
+            target_id=busted.target_id,
+            level=busted.level,
+            model_used=busted.model_used,
+            tokens_used=busted.tokens_used,
+            status="legacy_summary",
+            generated_at=busted.generated_at,
+        )
+    )
     await session.commit()
     return proj
 
@@ -90,6 +121,7 @@ async def _seed(session: AsyncSession) -> Project:
 async def test_l1_runner_short_circuits_to_stub_when_over_budget(
     session, monkeypatch,
 ):
+    _pin_graph(monkeypatch)
     """The big-money test: every L1 LLM call must pass through the
     budget guard. With cap=$0.01 and $15 already spent the guard
     must trip; the new Summary lands with the explicit
@@ -133,6 +165,7 @@ async def test_l1_runner_short_circuits_to_stub_when_over_budget(
 async def test_runner_does_not_call_budget_guard_when_cap_unset(
     session, monkeypatch,
 ):
+    _pin_graph(monkeypatch)
     """When the cap is disabled (default), the runner runs normally
     and the L1 row carries the regular stub label (NOT
     ``stub:budget_exceeded``)."""

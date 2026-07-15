@@ -19,11 +19,11 @@ def test_same_org_false_when_ids_differ():
     assert not same_org(_user(uuid.uuid4()), uuid.uuid4())
 
 
-def test_same_org_permissive_when_user_has_no_org():
-    # Pre-migration users (``organization_id`` NULL) still see their data.
-    assert same_org(_user(None), uuid.uuid4())
+def test_same_org_rejects_when_user_has_no_org():
+    # Org-less users are not platform-wide principals.
+    assert not same_org(_user(None), uuid.uuid4())
 
 
-def test_same_org_permissive_when_project_has_no_org():
-    # Pre-migration projects are visible to any user.
-    assert same_org(_user(uuid.uuid4()), None)
+def test_same_org_rejects_when_project_has_no_org():
+    # Legacy/orphan projects must be assigned before becoming readable.
+    assert not same_org(_user(uuid.uuid4()), None)

@@ -3,7 +3,8 @@
 codebase-memory-mcp re-indexes without keeping history, so it cannot compare
 graph states across commits. Mnemos's bitemporal graph makes an as-of snapshot
 a query, so a run-to-run diff is two snapshots subtracted. These tests pin the
-added / removed / modified classification, edge deltas, and new findings.
+atomic publication receipt, added / removed / modified classification, and
+edge deltas. Finding history is explicitly unavailable until it is run-linked.
 """
 
 from __future__ import annotations
@@ -19,18 +20,20 @@ os.environ.setdefault("SECRET_KEY", "ci-test-pr204")
 os.environ.setdefault("FERNET_KEY", "4oEY9MJGAjGCbrScyvvi4CZgm8KxFuQuklXSQwUYpys=")
 os.environ.setdefault("MNEMOS_SKIP_STARTUP_VERIFY", "1")
 
+from sqlalchemy import func, select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from app.mcp.queries import compare_runs  # noqa: E402
+from app.merge.writer import upsert_node  # noqa: E402
 from app.models import auth as _auth  # noqa: E402,F401
 from app.models import findings as _findings  # noqa: E402,F401
 from app.models import graph as _graph  # noqa: E402,F401
 from app.models import organization as _org  # noqa: E402,F401
 from app.models import projects as _projects  # noqa: E402,F401
 from app.models.base import Base  # noqa: E402
-from app.models.findings import Finding  # noqa: E402
 from app.models.graph import AnalysisRun, Edge, Node  # noqa: E402
+from app.testing.graph_publication import published_run_fields  # noqa: E402
 from app.testing.sqlite_polyglot import install_polyglot  # noqa: E402
 
 install_polyglot()
@@ -42,6 +45,35 @@ _T_ADD = _BASE + timedelta(seconds=25)
 _T_B = _BASE + timedelta(seconds=30)
 
 
+def _published_run(
+    *,
+    run_id: uuid.UUID,
+    project_id: uuid.UUID,
+    git_sha: str,
+    published_at: datetime,
+    base_generation: int,
+    scope: str = "full",
+) -> AnalysisRun:
+    sealed_at = published_at - timedelta(seconds=1)
+    sources = ["t"]
+    return AnalysisRun(
+        id=run_id,
+        project_id=project_id,
+        status="completed",
+        triggered_by="t",
+        git_sha=git_sha,
+        scope=scope,
+        started_at=sealed_at,
+        completed_at=published_at,
+        **published_run_fields(
+            generation=base_generation + 1,
+            published_at=published_at,
+            authoritative_sources=sources,
+            coverage_sealed_at=sealed_at,
+        ),
+    )
+
+
 @pytest.fixture()
 async def seeded():
     eng = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -51,14 +83,24 @@ async def seeded():
     async with Sess() as s:
         pid = uuid.uuid4()
         run_a, run_b = uuid.uuid4(), uuid.uuid4()
-        s.add_all([
-            AnalysisRun(id=run_a, project_id=pid, status="completed",
-                        triggered_by="t", git_sha="aaa", scope="full",
-                        started_at=_T_A, completed_at=_T_A),
-            AnalysisRun(id=run_b, project_id=pid, status="completed",
-                        triggered_by="t", git_sha="bbb", scope="full",
-                        started_at=_T_B, completed_at=_T_B),
-        ])
+        s.add_all(
+            [
+                _published_run(
+                    run_id=run_a,
+                    project_id=pid,
+                    git_sha="aaa",
+                    published_at=_T_A,
+                    base_generation=0,
+                ),
+                _published_run(
+                    run_id=run_b,
+                    project_id=pid,
+                    git_sha="bbb",
+                    published_at=_T_B,
+                    base_generation=1,
+                ),
+            ]
+        )
 
         def node(nid, vfrom, vto, name="n"):
             return Node(id=nid, project_id=pid, kind="Symbol",
@@ -81,10 +123,6 @@ async def seeded():
                    target_id="sym:modified", kind="CALLS", data={},
                    certainty="asserted", created_by=["t"],
                    valid_from=_BASE, valid_to=None))
-        s.add(Finding(id=uuid.uuid4(), project_id=pid, kind="schema_mismatch",
-                      severity="warning", status="open",
-                      subject_node_id="sym:added", detail={}, risk_score=50,
-                      first_seen_at=_T_ADD, last_seen_at=_T_B))  # new finding
         await s.commit()
         yield s, pid, run_a, run_b
     await eng.dispose()
@@ -116,13 +154,15 @@ async def test_order_independent_before_is_older(seeded):
 
 
 @pytest.mark.asyncio
-async def test_edge_delta_and_new_findings(seeded):
+async def test_edge_delta_and_findings_fail_closed_without_run_history(seeded):
     s, pid, run_a, run_b = seeded
     diff = await compare_runs(s, project_id=pid, run_a_id=run_a, run_b_id=run_b)
     assert diff["edges"].get("CALLS", {}).get("added") == 1
     assert diff["summary"]["edges_added"] == 1
-    assert diff["new_findings_count"] == 1
-    assert diff["new_findings"][0]["kind"] == "schema_mismatch"
+    assert diff["new_findings_count"] == 0
+    assert diff["new_findings"] == []
+    assert diff["findings_delta"]["status"] == "unavailable"
+    assert diff["summary"]["new_findings"] is None
 
 
 @pytest.mark.asyncio
@@ -144,3 +184,134 @@ async def test_missing_run_errors(seeded):
     diff = await compare_runs(s, project_id=pid, run_a_id=run_a,
                               run_b_id=uuid.uuid4())
     assert diff.get("error") == "run_not_found"
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "published", "failed", "cancelled"])
+async def test_nonterminal_or_failed_run_is_not_a_snapshot(seeded, status):
+    s, pid, run_a, run_b = seeded
+    row = await s.get(AnalysisRun, run_b)
+    row.status = status
+    await s.commit()
+
+    diff = await compare_runs(s, project_id=pid, run_a_id=run_a, run_b_id=run_b)
+
+    assert diff["error"] == "run_not_published"
+    assert diff["rejected_runs"] == [
+        {"run_id": str(run_b), "reason": f"run status {status!r} is not a terminal publication"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        (lambda run: setattr(run, "stats", {}), "graph_publication receipt is missing"),
+        (
+            lambda run: run.stats["graph_publication"].update(atomic=False),
+            "graph_publication receipt is not atomic",
+        ),
+        (
+            lambda run: run.stats["graph_publication"].update(generation=999),
+            "publication generation does not match the persisted base",
+        ),
+        (
+            lambda run: run.stats["graph_publication"].update(generation=True),
+            "publication generation does not match the persisted base",
+        ),
+        (
+            lambda run: run.stats["graph_publication"].update(
+                authoritative_sources=["other"]
+            ),
+            "receipt authoritative sources do not match the run",
+        ),
+        (
+            lambda run: run.stats["graph_publication"].update(
+                published_at="not-a-timestamp"
+            ),
+            "publication timestamp is invalid",
+        ),
+        (
+            lambda run: run.stats["graph_publication"].update(
+                published_at="2026-01-01T00:00:30"
+            ),
+            "publication timestamp must be timezone-aware",
+        ),
+        (
+            lambda run: run.stats["graph_publication"]["counts"].update(
+                nodes_inserted=True
+            ),
+            "publication receipt promotion counts must be real integers",
+        ),
+    ],
+)
+async def test_malformed_publication_receipt_fails_closed(seeded, mutation, reason):
+    s, pid, run_a, run_b = seeded
+    row = await s.get(AnalysisRun, run_b)
+    # JSON columns do not track nested mutation portably; assign a fresh copy.
+    row.stats = {
+        **row.stats,
+        "graph_publication": dict(row.stats["graph_publication"]),
+    }
+    mutation(row)
+    row.stats = dict(row.stats)
+    await s.commit()
+
+    diff = await compare_runs(s, project_id=pid, run_a_id=run_a, run_b_id=run_b)
+
+    assert diff["error"] == "run_not_published"
+    assert diff["rejected_runs"] == [{"run_id": str(run_b), "reason": reason}]
+
+
+@pytest.mark.asyncio
+async def test_identical_reingest_does_not_create_false_modified_diff():
+    """A repeated analyzer fact at a later run is not a source-code change."""
+    eng = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    Sess = sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
+    async with Sess() as s:
+        pid = uuid.uuid4()
+        await upsert_node(
+            s, project_id=pid, node_id="sym:stable", kind="Symbol",
+            data={"name": "stable", "file": "stable.py", "line": 3},
+            certainty="asserted", source_name="ggoss-py",
+        )
+        await s.commit()
+        first_publication = datetime.now(tz=timezone.utc)
+        run_a = _published_run(
+            run_id=uuid.uuid4(),
+            project_id=pid,
+            git_sha="same",
+            published_at=first_publication,
+            base_generation=0,
+        )
+        s.add(run_a)
+        await s.commit()
+
+        await upsert_node(
+            s, project_id=pid, node_id="sym:stable", kind="Symbol",
+            data={"line": 3, "file": "stable.py", "name": "stable"},
+            certainty="asserted", source_name="ggoss-py",
+        )
+        await s.commit()
+        second_publication = datetime.now(tz=timezone.utc)
+        run_b = _published_run(
+            run_id=uuid.uuid4(),
+            project_id=pid,
+            git_sha="same",
+            published_at=second_publication,
+            base_generation=1,
+            scope="incremental",
+        )
+        s.add(run_b)
+        await s.commit()
+
+        row_count = (await s.execute(
+            select(func.count()).select_from(Node).where(Node.project_id == pid)
+        )).scalar_one()
+        assert row_count == 1
+        diff = await compare_runs(
+            s, project_id=pid, run_a_id=run_a.id, run_b_id=run_b.id,
+        )
+        assert diff["symbols"]["modified_count"] == 0
+        assert diff["summary"]["symbols_modified"] == 0
+    await eng.dispose()

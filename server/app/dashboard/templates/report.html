@@ -238,11 +238,12 @@ async function buildReport(ev) {
     : '<p class="muted" data-i18n="No L3 summary yet — run a full analysis to generate the system-level narrative.">No L3 summary yet — run a full analysis to generate the system-level narrative.</p>';
 
   // Cross-tier process flows (level-4, from trace_flow). Each flow's
-  // claims carry sections: steps, flags, data_touched.
+  // Flow sections are contract-discriminated structured hypotheses; they are
+  // deliberately separate from graph-grounded claim/evidence rows.
   document.getElementById("rp-flows").innerHTML = flows.length
     ? flows.map(f => {
         const sections = {};
-        (f.claims || []).forEach(c => { if (c && c.section) sections[c.section] = c.data || []; });
+        (f.sections || []).forEach(c => { if (c && c.section) sections[c.section] = c.data || []; });
         const steps = sections.steps || [];
         const flags = sections.flags || [];
         const stepsHtml = steps.length

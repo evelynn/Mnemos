@@ -10,7 +10,6 @@ is honest about needing setup. Stdlib analyzers are unaffected.
 
 from __future__ import annotations
 
-import importlib
 from pathlib import Path
 
 import pytest
@@ -24,11 +23,11 @@ def _flag_on(monkeypatch):
     monkeypatch.setenv("MNEMOS_INREPO_ANALYZERS", "1")
     import app.analyzers.runner as runner
     import app.analyzers.registry as reg
-    importlib.reload(runner)
-    importlib.reload(reg)
+
+    # Both modules read the flag at call time. Reloading ``runner`` creates a
+    # second set of exception classes and breaks tests that imported the old
+    # classes during collection (a suite-order dependent failure).
     yield reg, runner
-    importlib.reload(runner)
-    importlib.reload(reg)
 
 
 def test_deps_ok_only_gates_ggoss_ts(_flag_on):

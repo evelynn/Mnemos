@@ -43,9 +43,12 @@ from app.testing.sqlite_polyglot import install_polyglot
 
 install_polyglot()
 
+from app.finding_identity import finding_identity_key  # noqa: E402
 from app.models.base import Base  # noqa: E402
 from app.models.findings import Finding  # noqa: E402
-from app.models.graph import Edge, Node  # noqa: E402
+from app.models.graph import AnalysisRun, Edge, GraphHead, Node  # noqa: E402
+from app.models.projects import Project  # noqa: E402
+from app.testing.graph_publication import published_run_fields  # noqa: E402
 
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -100,12 +103,16 @@ async def _seed_from_dogfood(s: AsyncSession, project_id: _uuid.UUID) -> tuple[i
             valid_from=now, valid_to=None,
         ))
         nc += 1
-    ec = 0
+    # Production staging publishes one current row per logical edge tuple.
+    # ggoss-py may report several invocation sites for that tuple, so mirror
+    # the writer's deterministic last-wins collapse instead of inserting raw
+    # analyzer envelopes through the current-edge uniqueness fence.
+    logical_edges: dict[tuple[str, str, str], Edge] = {}
     for env in edge_envs:
         if env["record_type"] != "edge":
             continue
         d = env["data"]
-        s.add(Edge(
+        edge = Edge(
             id=_uuid.uuid4(), project_id=project_id,
             source_id=d["source_id"], target_id=d["target_id"],
             kind=d.get("kind", "CALLS"),
@@ -113,8 +120,10 @@ async def _seed_from_dogfood(s: AsyncSession, project_id: _uuid.UUID) -> tuple[i
             certainty=d.get("certainty", "asserted"),
             created_by=[env.get("source_name", "ggoss-py")],
             valid_from=now, valid_to=None,
-        ))
-        ec += 1
+        )
+        logical_edges[(edge.source_id, edge.target_id, edge.kind)] = edge
+    s.add_all(logical_edges.values())
+    ec = len(logical_edges)
     await s.commit()
     return nc, ec
 
@@ -273,6 +282,41 @@ async def test_list_findings_status_filter(session: AsyncSession):
 
     pid = _uuid.uuid4()
     now = datetime.now(tz=timezone.utc)
+    run_id = _uuid.uuid4()
+    session.add(
+        Project(
+            id=pid,
+            name="finding-currentness",
+            gitlab_project_id=118,
+            gitlab_url="https://example.invalid/finding-currentness",
+            default_branch="main",
+            languages=["python"],
+        )
+    )
+    session.add(
+        AnalysisRun(
+            id=run_id,
+            project_id=pid,
+            status="completed",
+            triggered_by="test",
+            git_sha="a" * 40,
+            scope="full",
+            started_at=now,
+            completed_at=now,
+            **published_run_fields(generation=1, published_at=now),
+        )
+    )
+    await session.flush()
+    session.add(
+        GraphHead(
+            project_id=pid,
+            current_run_id=run_id,
+            generation=1,
+            overlay_generation=0,
+            state="ready",
+            published_at=now,
+        )
+    )
     # Seed 2 open + 1 resolved finding. SQLite has no gen_random_uuid()
     # — provide explicit ids so the server_default doesn't fire.
     for status, kind in [
@@ -280,12 +324,21 @@ async def test_list_findings_status_filter(session: AsyncSession):
         ("open", "schema_mismatch"),
         ("resolved", "dead_path_suspected"),
     ]:
+        subject_node_id = f"test:{kind}"
         session.add(Finding(
             id=_uuid.uuid4(),
             project_id=pid, kind=kind, severity="error", status=status,
+            identity_key=finding_identity_key(
+                kind=kind,
+                subject_node_id=subject_node_id,
+            ),
+            subject_node_id=subject_node_id,
             detail={}, risk_score=80,
             first_seen_at=now, last_seen_at=now,
             resolved_at=(now if status == "resolved" else None),
+            validated_graph_generation=1,
+            validated_overlay_generation=0,
+            validated_at=now,
         ))
     await session.commit()
 

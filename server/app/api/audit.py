@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import false, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import CurrentUser
@@ -25,6 +25,25 @@ class AuditEntry(BaseModel):
     occurred_at: datetime
 
 
+def _apply_audit_org_scope(stmt, organization_id: uuid.UUID | None):
+    """Apply the one canonical AuditLog tenant-visibility policy.
+
+    An org-scoped caller sees only events attached to that org's projects.
+    ``project_id IS NULL`` can contain platform/auth/Secret metadata and is
+    therefore platform-level, not a wildcard visible to every tenant.
+
+    There is no platform-admin role. An org-less principal can be produced by
+    organisation deletion, so it fails closed rather than becoming global.
+    """
+
+    if organization_id is None:
+        return stmt.where(false())
+    org_projects = select(Project.id).where(
+        Project.organization_id == organization_id
+    )
+    return stmt.where(AuditLog.project_id.in_(org_projects))
+
+
 @router.get("")
 async def list_audit(
     user: CurrentUser,
@@ -34,20 +53,10 @@ async def list_audit(
     db: AsyncSession = Depends(get_session),
 ) -> list[AuditEntry]:
     stmt = select(AuditLog).order_by(AuditLog.occurred_at.desc()).limit(limit)
-    # Tenancy boundary: a user only sees entries that either name no
-    # project (system-level events) or that belong to a project in their
-    # organisation. Without this, a viewer in org A could enumerate
-    # actions in org B by passing a guessed actor= filter.
-    if user.organization_id is not None:
-        org_projects = select(Project.id).where(
-            Project.organization_id == user.organization_id
-        )
-        stmt = stmt.where(
-            or_(
-                AuditLog.project_id.is_(None),
-                AuditLog.project_id.in_(org_projects),
-            )
-        )
+    # Tenancy boundary: an org user only sees entries tied to projects in
+    # that organisation. Platform-level NULL-project events are not tenant
+    # data. Without this, a viewer in org A could enumerate org B by actor.
+    stmt = _apply_audit_org_scope(stmt, user.organization_id)
     if actor:
         stmt = stmt.where(AuditLog.actor == actor)
     if action:
@@ -76,7 +85,7 @@ mcp_router = APIRouter(prefix="/api/v1", tags=["mcp"])
 
 @mcp_router.get("/mcp_sessions")
 async def list_mcp_sessions(
-    _: CurrentUser,
+    user: CurrentUser,
     limit: int = Query(default=50, ge=1, le=500),
     db: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
@@ -88,14 +97,18 @@ async def list_mcp_sessions(
     """
     from sqlalchemy import func as _func
 
-    stmt = (
+    stmt = _apply_audit_org_scope(
         select(
             AuditLog.actor,
             _func.min(AuditLog.occurred_at).label("first_seen"),
             _func.max(AuditLog.occurred_at).label("last_seen"),
             _func.count(AuditLog.id).label("call_count"),
         )
-        .where(AuditLog.action.like("mcp.tool.%"))
+        .where(AuditLog.action.like("mcp.tool.%")),
+        user.organization_id,
+    )
+    stmt = (
+        stmt
         .group_by(AuditLog.actor)
         .order_by(_func.max(AuditLog.occurred_at).desc())
         .limit(limit)
@@ -115,15 +128,19 @@ async def list_mcp_sessions(
 @mcp_router.get("/mcp_sessions/{actor}/requests")
 async def mcp_session_requests(
     actor: str,
-    _: CurrentUser,
+    user: CurrentUser,
     limit: int = Query(default=100, ge=1, le=500),
     db: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """Per-session request log — spec §13.2's drill-down. Returns
     recent ``mcp.tool.*`` audit entries for the given actor."""
-    stmt = (
+    stmt = _apply_audit_org_scope(
         select(AuditLog)
-        .where(AuditLog.actor == actor, AuditLog.action.like("mcp.tool.%"))
+        .where(AuditLog.actor == actor, AuditLog.action.like("mcp.tool.%")),
+        user.organization_id,
+    )
+    stmt = (
+        stmt
         .order_by(AuditLog.occurred_at.desc())
         .limit(limit)
     )

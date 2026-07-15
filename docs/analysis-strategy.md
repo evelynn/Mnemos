@@ -1,10 +1,10 @@
 # Incremental analysis strategy — how Mnemos analyses systems the LLM can't read at once
 
 > Companion to `Mnemos_spec.md` §2.6, §2.7, and §10.
-> Short version: **no LLM call ever sees the whole codebase.** The graph is
-> built from small, local facts; summaries are stacked bottom-up; every stage
-> is tracked in the DB and streamed to the Analysis tab so an operator can
-> watch what the platform is doing in real time.
+> Short version: the useful default is a **deterministic, re-queryable source
+> index with zero LLM tokens**. No LLM call ever sees the whole codebase.
+> Optional summaries are stacked bottom-up over bounded graph evidence; every
+> stage is tracked and streamed so an operator can see what actually ran.
 
 ## 1. The core problem
 
@@ -22,21 +22,26 @@ Three failure modes follow from ignoring this:
 Mnemos is built around the opposite defaults:
 
 - **Facts first, summaries second.** Static analysers, DB introspection, and
-  runtime traces produce *objective* graph rows with no LLM involvement.
+  runtime traces produce graph rows with no LLM involvement and retain the
+  producer's `verified`/`asserted`/`inferred` certainty.
+- **Index is complete without narration.** L1–L3 is disabled unless the caller
+  sends `summarize=true`; AI extraction for uncovered languages separately
+  requires `agent_extract_limit > 0`.
 - **Local neighbourhoods only.** When the LLM is called, its prompt is built
   from at most a 1-hop neighbourhood of the target node.
-- **Append-only progress.** Every stage writes into the database; the GUI
-  and MCP see partial results the moment they land.
+- **Visible progress without partial publication.** Stage state is persisted and
+  streamed, while analyzer rows stay in run-scoped staging. Only a sealed,
+  successfully reconciled run can atomically advance the graph head.
 
-## 2. Bottom-up hierarchy (L0–L5)
+## 2. Source index plus optional hierarchy (L0–L5)
 
 ```
-L5 system summary      ← L4 domain summaries + system-boundary contracts
+L5 system summary      ← L4 domain summaries + system-boundary contracts (future)
 L4 domain summary      ← L3 module summaries + cross-module edges
 L3 module summary      ← L2 file summaries + module-boundary edges
 L2 file summary        ← L1 function summaries within the file
-L1 function summary    ← one function body + its 1-hop calls
-L0 raw facts           ← analysers (no LLM) — symbols, edges, contracts, data
+L1 function summary    ← one symbol node + bounded 1-hop graph evidence
+L0 source index        ← analysers (default product, no LLM) — symbols, edges, contracts, data
 ```
 
 | Layer | Who produces it                   | Input size    | Output size  |
@@ -48,17 +53,18 @@ L0 raw facts           ← analysers (no LLM) — symbols, edges, contracts, dat
 | L4    | (Phase 2) Extractor over L3       | ~8K tokens    | ~2K tokens   |
 | L5    | (Phase 2) Extractor over L4       | ~20K tokens   | ~5K tokens   |
 
-Validator enforces that every claim's `evidence` cites a node or edge ID that
-actually exists; hallucinated references are dropped (§10.4).
+The schema boundary requires each structured claim to contain evidence.
+Validator then requires every cited node/edge to exist in the same project's
+current graph. Invalid claims are dropped. Summary prose is optional narration,
+not an independently verified fact source.
 
 ## 3. Staged execution pipeline
 
 Every analysis run goes through a fixed sequence of stages. Each stage is one
 row in `analysis_stages` with its own `status`, `items_total`, `items_done`,
-and timestamps. Stages run sequentially at the top level; per-file /
-per-symbol work within a stage fans out through the worker queue but updates
-the same row as it progresses, so the GUI can show a progress bar rather
-than a spinner.
+and timestamps. Stages run sequentially in the current single-mutation worker;
+the row is updated as records are consumed so the GUI can show progress rather
+than only a spinner.
 
 ```
 ┌───────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
@@ -71,18 +77,24 @@ than a spinner.
         │
         ▼
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│ findings     │ →  │ L1 summaries │ →  │ L2 summaries │ →  │ L3 summaries │
+│ runtime      │ →  │ findings      │ →  │ optional L1-3 │ →  │ final status  │
 └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
 ```
 
 Rules the pipeline enforces:
 
-- Later stages depend only on earlier stages' **outputs in the graph**, never
-  on in-memory state — restarting mid-pipeline is safe.
-- A stage never blocks on a long-running LLM call: summariser stages iterate
-  per target and commit after each, so cancellation is granular.
-- If a stage runs out of budget (time/tokens) it exits in `status=partial`,
-  records what it did, and leaves the next stage's work intact.
+- Source-stage output is persisted in run-scoped tables but an interrupted
+  pre-publication run is not resumed; stale jobs become terminal failures and
+  their staging is disposable. A run whose source receipt is already durable
+  may resume only its post-publication work after the receipt is matched to the
+  current graph head.
+- Analyzer subprocesses have a bounded queue, 1 MiB record contract, wall
+  timeout, and terminate→kill cancellation. A 30-minute analyzer-stage absolute
+  deadline also covers validation, graph upsert, commit, and progress flush;
+  cancellation closes the record stream and child even while DB work is blocked.
+- An incomplete analyzer stage records the gap and is denied deletion
+  authority. Its staged additions are never visible unless the whole source
+  publication contract succeeds.
 - Stages emit SSE events (`stage_started`, `stage_progress`, `stage_done`,
   `stage_failed`) on the run's progress channel. The Analysis tab renders
   them as a pipeline with per-stage bars.
@@ -91,26 +103,35 @@ Rules the pipeline enforces:
 
 | Budget       | Enforcement point                         | Default   |
 |--------------|-------------------------------------------|-----------|
-| LLM tokens   | `Extractor.max_input_tokens` per call     | 6,000     |
+| Initial LLM  | API request (`summarize=false`, agent limit 0) | 0 tokens |
+| LLM evidence | deterministic approximate-token packer   | 3K (L2) / 4K (L3) evidence chunks |
 | Symbols/L1   | `summarise_l1` `limit` argument           | 25/run    |
 | Files/L2     | `summarise_l2` limit                      | 25/run    |
 | Modules/L3   | `summarise_l3` limit                      | 25/run    |
-| Per-stage    | `analysis_stages.time_budget_sec`         | 600       |
+| Optional AI calls | shared `LLMRunBudget` across agent extraction + L1–L3 | 64 provider attempts/run |
+| Optional AI input | pre-call approximate-token reservation | 120K estimated tokens/run |
+| Optional AI wall time | one absolute deadline around every provider call | 600s/run |
+| Chat provider input | whole-message/record packing, system included | 24K chars/request |
+| Chat output | provider token field or client stream ceiling | answer 1,200 / rewrite 128 tokens |
+| Per-stage    | `analysis_stages.time_budget_sec`         | stage-specific (120–3600s) |
 | Whole run    | Worker-level wall clock                   | 8h (§1.5) |
 
-All budgets are advisory: exhausting one marks the stage `partial` and
-hands control back to the scheduler. Subsequent runs pick up the unfinished
-work (spec §10.5 — Phase-1 does this in full re-run form; per-file
-re-summaries are Phase-2).
+The shared optional-AI call/input/wall limits and Chat input/output limits are
+hard boundaries. Approximate input tokens are deliberately an estimate rather
+than a provider billing claim. Analyzer output, queue, record, process, stage,
+and whole-job limits are also hard safety boundaries. The worker runs one graph
+publication at a time, never exposes a partially staged run, and supports job
+abort. A source receipt can remain usable even when later derived work closes
+the run as `partial`.
 
 ## 5. What the operator sees
 
-1. Trigger an analysis from the Analysis tab.
+1. Trigger a deterministic full index or content-aware incremental refresh.
 2. A new row appears in **Recent runs** with live counters (symbols, edges,
-   contracts, findings, summaries).
+   contracts, findings, and optional summaries).
 3. Click the row → **Pipeline view** with one card per stage:
    - Stage name + language
-   - Status badge (`pending` / `running` / `partial` / `completed` / `failed`)
+   - Status badge (`pending` / `running` / `published` / `partial` / `completed` / `failed`)
    - Progress bar (`items_done / items_total`)
    - Elapsed time, final stats when complete
    - Open questions + claims for summariser stages
@@ -122,25 +143,36 @@ re-summaries are Phase-2).
 ## 6. When analysis doesn't fit at all
 
 Some systems are simply too large for a single run even with budgeting. The
-Phase-1 escape hatch is scope narrowing:
+current escape hatch is scope narrowing:
 
-- **Directory filter** on run trigger (`source_path` points to one subtree).
-- **Language filter** on run trigger (run only the C# analyser today, TS
-  tomorrow).
-- **Re-run specific stages** from `/analysis_runs/{id}/stages/{stage}/retry`
-  without repeating expensive L0 work.
+- **Directory filter** on run trigger (`source_path` is an absolute path to one
+  subtree visible to the worker and contained by that project's operator-set
+  `SOURCE_PROJECT_ROOTS` binding).
+- **Project language registration** determines which analyzer families run.
+- A failed source stage is retried by creating a new analysis run. There is no
+  per-stage retry endpoint that resumes L0; only post-publication work may be
+  resumed against an exact receipt/head match.
 
-Phase 2 extends this with true incremental graph updates keyed on git
-deltas, and with L4/L5 summary fan-out across domains detected via Louvain
-community detection (spec §10.2, §15.4).
+Current exact-Git incremental refresh fingerprints blob OID/path/size from the
+commit tree without opening source bodies; mutable/non-Git source still hashes
+relevant file bytes per analyzer family.
+An unchanged run spawns no analyzer; a Python-only change skips TS/Java/C++;
+deletion/rename closes omitted facts after a successful authoritative refresh.
+The changed analyzer still re-walks its relevant tree. Per-file parser resume,
+dependency-closure refresh, and L4/L5 remain Phase 2.
+
+Here L4/L5 means the hierarchical domain/system roll-up shown in §2. The MCP
+`trace_flow` feature also persists a row labelled level 4, but it is a separate
+`mnemos.flow_result.v1` source-window hypothesis. It must not be counted as a
+delivered hierarchical L4 summary or promoted to verified graph evidence.
 
 ## 7. Scaling to large files and many files
 
 The hierarchy in §2 handles a system of ordinary files. Two separate
 pathologies still need explicit handling: **a single file or function that
 is itself enormous**, and **a codebase whose sheer symbol count (>100k)
-exceeds any per-run budget**. Both are solved by shrinking inputs further
-and persisting progress across runs so later runs only do what's left.
+exceeds any per-run budget**. Current bounds and scope controls mitigate these
+cases; a real 50 K-file multi-language soak has not proved them solved.
 
 ### 7.1 Large file / large function
 
@@ -148,9 +180,9 @@ and persisting progress across runs so later runs only do what's left.
 |-----------------------------------------|----------------------------------------------------------------------------------------------------------|
 | 5k-line method body won't fit a prompt  | L0 analysers never send bodies — they emit `signature`, `location`, and the CALLS neighbourhood only.    |
 | 500-method single file overflows L2     | Token-budget packer groups L1 summaries into N chunks, produces N "partial L2"s, then folds them.        |
-| Huge generated file (e.g. `obj/`)       | Directory ignore-list at `probe` time; generated files remain L0 facts but are skipped for summaries.    |
-| Binary/non-UTF8 file                    | `read_file` returns `encoding=binary_hex` with byte cap; summariser refuses.                             |
-| Claude Code needs to read a huge file    | `read_file` accepts `start_line`/`end_line` so the client streams the file in windows.                   |
+| Huge generated file (e.g. `obj/`)       | Producer-specific discovery exclusions; coverage must disclose what was skipped.                         |
+| Binary/non-UTF8 file                    | Snapshot `read_file` rejects binary/invalid UTF-8 and reports a bounded unavailable result.               |
+| An AI needs to read a huge file         | Snapshot `read_file` accepts a line range and enforces byte/line caps; clients request another window.    |
 
 Concretely:
 
@@ -168,29 +200,32 @@ Concretely:
 
 | Risk                                       | Strategy                                                                                                                        |
 |--------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------|
-| Per-run L1 limit leaves most symbols cold  | **Continuation runs**: `scope=continuation` skips L0, chews only pending summariser targets.                                    |
+| Per-run optional L1 limit leaves symbols without narration | **Continuation runs** reuse L0 and run narration only when `summarize=true`. |
 | Re-running analysis re-summarises unchanged code | **Content-hash skip**: each Summary stores the hash of its evidence; the next run skips targets whose hash matches the latest. |
 | Which 25 to summarise first matters        | **Priority ordering**: entry points (HTTP contracts, Main methods, controller actions) first, then high in/out degree.          |
 | Budgets hide the work remaining            | **Pending-count stats** on the pipeline card show (done / total / pending) so operators know how many continuation runs to queue. |
-| Single-threaded L1 is slow on big systems  | `summarise_*` accepts a `limit` argument; the scheduler can enqueue multiple `run_ingest(scope=continuation)` jobs concurrently, each with a different limit window. |
+| Repeated refresh is slow                   | Content manifests skip unchanged analyzer families; semantic upserts preserve unchanged temporal rows. |
 
-The combined effect: an operator on a 200k-symbol system runs one full
-analysis (L0 facts land, budgets cap L1/L2/L3 at 25 each), then queues N
-continuation runs until `pending=0`. Each continuation run takes hours,
-not days, because it skips analyser work and touches only unchanged
-targets through hash-equality checks.
+The intended workflow for a large system is one deterministic index followed by
+bounded MCP re-query. Project indexes and task packs cap nested data and omit raw
+source, then enforce a 50 KiB hard serialized-byte ceiling before the independent
+MCP transport guard. This is a byte bound, not an exact tokenizer-specific token
+promise. Optional narration is not a prerequisite for source lookup,
+caller/callee, contract, data-access, or impact analysis. Capacity at 200k symbols
+is a target, not a verified claim.
 
-### 7.3 Hard ceiling: opt-in scope
+### 7.3 Subtree runs
 
 If even continuation runs aren't fast enough, the operator narrows the
 scope:
 
-- Trigger with `source_path=<subtree>` — only that subtree's L0 facts go
-  into the graph this run, and only its symbols are eligible for L1/L2/L3.
-- Flip a module to `analysis_scope=skip` in the Projects settings to
-  permanently exclude it (vendored libraries, generated code, tests).
-- Per-language runs: `languages=["csharp"]` on trigger.
+- Bind the project UUID to its repository root in `SOURCE_PROJECT_ROOTS`, then
+  trigger with `source_path=<subtree>` beneath that root to add/update facts.
+- If the path is below a detected Git root, the run is marked
+  `authoritative_root=false` and **does not close omitted facts** elsewhere;
+  absence in a partial scan is not evidence of deletion.
+- Project language registration controls which deterministic analyzers run.
 
-All three knobs are recorded in `audit_log` so partial analyses never
-silently bias the graph — the operator can always see exactly what was
-analysed.
+The authoritative-root decision and analyzer content fingerprints are stored
+in `AnalysisRun.stats`, so consumers can see whether deletion semantics were
+applied.

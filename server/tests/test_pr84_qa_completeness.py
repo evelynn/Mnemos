@@ -36,7 +36,8 @@ def test_get_data_access_query_helper_defined():
     body = _read(_APP / "mcp" / "queries.py")
     assert "async def get_data_access(" in body
     idx = body.find("async def get_data_access(")
-    slab = body[idx:idx + 1700]
+    next_fn = body.find("\nasync def ", idx + 1)
+    slab = body[idx:next_fn]
     assert 'Edge.kind.in_(("READS", "WRITES"))' in slab
     assert '"reads"' in slab and '"writes"' in slab
     assert '"truncated"' in slab
@@ -58,7 +59,8 @@ def test_get_data_access_registered_as_mcp_tool():
 def test_impact_analysis_fills_data_entities():
     body = _read(_APP / "mcp" / "queries.py")
     idx = body.find("async def impact_analysis(")
-    slab = body[idx:idx + 3800]
+    next_fn = body.find("\nasync def ", idx + 1)
+    slab = body[idx:next_fn]
     # The fan-out to READS/WRITES edges is wired in.
     assert "affected_data_entities" in slab
     assert 'Edge.kind.in_(("READS", "WRITES"))' in slab
@@ -69,7 +71,8 @@ def test_impact_analysis_fills_data_entities():
 def test_impact_analysis_computes_runtime_exercised():
     body = _read(_APP / "mcp" / "queries.py")
     idx = body.find("async def impact_analysis(")
-    slab = body[idx:idx + 3800]
+    next_fn = body.find("\nasync def ", idx + 1)
+    slab = body[idx:next_fn]
     assert "runtime_exercised" in slab
     # The hardcoded ``False`` is gone.
     assert '"runtime_exercised": False' not in slab
@@ -80,7 +83,8 @@ def test_impact_analysis_computes_runtime_exercised():
 def test_impact_analysis_flags_tests_and_opaques():
     body = _read(_APP / "mcp" / "queries.py")
     idx = body.find("async def impact_analysis(")
-    slab = body[idx:idx + 3800]
+    next_fn = body.find("\nasync def ", idx + 1)
+    slab = body[idx:next_fn]
     assert '"affected_tests": []' not in slab
     assert "is_test" in slab or "test" in slab.lower()
     assert "opaque_components_touched" in slab

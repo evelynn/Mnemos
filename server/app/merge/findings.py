@@ -1,21 +1,52 @@
-"""Finding generation (spec §9.4).
+"""Revision-pinned finding generation over the current graph.
 
-Runs after an analysis run completes and re-scans current-valid graph state
-for the Phase-1 Finding taxonomy. Idempotent: a Finding with the same
-(project, kind, subject) is updated in place rather than duplicated.
+One rebuild locks the ready ``GraphHead``, runs every detector, stamps each
+logical finding with the exact source+overlay revision, reconciles disappeared
+open findings, and commits once. Physical bitemporal edge UUIDs are provenance,
+not identity: edge findings key on ``(source_id, target_id, edge.kind)``.
 """
 
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.finding_identity import FindingIdentityError, finding_identity_key
+from app.graph_publication import (
+    GraphPublicationError,
+    lock_validated_graph_head,
+)
+from app.graph_overlays import (
+    edge_identity,
+    edge_read_view,
+    effective_certainty,
+    load_edge_overlays,
+)
 from app.models.findings import Finding
 from app.models.graph import Edge, Node
 from app.merge.risk import remediation_for, score_finding
+
+_SYSTEM_GRAPH_REFRESH = "system:graph-refresh"
+
+
+class FindingRebuildUnavailable(RuntimeError):
+    """A finding rebuild cannot prove one ready graph revision."""
+
+
+@dataclass(frozen=True)
+class FindingValidationRevision:
+    project_id: uuid.UUID
+    graph_generation: int
+    overlay_generation: int
+    validated_at: datetime
+
+
+def _edge_logical_identity(edge: Edge) -> tuple[str, str, str]:
+    return edge.source_id, edge.target_id, edge.kind
 
 
 async def _blast_radius(
@@ -72,21 +103,31 @@ async def _subject_is_exercised(
         return True
     # Runtime marks CALLS edges exercised, not nodes — a symbol is exercised
     # if any observed production call goes into or out of it.
-    edge_hit = (
+    incident_edges = (
         await session.execute(
-            select(Edge.id)
+            select(Edge)
             .where(
                 Edge.project_id == project_id,
                 Edge.kind == "CALLS",
                 Edge.valid_to.is_(None),
                 (Edge.source_id == subject_node_id)
                 | (Edge.target_id == subject_node_id),
-                Edge.data["exercised"].astext == "true",
             )
-            .limit(1)
         )
-    ).first()
-    return edge_hit is not None
+    ).scalars().all()
+    overlays = await load_edge_overlays(
+        session,
+        project_id=project_id,
+        identities=(edge_identity(edge) for edge in incident_edges),
+    )
+    return any(
+        edge_read_view(
+            edge,
+            overlays.human.get(edge_identity(edge)),
+            overlays.runtime.get(edge_identity(edge)),
+        )["exercised"]
+        for edge in incident_edges
+    )
 
 
 async def _upsert_finding(
@@ -98,8 +139,48 @@ async def _upsert_finding(
     detail: dict,
     subject_node_id: str | None = None,
     subject_edge_id: uuid.UUID | None = None,
+    subject_edge: Edge | None = None,
+    validation: FindingValidationRevision | None = None,
 ) -> None:
-    now = datetime.now(tz=timezone.utc)
+    if validation is not None and validation.project_id != project_id:
+        raise FindingIdentityError(
+            "validation.project_id: expected the finding project"
+        )
+    if subject_edge is not None and subject_edge_id is not None:
+        raise FindingIdentityError(
+            "subject_edge: provide the logical edge row or subject_edge_id, not both"
+        )
+    if subject_edge is None and subject_edge_id is not None:
+        subject_edge = (
+            await session.execute(
+                select(Edge).where(
+                    Edge.project_id == project_id,
+                    Edge.id == subject_edge_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if subject_edge is None:
+            raise FindingIdentityError(
+                "subject_edge_id: edge does not exist in the finding project"
+            )
+    if subject_edge is not None and subject_edge.project_id != project_id:
+        raise FindingIdentityError(
+            "subject_edge.project_id: expected the finding project"
+        )
+
+    edge_identity = (
+        _edge_logical_identity(subject_edge) if subject_edge is not None else None
+    )
+    identity_key = finding_identity_key(
+        kind=kind,
+        subject_node_id=subject_node_id,
+        subject_edge=edge_identity,
+    )
+    now = (
+        validation.validated_at
+        if validation is not None
+        else datetime.now(tz=timezone.utc)
+    )
     # PR-50 — compute the risk score + remediation hint at upsert
     # time so the dashboard's risk-ordered list is always fresh.
     blast = await _blast_radius(session, project_id, subject_node_id)
@@ -113,37 +194,66 @@ async def _upsert_finding(
             select(Finding).where(
                 Finding.project_id == project_id,
                 Finding.kind == kind,
-                Finding.subject_node_id.is_(subject_node_id)
-                if subject_node_id is None
-                else Finding.subject_node_id == subject_node_id,
+                Finding.identity_key == identity_key,
             )
         )
     ).scalar_one_or_none()
     if existing is not None:
         existing.last_seen_at = now
         existing.detail = detail
+        existing.severity = severity
+        existing.subject_node_id = subject_node_id
+        existing.subject_edge_id = subject_edge.id if subject_edge is not None else None
         # Re-score on every re-scan — blast radius / exercised flag
         # can change as the graph evolves.
         existing.risk_score = risk
         existing.remediation = remediation
         existing.cwe_id = cwe_id
+        if existing.status == "resolved" and existing.resolved_by == _SYSTEM_GRAPH_REFRESH:
+            existing.status = "open"
+            existing.resolved_at = None
+            existing.resolved_by = None
+        if validation is None:
+            # A direct detector call is useful for isolated tests/diagnostics,
+            # but it did not lock and reconcile one head revision. Never leave
+            # its mutable update carrying an old currentness claim.
+            existing.validated_graph_generation = None
+            existing.validated_overlay_generation = None
+            existing.validated_at = None
+        else:
+            existing.validated_graph_generation = validation.graph_generation
+            existing.validated_overlay_generation = validation.overlay_generation
+            existing.validated_at = validation.validated_at
         return
     session.add(
         Finding(
             project_id=project_id,
             kind=kind,
+            identity_key=identity_key,
             severity=severity,
             detail=detail,
             subject_node_id=subject_node_id,
-            subject_edge_id=subject_edge_id,
+            subject_edge_id=(subject_edge.id if subject_edge is not None else None),
             risk_score=risk,
             remediation=remediation,
             cwe_id=cwe_id,
+            validated_graph_generation=(
+                validation.graph_generation if validation is not None else None
+            ),
+            validated_overlay_generation=(
+                validation.overlay_generation if validation is not None else None
+            ),
+            validated_at=(validation.validated_at if validation is not None else None),
         )
     )
 
 
-async def detect_duplicate_endpoints(session: AsyncSession, project_id: uuid.UUID) -> int:
+async def detect_duplicate_endpoints(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    *,
+    validation: FindingValidationRevision | None = None,
+) -> int:
     rows = (
         await session.execute(
             select(Edge.target_id, func.count())
@@ -164,37 +274,60 @@ async def detect_duplicate_endpoints(session: AsyncSession, project_id: uuid.UUI
             severity="error",
             subject_node_id=target_id,
             detail={"contract_id": target_id, "exposer_count": int(count)},
+            validation=validation,
         )
     return len(rows)
 
 
 async def detect_unverified_claims(
-    session: AsyncSession, project_id: uuid.UUID, *, stale_days: int = 30
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    *,
+    stale_days: int = 30,
+    validation: FindingValidationRevision | None = None,
 ) -> int:
     threshold = datetime.now(tz=timezone.utc) - timedelta(days=stale_days)
-    rows = (
+    candidates = (
         await session.execute(
             select(Edge).where(
                 Edge.project_id == project_id,
-                Edge.certainty == "inferred",
                 Edge.valid_to.is_(None),
                 Edge.valid_from < threshold,
             )
         )
     ).scalars().all()
+    overlays = await load_edge_overlays(
+        session,
+        project_id=project_id,
+        identities=(edge_identity(edge) for edge in candidates),
+    )
+    rows = [
+        edge
+        for edge in candidates
+        if effective_certainty(
+            edge.certainty, overlays.human.get(edge_identity(edge))
+        )
+        == "inferred"
+    ]
     for edge in rows:
         await _upsert_finding(
             session,
             project_id=project_id,
             kind="unverified_claim",
             severity="info",
-            subject_edge_id=edge.id,
+            subject_edge=edge,
             detail={"source": edge.source_id, "target": edge.target_id, "kind": edge.kind},
+            validation=validation,
         )
     return len(rows)
 
 
-async def detect_dynamic_calls(session: AsyncSession, project_id: uuid.UUID) -> int:
+async def detect_dynamic_calls(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    *,
+    validation: FindingValidationRevision | None = None,
+) -> int:
     rows = (
         await session.execute(
             select(Edge).where(
@@ -212,41 +345,63 @@ async def detect_dynamic_calls(session: AsyncSession, project_id: uuid.UUID) -> 
             project_id=project_id,
             kind="dynamic_call_detected",
             severity="warning",
-            subject_edge_id=edge.id,
+            subject_edge=edge,
             detail={"source": edge.source_id, "target": edge.target_id},
+            validation=validation,
         )
     return len(rows)
 
 
 async def detect_dead_paths(
-    session: AsyncSession, project_id: uuid.UUID, *, window_days: int = 30
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    *,
+    window_days: int = 30,
+    validation: FindingValidationRevision | None = None,
 ) -> int:
     threshold = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
-    rows = (
+    candidates = (
         await session.execute(
             select(Edge).where(
                 Edge.project_id == project_id,
                 Edge.kind == "CALLS",
                 Edge.valid_to.is_(None),
                 Edge.valid_from < threshold,
-                Edge.data["exercised"].astext != "true",
             )
         )
     ).scalars().all()
+    overlays = await load_edge_overlays(
+        session,
+        project_id=project_id,
+        identities=(edge_identity(edge) for edge in candidates),
+    )
+    rows = [
+        edge
+        for edge in candidates
+        if not edge_read_view(
+            edge,
+            overlays.human.get(edge_identity(edge)),
+            overlays.runtime.get(edge_identity(edge)),
+        )["exercised"]
+    ]
     for edge in rows:
         await _upsert_finding(
             session,
             project_id=project_id,
             kind="dead_path_suspected",
             severity="info",
-            subject_edge_id=edge.id,
+            subject_edge=edge,
             detail={"source": edge.source_id, "target": edge.target_id},
+            validation=validation,
         )
     return len(rows)
 
 
 async def detect_schema_mismatches(
-    session: AsyncSession, project_id: uuid.UUID
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    *,
+    validation: FindingValidationRevision | None = None,
 ) -> int:
     """Code references a table/entity that the live DB schema doesn't expose.
 
@@ -292,12 +447,13 @@ async def detect_schema_mismatches(
             project_id=project_id,
             kind="schema_mismatch",
             severity="warning",
-            subject_edge_id=edge.id,
+            subject_edge=edge,
             detail={
                 "source": edge.source_id,
                 "missing_target": edge.target_id,
                 "edge_kind": edge.kind,
             },
+            validation=validation,
         )
         count += 1
     return count
@@ -308,6 +464,7 @@ async def detect_opaque_failing_components(
     project_id: uuid.UUID,
     *,
     error_ratio_threshold: float = 0.1,
+    validation: FindingValidationRevision | None = None,
 ) -> int:
     """Opaque components (binaries / external services) whose calls error
     out at a high rate.
@@ -374,27 +531,110 @@ async def detect_opaque_failing_components(
                 "calls": agg["total"],
                 "error_ratio": round(ratio, 4),
             },
+            validation=validation,
         )
         count += 1
     return count
 
 
+async def _lock_finding_revision(
+    session: AsyncSession, project_id: uuid.UUID
+) -> FindingValidationRevision:
+    try:
+        head, publication = await lock_validated_graph_head(
+            session, project_id=project_id
+        )
+    except GraphPublicationError as exc:
+        raise FindingRebuildUnavailable(
+            "finding rebuild requires one ready atomically-published graph head"
+        ) from exc
+    return FindingValidationRevision(
+        project_id=project_id,
+        graph_generation=publication.generation,
+        overlay_generation=head.overlay_generation,
+        validated_at=datetime.now(tz=timezone.utc),
+    )
+
+
+async def _resolve_disappeared_findings(
+    session: AsyncSession,
+    *,
+    validation: FindingValidationRevision,
+) -> int:
+    """Resolve prior graph-derived open rows not revalidated this revision.
+
+    Detectors first stamp every present identity with ``validation``. One
+    set-based update can then reconcile all absent prior rows without loading
+    the project backlog into Python memory. Null-marker legacy/manual rows are
+    excluded because no graph revision ever claimed them as current.
+    """
+
+    result = await session.execute(
+        update(Finding)
+        .where(
+            Finding.project_id == validation.project_id,
+            Finding.status.in_(("open", "acknowledged")),
+            Finding.validated_graph_generation.is_not(None),
+            Finding.validated_overlay_generation.is_not(None),
+            or_(
+                Finding.validated_graph_generation
+                != validation.graph_generation,
+                Finding.validated_overlay_generation
+                != validation.overlay_generation,
+            ),
+        )
+        .values(
+            status="resolved",
+            resolved_at=validation.validated_at,
+            resolved_by=_SYSTEM_GRAPH_REFRESH,
+        )
+    )
+    return max(0, int(result.rowcount or 0))
+
+
 async def run_all(session: AsyncSession, project_id: uuid.UUID) -> dict[str, int]:
-    stats = {
-        "duplicate_endpoints": await detect_duplicate_endpoints(session, project_id),
-        "unverified_claims": await detect_unverified_claims(session, project_id),
-        "dynamic_calls": await detect_dynamic_calls(session, project_id),
-        "dead_paths": await detect_dead_paths(session, project_id),
-        "schema_mismatches": await detect_schema_mismatches(session, project_id),
-        "opaque_failing": await detect_opaque_failing_components(session, project_id),
-    }
+    """Atomically rebuild and reconcile findings for one locked graph head."""
+
+    try:
+        validation = await _lock_finding_revision(session, project_id)
+        stats = {
+            "duplicate_endpoints": await detect_duplicate_endpoints(
+                session, project_id, validation=validation
+            ),
+            "unverified_claims": await detect_unverified_claims(
+                session, project_id, validation=validation
+            ),
+            "dynamic_calls": await detect_dynamic_calls(
+                session, project_id, validation=validation
+            ),
+            "dead_paths": await detect_dead_paths(
+                session, project_id, validation=validation
+            ),
+            "schema_mismatches": await detect_schema_mismatches(
+                session, project_id, validation=validation
+            ),
+            "opaque_failing": await detect_opaque_failing_components(
+                session, project_id, validation=validation
+            ),
+        }
+        new_findings = [o for o in session.new if isinstance(o, Finding)]
+        await session.flush()
+        stats["auto_resolved"] = await _resolve_disappeared_findings(
+            session, validation=validation
+        )
+        await session.flush()
+    except BaseException:
+        # ``run_all`` owns the rebuild boundary. A detector, reconciliation,
+        # or cancellation failure must not expose a partially stamped set.
+        await session.rollback()
+        raise
+
     # PR-104 — snapshot the newly-inserted Finding instances *before*
     # commit clears them out of ``session.new``. Existing-finding
     # updates (the in-place last_seen_at / risk_score path above)
     # land in ``session.dirty`` instead, so they're correctly
     # excluded — operators only want to hear about first sightings,
     # not "this thing is still here".
-    new_findings = [o for o in session.new if isinstance(o, Finding)]
     await session.commit()
     if new_findings:
         # Refresh so the notifier sees server-assigned IDs in the

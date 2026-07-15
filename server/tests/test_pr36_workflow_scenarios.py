@@ -348,11 +348,12 @@ def test_d5_probe_recheck_uses_24h_window():
 
 
 @pytest.mark.asyncio
-async def test_d5_reset_stale_runs_uses_six_hour_cutoff():
-    """``_STALE_RUN_AFTER_SEC = 6h`` — long enough for the worst
-    legitimate analysis (12 stages × 30-min budget), short enough
-    that a wedged run shows up in the GUI within hours of the
-    crash."""
+async def test_d5_reset_stale_runs_uses_twenty_four_hour_cutoff():
+    """The stale cutoff must exceed the worker's eight-hour hard timeout.
+
+    Otherwise the maintenance job can mark a legitimate long analysis failed
+    while its worker is still mutating the graph.
+    """
     from app.orchestrator.cron_jobs import _reset_stale_runs
 
     class _S:
@@ -372,6 +373,6 @@ async def test_d5_reset_stale_runs_uses_six_hour_cutoff():
     before = datetime.now(tz=timezone.utc)
     await _reset_stale_runs(s)
     cutoff = s.params["cutoff"]
-    # cutoff is roughly now() - 6h, ± a small fudge for execution time.
+    # cutoff is roughly now() - 24h, ± a small fudge for execution time.
     delta = before - cutoff
-    assert timedelta(hours=5, minutes=59) < delta < timedelta(hours=6, minutes=1)
+    assert timedelta(hours=23, minutes=59) < delta < timedelta(hours=24, minutes=1)

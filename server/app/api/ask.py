@@ -9,17 +9,16 @@ answer, extract them via the Claude Code subscription, then re-answer.
 
 ``POST /projects/{id}/ask`` does exactly that:
 1. answer from the graph if a confident symbol match exists;
-2. otherwise (and if ``source_root`` is given) rank candidate files by
-   the question terms, agent-extract the top few into the graph, and
-   retry the answer — reporting whether it had to deepen.
+2. otherwise report the evidence gap. Snapshot-bound on-demand extraction is
+   intentionally disabled until it can stage and atomically publish facts;
+   request-supplied server paths are never trusted as project source.
 """
 
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,13 +26,8 @@ from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
 from app.auth.org_scope import require_project_org
 from app.auth.rbac import require_operator
-from app.db import SessionLocal, get_session
-from app.extractor.agent_extract import (
-    extract_file_via_agent_sdk,
-    find_candidate_files,
-    is_agent_sdk_available,
-    to_envelopes,
-)
+from app.db import get_session
+from app.api.graph_guard import require_readable_current_graph
 from app.mcp.queries import (
     _name_tokens,
     _prefix_match,
@@ -42,12 +36,14 @@ from app.mcp.queries import (
     get_symbol,
     search_symbols,
 )
-from app.orchestrator.jobs import _record_payload
 
 router = APIRouter(
     prefix="/api/v1/projects/{project_id}",
     tags=["ask"],
-    dependencies=[Depends(require_project_org())],
+    dependencies=[
+        Depends(require_project_org()),
+        Depends(require_readable_current_graph, scope="function"),
+    ],
 )
 
 
@@ -117,7 +113,11 @@ def _is_confident(hits: list[dict], terms: list[str]) -> bool:
 class AskRequest(BaseModel):
     question: str = Field(min_length=2, max_length=500)
     source_root: str | None = Field(
-        default=None, description="Repo root; enables deepening when the graph can't answer"
+        default=None,
+        description=(
+            "Deprecated and ignored; arbitrary server paths cannot be used "
+            "as analysis evidence."
+        ),
     )
     deepen: bool = Field(default=True)
     max_deepen_files: int = Field(default=2, ge=1, le=6)
@@ -246,47 +246,6 @@ async def ask(
     extracted_files: list[str] = []
     candidates: list[str] = []
 
-    if not answered and body.deepen and body.source_root:
-        if not is_agent_sdk_available():
-            raise HTTPException(status_code=503, detail="agent_sdk_unavailable")
-        root = Path(body.source_root)
-        cands = find_candidate_files(str(root), terms, limit=body.max_deepen_files)
-        candidates = [str(p.relative_to(root)) for p, _ in cands]
-        for path, lang in cands:
-            try:
-                code = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            if len(code) > body.max_file_bytes:
-                code = code[: body.max_file_bytes]
-            rel = str(path.relative_to(root))
-            extracted = await extract_file_via_agent_sdk(
-                language=lang, file_rel=rel, code=code
-            )
-            if not extracted:
-                continue
-            try:
-                totals = {"symbols": 0, "edges": 0, "contracts": 0, "data_entities": 0}
-                async with SessionLocal() as s:
-                    for env in to_envelopes(lang, rel, extracted):
-                        await _record_payload(
-                            s,
-                            project_id=project_id,
-                            payload=env,
-                            accept_kinds={"symbol", "data_entity", "edge"},
-                            totals=totals,
-                        )
-                    await s.commit()
-                extracted_files.append(rel)
-            except Exception:  # noqa: BLE001
-                continue
-        deepened = bool(extracted_files)
-        if deepened:
-            hits = await search_symbols(
-                db, project_id=project_id, query=body.question, top_k=5
-            )
-            answered = _is_confident(hits, terms)
-
     answer = await _build_answer(db, project_id, hits)
 
     await audit_record(
@@ -301,6 +260,11 @@ async def ask(
         "question": body.question,
         "answered": answered,
         "deepened": deepened,
+        "deepening_status": (
+            "not_needed"
+            if answered
+            else "snapshot_bound_deepening_not_implemented"
+        ),
         "deepen_candidates": candidates,
         "extracted_files": extracted_files,
         "matches": [

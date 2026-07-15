@@ -8,6 +8,7 @@ builds those two artifacts from the current graph snapshot.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -15,14 +16,40 @@ from typing import Any
 from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.finding_currentness import current_findings_select
+from app.graph_overlays import (
+    edge_identity,
+    edge_read_view,
+    effective_certainty,
+    load_edge_overlays,
+    load_node_human_overlays,
+    node_read_view,
+)
+from app.graph_publication import (
+    GRAPH_HEAD_READY,
+    GraphGenerationChanged,
+    GraphHeadMissing,
+    GraphHeadNeedsRebuild,
+    GraphPublicationInvariantError,
+    read_graph_stamp,
+    revalidate_graph_stamp,
+)
 from app.mcp.queries import project_root_prefix, relative_source_path
 from app.models.findings import Finding, Summary
-from app.models.graph import AnalysisRun, Edge, Node
+from app.models.graph import AnalysisRun, Edge, GraphHead, Node
+from app.models.overlays import GraphEdgeHumanOverlay, GraphNodeHumanOverlay
 from app.models.projects import Project
 from app.models.stages import AnalysisStage
 
 SCHEMA_PROJECT_INDEX = "mnemos.agent.project_index.v1"
 SCHEMA_TASK_PACK = "mnemos.agent.task_context_pack.v1"
+
+# Keep the artifact itself within the MCP transport's independent 50 KiB
+# response ceiling.  The MCP layer remains a last-resort transport guard;
+# these builders must already return a useful, explicitly truncated source
+# reference instead of relying on that generic guard to replace the payload.
+DEFAULT_AGENT_CONTEXT_MAX_BYTES = 50 * 1024
+_MIN_AGENT_CONTEXT_MAX_BYTES = 4 * 1024
 
 _CERTAINTY_ORDER = ("verified", "asserted", "inferred")
 _RAW_DATA_KEYS = {
@@ -41,9 +68,16 @@ _RAW_DATA_KEYS = {
 }
 _MAX_DATA_DEPTH = 4
 _MAX_DATA_KEYS = 80
+_MAX_DATA_KEY_CHARS = 160
 _MAX_DATA_LIST_ITEMS = 50
 _MAX_DATA_STRING_CHARS = 512
 _MAX_SIGNATURE_CHARS = 240
+_MAX_SUMMARY_CHARS = 1_200
+_MAX_DETAILED_CHARS = 4_000
+_MAX_SUMMARY_CLAIMS = 20
+_MAX_OPEN_QUESTIONS = 12
+_MAX_CURRENT_SUMMARIES = 8
+_MAX_TRUNCATION_PATHS = 24
 _LOW_SIGNAL_PATH_SEGMENTS = {
     "tests",
     "test",
@@ -138,13 +172,20 @@ def _bounded_value(value: Any, *, key: str | None = None, depth: int = 0) -> Any
         return {"omitted": "bytes", "bytes": len(value)}
     if isinstance(value, dict):
         out: dict[str, Any] = {}
-        items = list(value.items())
-        for child_key, child_value in items[:_MAX_DATA_KEYS]:
-            out[str(child_key)] = _bounded_value(
-                child_value, key=str(child_key), depth=depth + 1
+        for index, (child_key, child_value) in enumerate(value.items()):
+            if index >= _MAX_DATA_KEYS:
+                break
+            safe_key = str(child_key)
+            if len(safe_key) > _MAX_DATA_KEY_CHARS:
+                safe_key = (
+                    f"{safe_key[:120]}... "
+                    f"[truncated key chars={len(safe_key)} index={index}]"
+                )
+            out[safe_key] = _bounded_value(
+                child_value, key=safe_key, depth=depth + 1
             )
-        if len(items) > _MAX_DATA_KEYS:
-            out["__truncated_keys__"] = len(items) - _MAX_DATA_KEYS
+        if len(value) > _MAX_DATA_KEYS:
+            out["__truncated_keys__"] = len(value) - _MAX_DATA_KEYS
         return out
     if isinstance(value, list):
         out = [
@@ -158,15 +199,374 @@ def _bounded_value(value: Any, *, key: str | None = None, depth: int = 0) -> Any
 
 
 def _agent_data(data: dict[str, Any] | None) -> dict[str, Any]:
-    source = dict(data or {})
-    if "signature" in source:
-        source["signature"] = _signature_ref(source.get("signature"))
-    bounded = _bounded_value(source, depth=0)
+    bounded = _bounded_value(data or {}, depth=0)
     return bounded if isinstance(bounded, dict) else {}
 
 
 def _agent_value(value: Any) -> Any:
     return _bounded_value(value, depth=0)
+
+
+def _bounded_text(value: Any, *, max_chars: int) -> tuple[Any, int | None]:
+    """Keep a useful prefix of narrative text and report the original size."""
+    if not isinstance(value, str) or len(value) <= max_chars:
+        return value, None
+    suffix = f"... [truncated chars={len(value)}]"
+    keep = max(0, max_chars - len(suffix))
+    return f"{value[:keep]}{suffix}", len(value)
+
+
+def _serialized_size(value: Any) -> int:
+    """Measure exactly as the MCP transport serialises an object."""
+    return len(json.dumps(value, default=str).encode("utf-8"))
+
+
+def _normalise_serialized_budget(value: int) -> int:
+    return max(
+        _MIN_AGENT_CONTEXT_MAX_BYTES,
+        min(int(value), DEFAULT_AGENT_CONTEXT_MAX_BYTES),
+    )
+
+
+def _path_label(path: tuple[Any, ...]) -> str:
+    parts: list[str] = []
+    for part in path:
+        if isinstance(part, int):
+            parts.append(f"[{part}]")
+        else:
+            if parts:
+                parts.append(".")
+            parts.append(str(part))
+    label = "".join(parts)
+    return label if len(label) <= 160 else f"{label[:157]}..."
+
+
+def _record_trim(
+    metadata: dict[str, Any],
+    path: tuple[Any, ...],
+    *,
+    before: int,
+    kept: int,
+) -> None:
+    paths = metadata.setdefault("trimmed_paths", {})
+    label = _path_label(path)
+    if label in paths:
+        paths[label]["kept"] = kept
+        return
+    if len(paths) >= _MAX_TRUNCATION_PATHS:
+        metadata["additional_trimmed_paths"] = (
+            int(metadata.get("additional_trimmed_paths", 0)) + 1
+        )
+        return
+    paths[label] = {"before": before, "kept": kept}
+
+
+def _minimum_list_items(path: tuple[Any, ...], value: list[Any]) -> int:
+    if not value:
+        return 0
+    if path and path[0] in {"agent_contract", "mcp_workflows", "rules"}:
+        return len(value)
+    if path == ("evidence_refs",) or (path and path[-1] == "created_by"):
+        return 1
+    if path in {
+        ("entrypoints", "contracts"),
+        ("entrypoints", "hot_symbols"),
+        ("data_map", "entities"),
+        ("risk_queue", "findings"),
+        ("next_mcp_queries",),
+    }:
+        return 1
+    return 0
+
+
+def _scale_lists(
+    value: Any,
+    *,
+    ratio: float,
+    metadata: dict[str, Any],
+    path: tuple[Any, ...] = (),
+) -> bool:
+    """Proportionally shrink all removable lists in one traversal."""
+    changed = False
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if path == () and key == "truncation":
+                continue
+            changed = (
+                _scale_lists(
+                    child,
+                    ratio=ratio,
+                    metadata=metadata,
+                    path=(*path, key),
+                )
+                or changed
+            )
+    elif isinstance(value, list):
+        minimum = _minimum_list_items(path, value)
+        before = len(value)
+        kept = max(minimum, int(before * ratio))
+        if kept < before:
+            del value[kept:]
+            _record_trim(metadata, path, before=before, kept=kept)
+            changed = True
+        for index, child in enumerate(value):
+            changed = (
+                _scale_lists(
+                    child,
+                    ratio=ratio,
+                    metadata=metadata,
+                    path=(*path, index),
+                )
+                or changed
+            )
+    return changed
+
+
+def _scale_strings(
+    value: Any,
+    *,
+    ratio: float,
+    metadata: dict[str, Any],
+    path: tuple[Any, ...] = (),
+    include_identifiers: bool = False,
+) -> bool:
+    """Proportionally shorten all eligible strings in one traversal."""
+    changed = False
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if path == () and key == "truncation":
+                continue
+            child_path = (*path, key)
+            if isinstance(child, str):
+                protected = (
+                    child_path == ("schema",)
+                    or child_path == ("target", "id")
+                    or (
+                        len(child_path) >= 3
+                        and child_path[0] == "evidence_refs"
+                        and child_path[-1] in {"id", "type"}
+                    )
+                )
+                if len(child) > 64 and (include_identifiers or not protected):
+                    before_bytes = len(child.encode("utf-8"))
+                    suffix = f"... [artifact-truncated bytes={before_bytes}]"
+                    desired_chars = max(64, int(len(child) * ratio))
+                    keep = max(8, desired_chars - len(suffix))
+                    replacement = f"{child[:keep]}{suffix}"
+                    if len(replacement) < len(child):
+                        value[key] = replacement
+                        _record_trim(
+                            metadata,
+                            child_path,
+                            before=before_bytes,
+                            kept=keep,
+                        )
+                        changed = True
+            else:
+                changed = (
+                    _scale_strings(
+                        child,
+                        ratio=ratio,
+                        metadata=metadata,
+                        path=child_path,
+                        include_identifiers=include_identifiers,
+                    )
+                    or changed
+                )
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            child_path = (*path, index)
+            if isinstance(child, str):
+                if len(child) > 64:
+                    before_bytes = len(child.encode("utf-8"))
+                    suffix = f"... [artifact-truncated bytes={before_bytes}]"
+                    desired_chars = max(64, int(len(child) * ratio))
+                    keep = max(8, desired_chars - len(suffix))
+                    replacement = f"{child[:keep]}{suffix}"
+                    if len(replacement) < len(child):
+                        value[index] = replacement
+                        _record_trim(
+                            metadata,
+                            child_path,
+                            before=before_bytes,
+                            kept=keep,
+                        )
+                        changed = True
+            else:
+                changed = (
+                    _scale_strings(
+                        child,
+                        ratio=ratio,
+                        metadata=metadata,
+                        path=child_path,
+                        include_identifiers=include_identifiers,
+                    )
+                    or changed
+                )
+    return changed
+
+
+def _settled_size(artifact: dict[str, Any], metadata: dict[str, Any]) -> int:
+    """Set ``actual_bytes`` to the fixed-point size that includes itself."""
+    size = _serialized_size(artifact)
+    for _ in range(6):
+        if metadata.get("actual_bytes") == size:
+            break
+        metadata["actual_bytes"] = size
+        size = _serialized_size(artifact)
+    metadata["actual_bytes"] = size
+    return _serialized_size(artifact)
+
+
+def _minimal_artifact(
+    artifact: dict[str, Any], metadata: dict[str, Any]
+) -> dict[str, Any]:
+    """Fail-safe shape that retains the source-reference contract."""
+    keys = (
+        "schema",
+        "generated_at",
+        "project_id",
+        "project",
+        "target",
+        "budget",
+        "rules",
+        "error",
+        "target_node",
+        "target_edge",
+        "finding",
+        "subject",
+        "evidence_refs",
+        "next_mcp_queries",
+        "agent_contract",
+        "analysis_snapshot",
+        "coverage_report",
+    )
+    out = {key: artifact[key] for key in keys if key in artifact}
+    out["truncation"] = artifact["truncation"]
+    metadata.setdefault("dropped_sections", []).append("nonessential_sections")
+    return out
+
+
+def _apply_serialized_budget(
+    artifact: dict[str, Any], *, max_serialized_bytes: int
+) -> dict[str, Any]:
+    """Return a JSON artifact that cannot exceed its declared byte ceiling.
+
+    List items are removed before text is shortened.  If hostile historical
+    metadata still dominates the payload, a minimal contract is returned that
+    retains schema, target identity, evidence references, and explicit
+    truncation metadata.
+    """
+    ceiling = _normalise_serialized_budget(max_serialized_bytes)
+    truncation = artifact.setdefault("truncation", {})
+    if not isinstance(truncation, dict):
+        truncation = {"producer_value": _agent_value(truncation)}
+        artifact["truncation"] = truncation
+    metadata = {
+        "max_bytes": ceiling,
+        "actual_bytes": 0,
+        "truncated": False,
+    }
+    truncation["serialized_budget"] = metadata
+
+    if _settled_size(artifact, metadata) <= ceiling:
+        return artifact
+
+    metadata["truncated"] = True
+    metadata["reason"] = "serialized_byte_ceiling"
+
+    # Prefer keeping every section represented. Scale all removable lists in
+    # a handful of passes rather than repeatedly serialising once per item.
+    for _ in range(8):
+        size = _settled_size(artifact, metadata)
+        if size <= ceiling:
+            return artifact
+        ratio = max(0.02, min(0.75, (ceiling / size) * 0.9))
+        if not _scale_lists(
+            artifact, ratio=ratio, metadata=metadata
+        ):
+            break
+
+    # Large nested dictionaries (notably historical summaries and provider
+    # payloads) may contain no removable lists. Shorten their largest strings
+    # next, leaving schema/target/evidence identifiers untouched initially.
+    for include_identifiers in (False, True):
+        for _ in range(8):
+            size = _settled_size(artifact, metadata)
+            if size <= ceiling:
+                return artifact
+            ratio = max(0.05, min(0.75, (ceiling / size) * 0.9))
+            if not _scale_strings(
+                artifact,
+                ratio=ratio,
+                metadata=metadata,
+                include_identifiers=include_identifiers,
+            ):
+                break
+
+    if _settled_size(artifact, metadata) <= ceiling:
+        return artifact
+
+    artifact = _minimal_artifact(artifact, metadata)
+
+    # The normal 50 KiB contract reaches a fixed point above. This final pass
+    # protects the invariant for adversarial identifiers or a caller asking
+    # for the supported 4 KiB minimum.
+    for _ in range(8):
+        size = _settled_size(artifact, metadata)
+        if size <= ceiling:
+            return artifact
+        ratio = max(0.02, min(0.7, (ceiling / size) * 0.85))
+        lists_changed = _scale_lists(
+            artifact, ratio=ratio, metadata=metadata
+        )
+        strings_changed = _scale_strings(
+            artifact,
+            ratio=ratio,
+            metadata=metadata,
+            include_identifiers=True,
+        )
+        if not lists_changed and not strings_changed:
+            break
+
+    # Fixed schema plus the budget signal fit comfortably in the supported
+    # minimum. Reaching this branch means attacker-controlled mapping keys made
+    # the richer minimal form impossible, so discard them without hiding it.
+    target_value = artifact.get("target")
+    if isinstance(target_value, dict):
+        target_value = {
+            key: _bounded_value(target_value.get(key), key=key, depth=0)
+            for key in ("id", "kind", "intent")
+            if key in target_value
+        }
+    evidence_value = artifact.get("evidence_refs", [])
+    first_evidence = (
+        evidence_value[0]
+        if isinstance(evidence_value, list) and evidence_value
+        else None
+    )
+    if isinstance(first_evidence, dict):
+        first_evidence = {
+            key: _bounded_value(first_evidence.get(key), key=key, depth=0)
+            for key in ("type", "id", "valid_from")
+            if key in first_evidence
+        }
+    fallback = {
+        "schema": artifact.get("schema"),
+        "target": target_value,
+        "evidence_refs": [first_evidence] if first_evidence is not None else [],
+        "truncation": {
+            "serialized_budget": {
+                "max_bytes": ceiling,
+                "actual_bytes": 0,
+                "truncated": True,
+                "reason": "serialized_byte_ceiling_minimal_fallback",
+            }
+        },
+    }
+    fallback_metadata = fallback["truncation"]["serialized_budget"]
+    _settled_size(fallback, fallback_metadata)
+    return fallback
 
 
 def _signature_ref(value: Any) -> str | None:
@@ -191,20 +591,27 @@ def _path_rank(path: Any) -> int:
     return 0
 
 
-def _node_ref(node: Node | None) -> dict[str, Any] | None:
+def _node_ref(
+    node: Node | None, view: dict[str, Any] | None
+) -> dict[str, Any] | None:
     if node is None:
         return None
-    data = node.data or {}
+    if view is None:
+        raise ValueError("current node serialization requires a canonical read view")
+    data = view["data"]
     safe_data = _agent_data(data)
     return {
         "id": node.id,
         "kind": node.kind,
-        "name": data.get("name"),
+        "name": _agent_value(data.get("name")),
         "signature": _signature_ref(data.get("signature")),
-        "location": data.get("location"),
-        "component_id": data.get("component_id"),
-        "certainty": node.certainty,
-        "created_by": list(node.created_by or []),
+        "location": _agent_value(data.get("location")),
+        "component_id": _agent_value(data.get("component_id")),
+        "certainty": view["certainty"],
+        "source_certainty": view["source_certainty"],
+        "effective_certainty": view["effective_certainty"],
+        "confirmed": view["confirmed"],
+        "created_by": _agent_value(node.created_by or []),
         "data": safe_data,
         "evidence": {
             "type": "node",
@@ -214,17 +621,27 @@ def _node_ref(node: Node | None) -> dict[str, Any] | None:
     }
 
 
-def _edge_ref(edge: Edge) -> dict[str, Any]:
-    data = edge.data or {}
+def _edge_ref(edge: Edge, view: dict[str, Any]) -> dict[str, Any]:
+    data = view["data"]
     return {
         "edge_id": str(edge.id),
         "kind": edge.kind,
         "source_id": edge.source_id,
         "target_id": edge.target_id,
-        "certainty": edge.certainty,
-        "created_by": list(edge.created_by or []),
-        "exercised": str(data.get("exercised", "")).lower() == "true",
-        "site": data.get("invocation_site") or data.get("access_site"),
+        "certainty": view["certainty"],
+        "source_certainty": view["source_certainty"],
+        "effective_certainty": view["effective_certainty"],
+        "confirmed": view["confirmed"],
+        "created_by": _agent_value(edge.created_by or []),
+        "exercised": view["exercised"],
+        "runtime": {
+            key: _agent_value(data.get(key))
+            for key in ("first_seen_at", "last_seen_at", "hit_count")
+            if data.get(key) is not None
+        },
+        "site": _agent_value(
+            data.get("invocation_site") or data.get("access_site")
+        ),
         "data": _agent_data(data),
         "evidence": {
             "type": "edge",
@@ -234,18 +651,59 @@ def _edge_ref(edge: Edge) -> dict[str, Any]:
     }
 
 
+async def _node_ref_map(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    nodes: list[Node],
+) -> dict[str, dict[str, Any]]:
+    overlays = await load_node_human_overlays(
+        session,
+        project_id=project_id,
+        node_ids=(node.id for node in nodes),
+    )
+    return {
+        node.id: _node_ref(node, node_read_view(node, overlays.get(node.id))) or {}
+        for node in nodes
+    }
+
+
+async def _edge_ref_map(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    edges: list[Edge],
+) -> dict[uuid.UUID, dict[str, Any]]:
+    overlays = await load_edge_overlays(
+        session,
+        project_id=project_id,
+        identities=(edge_identity(edge) for edge in edges),
+    )
+    result: dict[uuid.UUID, dict[str, Any]] = {}
+    for edge in edges:
+        identity = edge_identity(edge)
+        view = edge_read_view(
+            edge,
+            overlays.human.get(identity),
+            overlays.runtime.get(identity),
+        )
+        result[edge.id] = _edge_ref(edge, view)
+    return result
+
+
 def _project_ref(project: Project) -> dict[str, Any]:
     return {
         "id": str(project.id),
-        "name": project.name,
+        "name": _agent_value(project.name),
         "gitlab_project_id": project.gitlab_project_id,
-        "gitlab_url": project.gitlab_url,
-        "default_branch": project.default_branch,
-        "languages": list(project.languages or []),
+        "gitlab_url": _agent_value(project.gitlab_url),
+        "default_branch": _agent_value(project.default_branch),
+        "languages": _agent_value(project.languages or []),
     }
 
 
 def _finding_ref(finding: Finding) -> dict[str, Any]:
+    remediation, _remediation_chars = _bounded_text(
+        finding.remediation, max_chars=_MAX_DETAILED_CHARS
+    )
     return {
         "id": str(finding.id),
         "finding_id": str(finding.id),
@@ -256,7 +714,7 @@ def _finding_ref(finding: Finding) -> dict[str, Any]:
         "subject_node_id": finding.subject_node_id,
         "subject_edge_id": str(finding.subject_edge_id) if finding.subject_edge_id else None,
         "detail": _agent_data(finding.detail),
-        "remediation": finding.remediation,
+        "remediation": remediation,
         "cwe_id": finding.cwe_id,
         "first_seen_at": _iso(finding.first_seen_at),
         "last_seen_at": _iso(finding.last_seen_at),
@@ -264,17 +722,50 @@ def _finding_ref(finding: Finding) -> dict[str, Any]:
 
 
 def _summary_ref(summary: Summary) -> dict[str, Any]:
-    return {
+    summary_text, summary_chars = _bounded_text(
+        summary.summary, max_chars=_MAX_SUMMARY_CHARS
+    )
+    detailed_text, detailed_chars = _bounded_text(
+        summary.detailed, max_chars=_MAX_DETAILED_CHARS
+    )
+    claims_source = summary.claims if isinstance(summary.claims, list) else []
+    questions_source = (
+        summary.open_questions if isinstance(summary.open_questions, list) else []
+    )
+    out = {
         "target_id": summary.target_id,
         "level": summary.level,
-        "summary": summary.summary,
-        "detailed": summary.detailed,
-        "claims": summary.claims or [],
-        "open_questions": summary.open_questions or [],
+        "summary": summary_text,
+        "detailed": detailed_text,
+        "claims": _agent_value(claims_source[:_MAX_SUMMARY_CLAIMS]),
+        "open_questions": _agent_value(
+            questions_source[:_MAX_OPEN_QUESTIONS]
+        ),
         "model_used": summary.model_used,
         "fallback_reason": summary.fallback_reason,
         "generated_at": _iso(summary.generated_at),
+        "validated_graph_generation": summary.validated_graph_generation,
+        "validated_overlay_generation": summary.validated_overlay_generation,
+        "validated_at": _iso(summary.validated_at),
     }
+    truncated: dict[str, Any] = {}
+    if summary_chars is not None:
+        truncated["summary_chars"] = summary_chars
+    if detailed_chars is not None:
+        truncated["detailed_chars"] = detailed_chars
+    if len(claims_source) > _MAX_SUMMARY_CLAIMS:
+        truncated["claims"] = {
+            "kept": _MAX_SUMMARY_CLAIMS,
+            "total": len(claims_source),
+        }
+    if len(questions_source) > _MAX_OPEN_QUESTIONS:
+        truncated["open_questions"] = {
+            "kept": _MAX_OPEN_QUESTIONS,
+            "total": len(questions_source),
+        }
+    if truncated:
+        out["truncation"] = truncated
+    return out
 
 
 async def _require_project(
@@ -302,9 +793,56 @@ async def _certainty_breakdown(
             .group_by(Edge.certainty)
         )
     ).all()
+    confirmed_node_rows = (
+        await session.execute(
+            select(Node.certainty, func.count())
+            .join(
+                GraphNodeHumanOverlay,
+                and_(
+                    GraphNodeHumanOverlay.project_id == Node.project_id,
+                    GraphNodeHumanOverlay.node_id == Node.id,
+                    GraphNodeHumanOverlay.action == "confirm",
+                ),
+            )
+            .where(Node.project_id == project_id, Node.valid_to.is_(None))
+            .group_by(Node.certainty)
+        )
+    ).all()
+    confirmed_edge_rows = (
+        await session.execute(
+            select(Edge.certainty, func.count())
+            .join(
+                GraphEdgeHumanOverlay,
+                and_(
+                    GraphEdgeHumanOverlay.project_id == Edge.project_id,
+                    GraphEdgeHumanOverlay.source_id == Edge.source_id,
+                    GraphEdgeHumanOverlay.target_id == Edge.target_id,
+                    GraphEdgeHumanOverlay.kind == Edge.kind,
+                    GraphEdgeHumanOverlay.action == "confirm",
+                ),
+            )
+            .where(Edge.project_id == project_id, Edge.valid_to.is_(None))
+            .group_by(Edge.certainty)
+        )
+    ).all()
+
+    def _effective_counts(
+        rows: list[tuple[str, int]],
+        confirmed_rows: list[tuple[str, int]],
+    ) -> dict[str, int]:
+        counts = {certainty: int(count) for certainty, count in rows}
+        for source, raw_count in confirmed_rows:
+            effective = effective_certainty(source, "confirm")
+            count = int(raw_count)
+            if effective == source:
+                continue
+            counts[source] = max(0, counts.get(source, 0) - count)
+            counts[effective] = counts.get(effective, 0) + count
+        return counts
+
     return {
-        "nodes": {k: int(v) for k, v in node_rows},
-        "edges": {k: int(v) for k, v in edge_rows},
+        "nodes": _effective_counts(node_rows, confirmed_node_rows),
+        "edges": _effective_counts(edge_rows, confirmed_edge_rows),
     }
 
 
@@ -335,18 +873,39 @@ async def _edge_kind_counts(
 
 
 async def _latest_run(
-    session: AsyncSession, project_id: uuid.UUID
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    *,
+    statuses: set[str] | None = None,
 ) -> dict[str, Any] | None:
+    stmt = select(AnalysisRun).where(AnalysisRun.project_id == project_id)
+    if statuses is not None:
+        stmt = stmt.where(AnalysisRun.status.in_(statuses))
     run = (
-        await session.execute(
-            select(AnalysisRun)
-            .where(AnalysisRun.project_id == project_id)
-            .order_by(AnalysisRun.created_at.desc())
-            .limit(1)
-        )
+        await session.execute(stmt.order_by(AnalysisRun.created_at.desc()).limit(1))
     ).scalar_one_or_none()
     if run is None:
         return None
+    return _run_payload(run)
+
+
+async def _run_by_id(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+) -> dict[str, Any] | None:
+    run = (
+        await session.execute(
+            select(AnalysisRun).where(
+                AnalysisRun.id == run_id,
+                AnalysisRun.project_id == project_id,
+            )
+        )
+    ).scalar_one_or_none()
+    return _run_payload(run) if run is not None else None
+
+
+def _run_payload(run: AnalysisRun) -> dict[str, Any]:
     return {
         "id": str(run.id),
         "status": run.status,
@@ -366,10 +925,7 @@ async def _top_symbols(
     rows = (
         await session.execute(
             select(
-                Node.id,
-                Node.kind,
-                Node.data,
-                Node.certainty,
+                Node,
                 func.count(Edge.id).label("incoming_calls"),
             )
             .outerjoin(
@@ -391,18 +947,28 @@ async def _top_symbols(
             .limit(max(20, min(limit * 10, 1000)))
         )
     ).all()
+    nodes = [row[0] for row in rows]
+    overlays = await load_node_human_overlays(
+        session,
+        project_id=project_id,
+        node_ids=(node.id for node in nodes),
+    )
     out = []
-    for node_id, kind, data, certainty, incoming_calls in rows:
-        data = data or {}
+    for node, incoming_calls in rows:
+        view = node_read_view(node, overlays.get(node.id))
+        data = view["data"]
         out.append(
             {
-                "symbol_id": node_id,
-                "kind": kind,
-                "name": data.get("name"),
+                "symbol_id": node.id,
+                "kind": node.kind,
+                "name": _agent_value(data.get("name")),
                 "signature": _signature_ref(data.get("signature")),
-                "location": data.get("location"),
-                "component_id": data.get("component_id"),
-                "certainty": certainty,
+                "location": _agent_value(data.get("location")),
+                "component_id": _agent_value(data.get("component_id")),
+                "certainty": view["certainty"],
+                "source_certainty": view["source_certainty"],
+                "effective_certainty": view["effective_certainty"],
+                "confirmed": view["confirmed"],
                 "incoming_calls": int(incoming_calls or 0),
                 "_path_rank": _path_rank((data.get("location") or {}).get("file")),
             }
@@ -426,7 +992,8 @@ async def _nodes_by_kind(
             .limit(max(1, min(limit, 500)))
         )
     ).scalars().all()
-    return [_node_ref(n) or {} for n in rows]
+    refs = await _node_ref_map(session, project_id, list(rows))
+    return [refs[node.id] for node in rows]
 
 
 async def _risk_findings(
@@ -438,8 +1005,7 @@ async def _risk_findings(
     subject_edge_id: uuid.UUID | None = None,
 ) -> list[dict[str, Any]]:
     stmt = (
-        select(Finding)
-        .where(Finding.project_id == project_id)
+        current_findings_select(project_id)
         .order_by(Finding.risk_score.desc(), Finding.last_seen_at.desc())
         .limit(max(1, min(limit, 200)))
     )
@@ -463,9 +1029,9 @@ async def _known_flows(
 
 def _annotate_relative_files(obj: Any, root_prefix: str | None) -> None:
     """Walk a built artifact in place: every ``{"location": {"file": ...}}``
-    gains ``location.relative_file`` — one stable project-relative path even
-    though the analyzers disagree on path style (eval doc Task 3). The
-    original absolute path is kept untouched."""
+    gains one stable project-relative path.  Ephemeral worker paths are not
+    exposed to agents because they cannot round-trip through snapshot-bound
+    ``read_file`` and may already have been deleted."""
     stack: list[Any] = [obj]
     while stack:
         cur = stack.pop()
@@ -476,9 +1042,10 @@ def _annotate_relative_files(obj: Any, root_prefix: str | None) -> None:
                 and isinstance(loc.get("file"), str)
                 and "relative_file" not in loc
             ):
-                loc["relative_file"] = relative_source_path(
-                    loc.get("file"), root_prefix
-                )
+                relative_file = relative_source_path(loc.get("file"), root_prefix)
+                if relative_file:
+                    loc["relative_file"] = relative_file
+                    loc["file"] = relative_file
             stack.extend(cur.values())
         elif isinstance(cur, list):
             stack.extend(cur)
@@ -495,9 +1062,14 @@ async def _summary_quality(
     rows = (
         await session.execute(
             select(Summary.model_used, func.count())
+            .join(GraphHead, GraphHead.project_id == Summary.project_id)
             .where(
                 Summary.project_id == project_id,
                 Summary.superseded_by.is_(None),
+                GraphHead.state == GRAPH_HEAD_READY,
+                Summary.validated_graph_generation == GraphHead.generation,
+                Summary.validated_overlay_generation
+                == GraphHead.overlay_generation,
             )
             .group_by(Summary.model_used)
         )
@@ -587,6 +1159,11 @@ async def _coverage_report(
                 "skipped": is_skipped,
                 "reason": reason,
                 "items_done": st.items_done,
+                "authoritative": stats.get("authoritative"),
+                "incomplete": (
+                    st.status not in {"completed"}
+                    or stats.get("authoritative") is False
+                ),
             }
             language_stages.append(entry)
             if is_skipped and st.name.startswith(_EXTRACTION_STAGE_PREFIXES):
@@ -599,7 +1176,8 @@ async def _coverage_report(
                 st.name.startswith("agent_extract:")
                 and st.language
                 and not is_skipped
-                and st.status in ("completed", "partial")
+                and st.status == "completed"
+                and stats.get("authoritative") is not False
             ):
                 agent_extract_ok.add(st.language)
 
@@ -610,8 +1188,8 @@ async def _coverage_report(
             continue
         reason = str(entry.get("reason") or "")
         if (
-            entry["skipped"]
-            and not reason.startswith("covered_by:")
+            (entry["skipped"] or entry["incomplete"])
+            and not reason.startswith(("covered_by:", "unchanged_source_content"))
             and language not in agent_extract_ok
         ):
             critical_gaps.append({
@@ -644,8 +1222,8 @@ async def _coverage_report(
     summary_quality = await _summary_quality(session, project_id)
     if summary_quality.get("stub_only"):
         recommendations.append(
-            "configure an LLM backend so L1-L3 summaries carry real "
-            "behavioural narratives instead of structural stubs"
+            "optional AI narration is unavailable; use deterministic graph "
+            "evidence directly or explicitly enable a provider when needed"
         )
     if run_id is None:
         recommendations.append("no analysis run found; run an analysis first")
@@ -673,7 +1251,8 @@ async def build_project_index(
     session: AsyncSession,
     *,
     project_id: uuid.UUID,
-    top_k: int = 25,
+    top_k: int = 10,
+    max_serialized_bytes: int = DEFAULT_AGENT_CONTEXT_MAX_BYTES,
 ) -> dict[str, Any]:
     """Return a compact map of the project for coding agents.
 
@@ -682,12 +1261,81 @@ async def build_project_index(
     """
     project = await _require_project(session, project_id)
     if project is None:
-        return {"schema": SCHEMA_PROJECT_INDEX, "error": "project_not_found"}
+        return _apply_serialized_budget(
+            {"schema": SCHEMA_PROJECT_INDEX, "error": "project_not_found"},
+            max_serialized_bytes=max_serialized_bytes,
+        )
 
     top_k = max(1, min(top_k, 100))
+    diagnostic_completed_run = await _latest_run(
+        session, project_id, statuses={"completed"}
+    )
+    active_run = await _latest_run(
+        session, project_id, statuses={"queued", "running"}
+    )
+    try:
+        graph_stamp = await read_graph_stamp(session, project_id=project_id)
+    except (
+        GraphHeadMissing,
+        GraphHeadNeedsRebuild,
+        GraphPublicationInvariantError,
+    ) as exc:
+        # The compact index remains available to explain how to create the
+        # first trusted graph. It deliberately omits all live Node/Edge rows.
+        return _apply_serialized_budget(
+            {
+                "schema": SCHEMA_PROJECT_INDEX,
+                "generated_at": _now_iso(),
+                "project": _project_ref(project),
+                "analysis_snapshot": {
+                    "latest_run": diagnostic_completed_run,
+                    "last_completed_run": diagnostic_completed_run,
+                    "active_run": active_run,
+                    "snapshot_consistency": "unavailable",
+                    "graph_queries_safe": False,
+                    "diagnostic_only": True,
+                    "graph_head_error": str(exc),
+                    "graph_data_omitted": "no_atomic_publication",
+                },
+                "repair": {
+                    "required": True,
+                    "scope": "full",
+                    "action": "publish one successful staged full source analysis",
+                },
+                "agent_contract": {
+                    "role": "source_reference_and_analysis_guide",
+                    "do_not_use_current_graph": True,
+                    "allowed_before_repair": [
+                        "inspect this diagnostic index",
+                        "read_file with an explicit historical run_id",
+                    ],
+                },
+                "truncation": {
+                    "top_k": 0,
+                    "reason": "graph_withheld_until_atomic_publication",
+                },
+            },
+            max_serialized_bytes=max_serialized_bytes,
+        )
+
+    last_completed_run = await _run_by_id(
+        session,
+        project_id,
+        graph_stamp.current_run_id,
+    )
+    if last_completed_run is None:
+        return _apply_serialized_budget(
+            {
+                "schema": SCHEMA_PROJECT_INDEX,
+                "error": "published_graph_run_missing",
+                "retryable": False,
+            },
+            max_serialized_bytes=max_serialized_bytes,
+        )
+    snapshot_consistency = "refreshing" if active_run is not None else "stable"
+
     node_counts = await _node_kind_counts(session, project_id)
     edge_counts = await _edge_kind_counts(session, project_id)
-    latest_run = await _latest_run(session, project_id)
     root_prefix = await project_root_prefix(session, project_id)
     contracts = await _nodes_by_kind(session, project_id, "Contract", top_k)
     await _annotate_contract_exposers(session, project_id, contracts)
@@ -696,19 +1344,48 @@ async def build_project_index(
         "generated_at": _now_iso(),
         "project": _project_ref(project),
         "analysis_snapshot": {
-            "latest_run": latest_run,
+            # Compatibility: ``latest_run`` now deliberately means the last
+            # completed graph snapshot, never a queued SHA paired with old
+            # graph counts.
+            "latest_run": last_completed_run,
+            "last_completed_run": last_completed_run,
+            "active_run": active_run,
+            "snapshot_consistency": snapshot_consistency,
+            "graph_queries_safe": True,
+            "diagnostic_only": False,
+            "unpublished_refresh": None,
+            "graph_publication": {
+                "generation": graph_stamp.generation,
+                "run_id": str(graph_stamp.current_run_id),
+                "published_at": graph_stamp.published_at.isoformat(),
+            },
             "node_counts": node_counts,
             "edge_counts": edge_counts,
             "certainty_breakdown": await _certainty_breakdown(session, project_id),
         },
         "coverage_report": await _coverage_report(
-            session, project_id, project, latest_run, node_counts, root_prefix
+            session,
+            project_id,
+            project,
+            last_completed_run,
+            node_counts,
+            root_prefix,
         ),
         "agent_contract": {
+            "role": "source_reference_and_analysis_guide",
             "source_of_truth": "mnemos_graph",
+            "graph_facts_are_not_an_ai_conclusion": True,
+            "ai_summaries_are_optional_narration": True,
             "do_not_load_whole_repo": True,
             "do_not_treat_inferred_as_verified": True,
             "certainty_order": list(_CERTAINTY_ORDER),
+            "claim_protocol": [
+                "anchor claims to returned node/edge evidence IDs",
+                "state coverage gaps before drawing absence conclusions",
+                "treat inferred relationships as hypotheses to verify",
+                "read the narrow source range before editing or quoting code",
+                "run impact_analysis before changing a shared symbol or contract",
+            ],
             "preferred_flow": [
                 "get_project_index",
                 "search_symbols or list_findings",
@@ -753,7 +1430,27 @@ async def build_project_index(
         },
     }
     _annotate_relative_files(index, root_prefix)
-    return index
+    try:
+        await revalidate_graph_stamp(session, stamp=graph_stamp)
+    except GraphGenerationChanged as exc:
+        # PostgreSQL READ COMMITTED may cross a promotion between the many
+        # bounded index queries. Never serialize that mixed materialization.
+        return _apply_serialized_budget(
+            {
+                "schema": SCHEMA_PROJECT_INDEX,
+                "error": "graph_snapshot_changed_retry",
+                "reason": str(exc),
+                "retryable": True,
+                "snapshot": {
+                    "generation": graph_stamp.generation,
+                    "run_id": str(graph_stamp.current_run_id),
+                },
+            },
+            max_serialized_bytes=max_serialized_bytes,
+        )
+    return _apply_serialized_budget(
+        index, max_serialized_bytes=max_serialized_bytes
+    )
 
 
 async def _get_node(
@@ -789,29 +1486,35 @@ async def _get_finding(
 ) -> Finding | None:
     return (
         await session.execute(
-            select(Finding).where(
-                Finding.project_id == project_id,
-                Finding.id == finding_id,
-            )
+            current_findings_select(project_id).where(Finding.id == finding_id)
         )
     ).scalar_one_or_none()
 
 
 async def _current_summaries(
     session: AsyncSession, project_id: uuid.UUID, target_id: str
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     rows = (
         await session.execute(
             select(Summary)
+            .join(GraphHead, GraphHead.project_id == Summary.project_id)
             .where(
                 Summary.project_id == project_id,
                 Summary.target_id == target_id,
                 Summary.superseded_by.is_(None),
+                GraphHead.state == GRAPH_HEAD_READY,
+                Summary.validated_graph_generation == GraphHead.generation,
+                Summary.validated_overlay_generation
+                == GraphHead.overlay_generation,
             )
             .order_by(Summary.level, Summary.generated_at.desc())
+            .limit(_MAX_CURRENT_SUMMARIES + 1)
         )
     ).scalars().all()
-    return [_summary_ref(s) for s in rows]
+    return (
+        [_summary_ref(s) for s in rows[:_MAX_CURRENT_SUMMARIES]],
+        len(rows) > _MAX_CURRENT_SUMMARIES,
+    )
 
 
 async def _call_edges(
@@ -839,7 +1542,8 @@ async def _call_edges(
             .limit(limit)
         )
     ).scalars().all()
-    return [_edge_ref(e) for e in rows]
+    refs = await _edge_ref_map(session, project_id, list(rows))
+    return [refs[edge.id] for edge in rows]
 
 
 async def _data_access_edges(
@@ -867,8 +1571,9 @@ async def _data_access_edges(
             .limit(limit)
         )
     ).scalars().all()
-    reads = [_edge_ref(e) for e in rows if e.kind == "READS"]
-    writes = [_edge_ref(e) for e in rows if e.kind == "WRITES"]
+    refs = await _edge_ref_map(session, project_id, list(rows))
+    reads = [refs[edge.id] for edge in rows if edge.kind == "READS"]
+    writes = [refs[edge.id] for edge in rows if edge.kind == "WRITES"]
     return {
         "reads": reads,
         "writes": writes,
@@ -896,10 +1601,11 @@ async def _contract_edges(
             .limit(limit)
         )
     ).scalars().all()
-    exposers = [_edge_ref(e) for e in rows if e.kind == "EXPOSES"]
+    refs = await _edge_ref_map(session, project_id, list(rows))
+    exposers = [refs[edge.id] for edge in rows if edge.kind == "EXPOSES"]
     return {
         "exposers": exposers,
-        "callers": [_edge_ref(e) for e in rows if e.kind == "CALLS"],
+        "callers": [refs[edge.id] for edge in rows if edge.kind == "CALLS"],
         # A contract inferred from a client-side fetch literal with no
         # EXPOSES edge means the serving side is NOT in the graph (e.g. a
         # C server the analyzers didn't cover) — the agent must not treat
@@ -1055,7 +1761,12 @@ async def _data_entity_mcp_context(
     }
 
 
-def _next_queries_for_node(node: Node, intent: str | None) -> list[dict[str, Any]]:
+def _next_queries_for_node(
+    node: Node,
+    intent: str | None,
+    *,
+    data: dict[str, Any],
+) -> list[dict[str, Any]]:
     if node.kind == "Symbol":
         return [
             {"tool": "get_symbol", "args": {"symbol_id": node.id}},
@@ -1077,7 +1788,7 @@ def _next_queries_for_node(node: Node, intent: str | None) -> list[dict[str, Any
     return [
         {
             "tool": "search_symbols",
-            "args": {"query": (node.data or {}).get("name") or node.id},
+            "args": {"query": data.get("name") or node.id},
         }
     ]
 
@@ -1105,10 +1816,18 @@ def _pack_header(
             "raw_source_included": False,
         },
         "rules": {
+            "role": "source_reference_and_analysis_guide",
             "source_of_truth": "mnemos_graph",
             "read_source_only_after_identifying_file_ranges": True,
             "preserve_certainty": True,
             "certainty_order": list(_CERTAINTY_ORDER),
+            "answer_protocol": [
+                "separate verified/asserted facts from inferred hypotheses",
+                "cite evidence IDs and file/line locations for material claims",
+                "mention truncation or coverage gaps that limit the answer",
+                "verify the narrow source window before proposing an edit",
+            ],
+            "summaries": "optional_narration_not_source_truth",
         },
     }
 
@@ -1121,12 +1840,16 @@ async def build_task_context_pack(
     target_kind: str = "auto",
     intent: str | None = None,
     budget_items: int = 50,
+    max_serialized_bytes: int = DEFAULT_AGENT_CONTEXT_MAX_BYTES,
 ) -> dict[str, Any]:
     """Return the bounded context a coding agent needs for one task."""
     budget_items = max(5, min(int(budget_items), 200))
     project = await _require_project(session, project_id)
     if project is None:
-        return {"schema": SCHEMA_TASK_PACK, "error": "project_not_found"}
+        return _apply_serialized_budget(
+            {"schema": SCHEMA_TASK_PACK, "error": "project_not_found"},
+            max_serialized_bytes=max_serialized_bytes,
+        )
 
     resolved_kind = target_kind
     node: Node | None = None
@@ -1155,20 +1878,33 @@ async def build_task_context_pack(
             resolved_kind = "Finding"
 
     pack = _pack_header(project, project_id, target_id, resolved_kind, intent, budget_items)
+    pack["budget"]["max_serialized_bytes"] = _normalise_serialized_budget(
+        max_serialized_bytes
+    )
     if node is None and edge is None and finding is None:
         pack["error"] = "target_not_found"
         pack["next_mcp_queries"] = [
             {"tool": "search_symbols", "args": {"query": target_id}},
             {"tool": "list_findings", "args": {"status": "open"}},
         ]
-        return pack
+        return _apply_serialized_budget(
+            pack, max_serialized_bytes=max_serialized_bytes
+        )
 
     evidence_refs: list[dict[str, Any]] = []
 
     if node is not None:
-        pack["target_node"] = _node_ref(node)
+        node_refs = await _node_ref_map(session, project_id, [node])
+        pack["target_node"] = node_refs[node.id]
         evidence_refs.append(pack["target_node"]["evidence"])
-        pack["summaries"] = await _current_summaries(session, project_id, node.id)
+        pack["summaries"], summaries_truncated = await _current_summaries(
+            session, project_id, node.id
+        )
+        if summaries_truncated:
+            pack.setdefault("truncation", {})["summaries"] = {
+                "kept": _MAX_CURRENT_SUMMARIES,
+                "more_available": True,
+            }
         pack["summary_rollups"] = await _summary_rollups(session, project_id, node.id)
         pack["related_findings"] = await _risk_findings(
             session, project_id, limit=budget_items, subject_node_id=node.id
@@ -1204,8 +1940,10 @@ async def build_task_context_pack(
             }
             from app.mcp.queries import impact_analysis
 
-            pack["impact"] = await impact_analysis(
-                session, project_id=project_id, symbol_id=node.id
+            pack["impact"] = _agent_value(
+                await impact_analysis(
+                    session, project_id=project_id, symbol_id=node.id
+                )
             )
         elif node.kind == "Contract":
             pack["precomputed_mcp_context"] = await _contract_mcp_context(
@@ -1226,14 +1964,28 @@ async def build_task_context_pack(
             }
         else:
             pack["graph_slice"] = {}
-        pack["next_mcp_queries"] = _next_queries_for_node(node, intent)
+        pack["next_mcp_queries"] = _next_queries_for_node(
+            node,
+            intent,
+            data=pack["target_node"]["data"],
+        )
 
     if edge is not None:
-        pack["target_edge"] = _edge_ref(edge)
+        edge_refs = await _edge_ref_map(session, project_id, [edge])
+        pack["target_edge"] = edge_refs[edge.id]
         evidence_refs.append(pack["target_edge"]["evidence"])
+        endpoint_nodes = [
+            endpoint
+            for endpoint in (
+                await _get_node(session, project_id, edge.source_id),
+                await _get_node(session, project_id, edge.target_id),
+            )
+            if endpoint is not None
+        ]
+        endpoint_refs = await _node_ref_map(session, project_id, endpoint_nodes)
         pack["endpoints"] = {
-            "source": _node_ref(await _get_node(session, project_id, edge.source_id)),
-            "target": _node_ref(await _get_node(session, project_id, edge.target_id)),
+            "source": endpoint_refs.get(edge.source_id),
+            "target": endpoint_refs.get(edge.target_id),
         }
         pack["related_findings"] = await _risk_findings(
             session, project_id, limit=budget_items, subject_edge_id=edge.id
@@ -1255,9 +2007,27 @@ async def build_task_context_pack(
             if finding.subject_edge_id
             else None
         )
+        subject_node_refs = await _node_ref_map(
+            session,
+            project_id,
+            [subject_node] if subject_node is not None else [],
+        )
+        subject_edge_refs = await _edge_ref_map(
+            session,
+            project_id,
+            [subject_edge] if subject_edge is not None else [],
+        )
         pack["subject"] = {
-            "node": _node_ref(subject_node),
-            "edge": _edge_ref(subject_edge) if subject_edge else None,
+            "node": (
+                subject_node_refs.get(subject_node.id)
+                if subject_node is not None
+                else None
+            ),
+            "edge": (
+                subject_edge_refs.get(subject_edge.id)
+                if subject_edge is not None
+                else None
+            ),
         }
         if subject_node is not None:
             evidence_refs.append(pack["subject"]["node"]["evidence"])
@@ -1304,8 +2074,10 @@ async def build_task_context_pack(
             }
             from app.mcp.queries import impact_analysis
 
-            pack["impact"] = await impact_analysis(
-                session, project_id=project_id, symbol_id=subject_node.id
+            pack["impact"] = _agent_value(
+                await impact_analysis(
+                    session, project_id=project_id, symbol_id=subject_node.id
+                )
             )
         else:
             pack["graph_slice"] = {"subject": pack["subject"]}
@@ -1356,4 +2128,6 @@ async def build_task_context_pack(
     _annotate_relative_files(
         pack, await project_root_prefix(session, project_id)
     )
-    return pack
+    return _apply_serialized_budget(
+        pack, max_serialized_bytes=max_serialized_bytes
+    )

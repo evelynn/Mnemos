@@ -8,14 +8,30 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import datetime
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.extractor.validator import current_summary_claim_views
+from app.finding_currentness import current_findings_select
+from app.graph_overlays import (
+    edge_identity,
+    edge_read_view,
+    load_edge_overlays,
+    load_node_human_overlays,
+    node_read_view,
+)
+from app.graph_publication import (
+    GRAPH_HEAD_READY,
+    GraphPublicationInvariantError,
+    validate_graph_publication_receipt,
+)
 from app.models.findings import Finding, Summary
-from app.models.graph import AnalysisRun, Edge, Node
+from app.models.graph import AnalysisRun, Edge, GraphHead, Node
+from app.models.overlays import GraphEdgeRuntimeOverlay
 
 _TOKEN = re.compile(r"[A-Za-z0-9_]+")
 
@@ -105,16 +121,6 @@ def source_role(path: str | None) -> str:
     return "product"
 
 
-# project_id → common absolute-path prefix of its symbol locations (or None).
-# The analyzers disagree on path style (ggoss-ts absolute POSIX, ggoss-py
-# absolute Windows, ggoss-cpp project-relative); stripping the per-project
-# common prefix gives agents one stable project-relative path to feed into
-# narrow read_file calls (eval doc Task 3). Roots don't move for a live
-# project, so a simple capped cache is enough.
-_ROOT_PREFIX_CACHE: dict[str, str | None] = {}
-_ROOT_PREFIX_CACHE_MAX = 256
-
-
 async def project_root_prefix(
     session: AsyncSession, project_id: uuid.UUID
 ) -> str | None:
@@ -122,9 +128,6 @@ async def project_root_prefix(
     project's *absolute* symbol file paths. None when the project has no
     absolute paths (everything already relative) or only one directory of
     evidence (a prefix inferred from one dir would over-strip)."""
-    key = str(project_id)
-    if key in _ROOT_PREFIX_CACHE:
-        return _ROOT_PREFIX_CACHE[key]
     rows = (
         await session.execute(
             select(Node.data["location"]["file"].astext)
@@ -154,9 +157,6 @@ async def project_root_prefix(
         while common and len("/".join(common)) >= len(abs_paths[0]):
             common.pop()
         prefix = "/".join(common) if common else None
-    if len(_ROOT_PREFIX_CACHE) >= _ROOT_PREFIX_CACHE_MAX:
-        _ROOT_PREFIX_CACHE.clear()
-    _ROOT_PREFIX_CACHE[key] = prefix
     return prefix
 
 
@@ -444,12 +444,18 @@ async def search_symbols(
                     ).inc()
 
     root_prefix = await project_root_prefix(session, project_id)
+    node_overlays = await load_node_human_overlays(
+        session,
+        project_id=project_id,
+        node_ids=(row.id for _score, row in scored),
+    )
     norm_path_prefix = _norm_path(path_prefix).lower().rstrip("/") if path_prefix else None
     out: list[dict[str, Any]] = []
     for s, r in scored:
         if len(out) >= top_k:
             break
-        d = r.data or {}
+        view = node_read_view(r, node_overlays.get(r.id))
+        d = view["data"]
         loc = d.get("location") or {}
         file_path = loc.get("file")
         role = source_role(file_path)
@@ -468,7 +474,10 @@ async def search_symbols(
             "name": d.get("name"),
             "component_id": d.get("component_id"),
             "kind": r.kind,
-            "certainty": r.certainty,
+            "certainty": view["certainty"],
+            "source_certainty": view["source_certainty"],
+            "effective_certainty": view["effective_certainty"],
+            "confirmed": view["confirmed"],
             "score": round(s, 2),
             "excerpt": _signature_excerpt(d.get("signature")),
             "location": {
@@ -528,23 +537,71 @@ async def get_symbol(
     l1 = (
         await session.execute(
             select(Summary)
+            .join(GraphHead, GraphHead.project_id == Summary.project_id)
             .where(
                 Summary.project_id == project_id,
                 Summary.target_id == symbol_id,
                 Summary.level == 1,
                 Summary.superseded_by.is_(None),
+                GraphHead.state == GRAPH_HEAD_READY,
+                Summary.validated_graph_generation == GraphHead.generation,
+                Summary.validated_overlay_generation
+                == GraphHead.overlay_generation,
             )
             .limit(1)
         )
     ).scalar_one_or_none()
+    node_overlays = await load_node_human_overlays(
+        session, project_id=project_id, node_ids=[node.id]
+    )
+    node_view = node_read_view(node, node_overlays.get(node.id))
+    safe_data = _safe_node_data(node_view["data"])
+    location = safe_data.get("location")
+    if isinstance(location, dict):
+        root_prefix = await project_root_prefix(session, project_id)
+        relative_file = relative_source_path(location.get("file"), root_prefix)
+        if relative_file:
+            safe_data["location"] = {
+                **location,
+                "file": relative_file,
+                "relative_file": relative_file,
+            }
+    l1_claim_view = None
+    if l1 is not None:
+        l1_claim_view = (
+            await current_summary_claim_views(
+                session,
+                project_id=project_id,
+                summaries=[l1],
+            )
+        )[0]
     return {
         "symbol": {
             "id": node.id,
             "kind": node.kind,
-            "data": _safe_node_data(node.data),
-            "certainty": node.certainty,
+            "data": safe_data,
+            "certainty": node_view["certainty"],
+            "source_certainty": node_view["source_certainty"],
+            "effective_certainty": node_view["effective_certainty"],
+            "confirmed": node_view["confirmed"],
         },
         "l1_summary": l1.summary if l1 is not None else None,
+        "l1_summary_meta": (
+            {
+                "model_used": l1.model_used,
+                "fallback_reason": getattr(l1, "fallback_reason", None),
+                "grounding_status": l1_claim_view.grounding_status,
+                "narrative_certainty": "inferred",
+                "claims": l1_claim_view.claims,
+                "analysis_run_id": (
+                    str(getattr(l1, "analysis_run_id", None))
+                    if getattr(l1, "analysis_run_id", None)
+                    else None
+                ),
+            }
+            if l1 is not None and l1_claim_view is not None
+            else None
+        ),
         "neighbors": {
             "callers_count": len(callers),
             "callees_count": len(callees),
@@ -552,14 +609,22 @@ async def get_symbol(
     }
 
 
-def _edge_out(e: Edge) -> dict[str, Any]:
+def _edge_out(e: Edge, view: dict[str, Any]) -> dict[str, Any]:
     return {
         "caller_id": e.source_id,
         "callee_id": e.target_id,
-        "certainty": e.certainty,
+        "certainty": view["certainty"],
+        "source_certainty": view["source_certainty"],
+        "effective_certainty": view["effective_certainty"],
+        "confirmed": view["confirmed"],
         # Spec §11.3 — every edge surfaces whether OTLP confirmed it.
-        "exercised": str((e.data or {}).get("exercised", "")).lower() == "true",
-        "site": (e.data or {}).get("invocation_site"),
+        "exercised": view["exercised"],
+        "runtime": {
+            key: view["data"].get(key)
+            for key in ("first_seen_at", "last_seen_at", "hit_count")
+            if view["data"].get(key) is not None
+        },
+        "site": view["data"].get("invocation_site"),
     }
 
 
@@ -606,12 +671,23 @@ async def _walk_calls(
         depth_reached = depth
         if not rows:
             break
+        overlays = await load_edge_overlays(
+            session,
+            project_id=project_id,
+            identities=(edge_identity(edge) for edge in rows),
+        )
         next_frontier: list[str] = []
         for e in rows:
             if len(edges) >= limit:
                 truncated = True
                 break
-            edges.append(_edge_out(e))
+            identity = edge_identity(e)
+            view = edge_read_view(
+                e,
+                overlays.human.get(identity),
+                overlays.runtime.get(identity),
+            )
+            edges.append(_edge_out(e, view))
             nxt = e.source_id if direction == "callers" else e.target_id
             if nxt not in seen_nodes:
                 seen_nodes.add(nxt)
@@ -706,54 +782,80 @@ async def impact_analysis(
     affected_set = {symbol_id, *direct, *transitive}
     data_rows = (
         await session.execute(
-            select(Edge.source_id, Edge.target_id, Edge.kind, Edge.data).where(
+            select(Edge).where(
                 Edge.project_id == project_id,
                 Edge.source_id.in_(affected_set),
                 Edge.kind.in_(("READS", "WRITES")),
                 Edge.valid_to.is_(None),
             )
         )
-    ).all()
-    affected_data_entities = sorted({row[1] for row in data_rows})
-
+    ).scalars().all()
+    affected_data_entities = sorted({edge.target_id for edge in data_rows})
+    data_overlays = await load_edge_overlays(
+        session,
+        project_id=project_id,
+        identities=(edge_identity(edge) for edge in data_rows),
+    )
     runtime_exercised = any(
-        str((row[3] or {}).get("exercised", "")).lower() == "true"
-        for row in data_rows
+        edge_read_view(
+            edge,
+            data_overlays.human.get(edge_identity(edge)),
+            data_overlays.runtime.get(edge_identity(edge)),
+        )["exercised"]
+        for edge in data_rows
     )
     if not runtime_exercised:
         # Also check the call edges in the chain.
         chk = (
             await session.execute(
-                select(Edge.data).where(
+                select(Edge).where(
                     Edge.project_id == project_id,
                     Edge.source_id.in_(affected_set),
                     Edge.kind == "CALLS",
                     Edge.valid_to.is_(None),
                 ).limit(2000)
             )
-        ).all()
+        ).scalars().all()
+        call_overlays = await load_edge_overlays(
+            session,
+            project_id=project_id,
+            identities=(edge_identity(edge) for edge in chk),
+        )
         runtime_exercised = any(
-            str((row[0] or {}).get("exercised", "")).lower() == "true"
-            for row in chk
+            edge_read_view(
+                edge,
+                call_overlays.human.get(edge_identity(edge)),
+                call_overlays.runtime.get(edge_identity(edge)),
+            )["exercised"]
+            for edge in chk
         )
 
     test_rows = (
         await session.execute(
-            select(Node.id, Node.data).where(
+            select(Node).where(
                 Node.project_id == project_id,
                 Node.id.in_(affected_set),
                 Node.valid_to.is_(None),
             )
         )
-    ).all()
+    ).scalars().all()
+    test_overlays = await load_node_human_overlays(
+        session,
+        project_id=project_id,
+        node_ids=(node.id for node in test_rows),
+    )
     affected_tests: list[str] = []
     opaque_components: list[str] = []
-    for nid, ndata in test_rows:
-        d = ndata or {}
-        if d.get("is_test") or "test" in nid.lower() or "spec" in nid.lower():
-            affected_tests.append(nid)
+    for node in test_rows:
+        d = node_read_view(node, test_overlays.get(node.id))["data"]
+        if (
+            d.get("is_test")
+            or "test" in node.id.lower()
+            or "spec" in node.id.lower()
+        ):
+            affected_tests.append(node.id)
         if d.get("is_opaque") or d.get("kind") == "OpaqueComponent":
-            opaque_components.append(nid)
+            opaque_components.append(node.id)
 
     return {
         "directly_affected": direct,
@@ -774,8 +876,7 @@ async def list_findings(
     limit: int = 50,
 ) -> list[dict[str, Any]]:
     stmt = (
-        select(Finding)
-        .where(Finding.project_id == project_id)
+        current_findings_select(project_id)
         .order_by(Finding.last_seen_at.desc())
         .limit(max(1, min(limit, 500)))
     )
@@ -810,22 +911,38 @@ async def get_module_summary(
     row = (
         await session.execute(
             select(Summary)
+            .join(GraphHead, GraphHead.project_id == Summary.project_id)
             .where(
                 Summary.project_id == project_id,
                 Summary.target_id == target_id,
                 Summary.level == level,
                 Summary.superseded_by.is_(None),
+                GraphHead.state == GRAPH_HEAD_READY,
+                Summary.validated_graph_generation == GraphHead.generation,
+                Summary.validated_overlay_generation
+                == GraphHead.overlay_generation,
             )
             .limit(1)
         )
     ).scalar_one_or_none()
     if row is None:
         return None
+    # Pre-0026 runners embedded a cache digest as a synthetic claim.  It is
+    # control metadata, not source evidence, and must never reach an AI
+    # consumer as if it were a grounded statement.
+    claim_view = (
+        await current_summary_claim_views(
+            session,
+            project_id=project_id,
+            summaries=[row],
+        )
+    )[0]
+    visible_claims = claim_view.claims
     # Certainty rollup — spec §11.3 mandates the
     # {verified, asserted, inferred} breakdown so an agent can tell
     # how trustworthy the narrative's evidence is.
     breakdown = {"verified": 0, "asserted": 0, "inferred": 0}
-    for claim in row.claims or []:
+    for claim in visible_claims:
         for ev in (claim.get("evidence") or []) if isinstance(claim, dict) else []:
             c = ev.get("certainty") if isinstance(ev, dict) else None
             if c in breakdown:
@@ -835,11 +952,35 @@ async def get_module_summary(
         "level": row.level,
         "summary": row.summary,
         "detailed": row.detailed,
-        "claims": row.claims,
+        "claims": visible_claims,
+        "flow": claim_view.flow,
+        "source_snapshot": claim_view.source_snapshot,
+        "sections": claim_view.sections or [],
+        "contract_error": claim_view.contract_error,
         "open_questions": row.open_questions,
+        "evidence_hash": row.evidence_hash,
         "certainty_breakdown": breakdown,
         "generated_at": row.generated_at.isoformat(),
         "model_used": row.model_used,
+        "fallback_reason": getattr(row, "fallback_reason", None),
+        "grounding_status": claim_view.grounding_status,
+        "narrative_certainty": "inferred",
+        "analysis_run_id": (
+            str(getattr(row, "analysis_run_id", None))
+            if getattr(row, "analysis_run_id", None)
+            else None
+        ),
+        "validated_graph_generation": getattr(
+            row, "validated_graph_generation", None
+        ),
+        "validated_overlay_generation": getattr(
+            row, "validated_overlay_generation", None
+        ),
+        "validated_at": (
+            getattr(row, "validated_at", None).isoformat()
+            if getattr(row, "validated_at", None)
+            else None
+        ),
     }
 
 
@@ -858,26 +999,66 @@ async def list_flows(
     rows = (
         await session.execute(
             select(Summary)
+            .join(GraphHead, GraphHead.project_id == Summary.project_id)
             .where(
                 Summary.project_id == project_id,
                 Summary.level == 4,
                 Summary.superseded_by.is_(None),
+                GraphHead.state == GRAPH_HEAD_READY,
+                Summary.validated_graph_generation == GraphHead.generation,
+                Summary.validated_overlay_generation
+                == GraphHead.overlay_generation,
             )
             .order_by(Summary.generated_at.desc())
             .limit(max(1, min(limit, 200)))
         )
     ).scalars().all()
-    return [
-        {
-            "target_id": r.target_id,
-            "summary": r.summary,
-            "detailed": r.detailed,
-            "sections": r.claims or [],
-            "open_questions": r.open_questions or [],
-            "generated_at": r.generated_at.isoformat() if r.generated_at else None,
-        }
-        for r in rows
-    ]
+    views = []
+    for offset in range(0, len(rows), 50):
+        views.extend(
+            await current_summary_claim_views(
+                session,
+                project_id=project_id,
+                summaries=list(rows[offset : offset + 50]),
+            )
+        )
+
+    result: list[dict[str, Any]] = []
+    for row, view in zip(rows, views, strict=True):
+        # A malformed/mixed persisted payload is not a traced flow.  Do not
+        # pass raw JSONB through to an AI consumer; the general Summary API
+        # still exposes the row's explicit stale status for diagnostics.
+        if view.flow is None:
+            continue
+        result.append(
+            {
+                "target_id": row.target_id,
+                "summary": row.summary,
+                "detailed": row.detailed,
+                "flow": view.flow,
+                "source_snapshot": view.source_snapshot,
+                "sections": view.sections or [],
+                "claims": view.claims,
+                "contract_error": view.contract_error,
+                "open_questions": row.open_questions or [],
+                "grounding_status": view.grounding_status,
+                "narrative_certainty": "inferred",
+                "analysis_run_id": (
+                    str(row.analysis_run_id) if row.analysis_run_id else None
+                ),
+                "validated_graph_generation": row.validated_graph_generation,
+                "validated_overlay_generation": (
+                    row.validated_overlay_generation
+                ),
+                "validated_at": (
+                    row.validated_at.isoformat() if row.validated_at else None
+                ),
+                "generated_at": (
+                    row.generated_at.isoformat() if row.generated_at else None
+                ),
+            }
+        )
+    return result
 
 
 
@@ -925,34 +1106,68 @@ async def find_runtime_path(
     seen: set[str] = {entry_contract_id}
     chain: list[str] = []
     hit_counts: list[int] = []
-    cutoff_iso: str | None = None
+    cutoff: datetime | None = None
     if window_sec is not None:
         from datetime import datetime, timedelta, timezone
 
-        cutoff_iso = (
+        cutoff = (
             datetime.now(tz=timezone.utc) - timedelta(seconds=window_sec)
-        ).isoformat()
-    for _ in range(max_depth):
-        stmt = select(Edge).where(
-            Edge.project_id == project_id,
-            Edge.source_id.in_(frontier),
-            Edge.valid_to.is_(None),
-            Edge.data["exercised"].astext == "true",
         )
-        if cutoff_iso is not None:
-            # last_seen_at lives in Edge.data; compare ISO strings
-            # (RFC-3339 ISO compares correctly when both are tz-aware).
-            stmt = stmt.where(Edge.data["last_seen_at"].astext >= cutoff_iso)
+    for _ in range(max_depth):
+        stmt = (
+            select(Edge)
+            .join(
+                GraphEdgeRuntimeOverlay,
+                and_(
+                    GraphEdgeRuntimeOverlay.project_id == Edge.project_id,
+                    GraphEdgeRuntimeOverlay.source_id == Edge.source_id,
+                    GraphEdgeRuntimeOverlay.target_id == Edge.target_id,
+                    GraphEdgeRuntimeOverlay.kind == Edge.kind,
+                ),
+            )
+            .where(
+                Edge.project_id == project_id,
+                Edge.source_id.in_(frontier),
+                Edge.valid_to.is_(None),
+            )
+        )
         rows = (await session.execute(stmt)).scalars().all()
+        overlays = await load_edge_overlays(
+            session,
+            project_id=project_id,
+            identities=(edge_identity(edge) for edge in rows),
+        )
         frontier = []
         for e in rows:
+            identity = edge_identity(e)
+            view = edge_read_view(
+                e,
+                overlays.human.get(identity),
+                overlays.runtime.get(identity),
+            )
+            if not view["exercised"]:
+                continue
+            if cutoff is not None:
+                raw_last_seen = view["data"].get("last_seen_at")
+                try:
+                    last_seen = datetime.fromisoformat(
+                        str(raw_last_seen).replace("Z", "+00:00")
+                    )
+                    if last_seen.tzinfo is None:
+                        from datetime import timezone
+
+                        last_seen = last_seen.replace(tzinfo=timezone.utc)
+                except (TypeError, ValueError):
+                    continue
+                if last_seen < cutoff:
+                    continue
             if e.target_id in seen:
                 continue
             seen.add(e.target_id)
             frontier.append(e.target_id)
             chain.append(e.target_id)
             try:
-                hit_counts.append(int((e.data or {}).get("hit_count", 0)))
+                hit_counts.append(int(view["data"].get("hit_count", 0)))
             except (TypeError, ValueError):
                 hit_counts.append(0)
         if not frontier:
@@ -994,12 +1209,31 @@ async def get_data_access(
 
     reads: list[dict[str, Any]] = []
     writes: list[dict[str, Any]] = []
+    overlays = await load_edge_overlays(
+        session,
+        project_id=project_id,
+        identities=(edge_identity(edge) for edge in rows),
+    )
     for e in rows:
+        identity = edge_identity(e)
+        view = edge_read_view(
+            e,
+            overlays.human.get(identity),
+            overlays.runtime.get(identity),
+        )
         item = {
             "entity_id": e.target_id,
-            "certainty": e.certainty,
-            "exercised": str((e.data or {}).get("exercised", "")).lower() == "true",
-            "access_site": (e.data or {}).get("access_site"),
+            "certainty": view["certainty"],
+            "source_certainty": view["source_certainty"],
+            "effective_certainty": view["effective_certainty"],
+            "confirmed": view["confirmed"],
+            "exercised": view["exercised"],
+            "runtime": {
+                key: view["data"].get(key)
+                for key in ("first_seen_at", "last_seen_at", "hit_count")
+                if view["data"].get(key) is not None
+            },
+            "access_site": view["data"].get("access_site"),
         }
         (writes if e.kind == "WRITES" else reads).append(item)
     return {
@@ -1028,6 +1262,10 @@ async def get_contract(
     ).scalar_one_or_none()
     if node is None:
         return None
+    node_overlays = await load_node_human_overlays(
+        session, project_id=project_id, node_ids=[node.id]
+    )
+    view = node_read_view(node, node_overlays.get(node.id))
 
     exposers = (
         await session.execute(
@@ -1054,7 +1292,11 @@ async def get_contract(
         )
     ).all()
     return {
-        "contract": node.data,
+        "contract": view["data"],
+        "certainty": view["certainty"],
+        "source_certainty": view["source_certainty"],
+        "effective_certainty": view["effective_certainty"],
+        "confirmed": view["confirmed"],
         "exposers": [row[0] for row in exposers],
         "callers": [row[0] for row in callers],
         "runtime_stats": None,
@@ -1079,6 +1321,27 @@ def _live_at(model, when):
     )
 
 
+def _publication_asof(run: AnalysisRun) -> tuple[datetime | None, str | None]:
+    """Validate the immutable receipt that makes a run a graph snapshot.
+
+    ``created_at`` and a generic completed status are not publication proof:
+    continuation runs and legacy failed writers can have both without ever
+    owning a coherent graph generation.  Historical comparison therefore
+    accepts only terminal source publications whose persisted receipt matches
+    the write-once AnalysisRun coverage fields.
+    """
+
+    if run.status not in {"completed", "partial"}:
+        return None, f"run status {run.status!r} is not a terminal publication"
+    if run.completed_at is None:
+        return None, "terminal publication has no completed_at"
+    try:
+        publication = validate_graph_publication_receipt(run)
+    except GraphPublicationInvariantError as exc:
+        return None, str(exc)
+    return publication.published_at, None
+
+
 async def _run_asof(session, project_id, run_id):
     run = (
         await session.execute(
@@ -1088,8 +1351,9 @@ async def _run_asof(session, project_id, run_id):
         )
     ).scalar_one_or_none()
     if run is None:
-        return None, None
-    return run, (run.completed_at or run.created_at)
+        return None, None, None
+    asof, error = _publication_asof(run)
+    return run, asof, error
 
 
 async def _node_snapshot(session, project_id, when):
@@ -1124,16 +1388,32 @@ async def compare_runs(
     run_b_id: uuid.UUID,
     limit: int = 40,
 ) -> dict[str, Any]:
-    """Diff the graph between two analysis runs (bitemporal). Returns bounded
-    added / removed / modified symbols + contracts, edge-kind deltas, and new
-    findings — with certainty preserved. The older run is ``before``."""
+    """Diff two atomically published terminal graph snapshots.
+
+    Returns bounded added/removed/modified symbols and contracts, edge-kind
+    deltas, and caller impact with certainty preserved. Finding deltas fail
+    closed until findings have immutable per-publication history. The older
+    publication is ``before``.
+    """
     limit = max(1, min(limit, 200))
-    run_a, t_a = await _run_asof(session, project_id, run_a_id)
-    run_b, t_b = await _run_asof(session, project_id, run_b_id)
+    run_a, t_a, error_a = await _run_asof(session, project_id, run_a_id)
+    run_b, t_b, error_b = await _run_asof(session, project_id, run_b_id)
     if run_a is None or run_b is None:
         return {"error": "run_not_found"}
-    if t_a is None or t_b is None:
-        return {"error": "run_incomplete"}
+    if error_a is not None or error_b is not None or t_a is None or t_b is None:
+        rejected = []
+        if error_a is not None or t_a is None:
+            rejected.append({"run_id": str(run_a.id), "reason": error_a})
+        if error_b is not None or t_b is None:
+            rejected.append({"run_id": str(run_b.id), "reason": error_b})
+        return {
+            "error": "run_not_published",
+            "reason": (
+                "compare_runs requires terminal runs with a valid atomic "
+                "graph-publication receipt"
+            ),
+            "rejected_runs": rejected,
+        }
     # Order chronologically — ``before`` is the earlier snapshot.
     if t_a > t_b:
         run_a, run_b, t_a, t_b = run_b, run_a, t_b, t_a
@@ -1180,20 +1460,6 @@ async def compare_runs(
     for s, t, k in edge_removed:
         edge_delta.setdefault(k, {"added": 0, "removed": 0})["removed"] += 1
 
-    # New findings — first observed within (t_a, t_b].
-    new_findings = (
-        await session.execute(
-            select(Finding)
-            .where(
-                Finding.project_id == project_id,
-                Finding.first_seen_at > t_a,
-                Finding.first_seen_at <= t_b,
-            )
-            .order_by(Finding.risk_score.desc())
-            .limit(limit)
-        )
-    ).scalars().all()
-
     # Change blast radius — who called the changed / removed symbols in the
     # BEFORE graph. Those callers are what a reviewer must re-check. This is
     # the analysis+comparison fusion (what changed AND what it affects) that a
@@ -1237,12 +1503,17 @@ async def compare_runs(
         "contracts": _section("Contract"),
         "data_entities": _section("DataEntity"),
         "edges": edge_delta,
-        "new_findings": [
-            {"id": str(f.id), "kind": f.kind, "severity": f.severity,
-             "risk_score": f.risk_score, "subject_node_id": f.subject_node_id}
-            for f in new_findings
-        ],
-        "new_findings_count": len(new_findings),
+        # Findings are mutable project-level rollups today; they do not carry
+        # immutable first-seen publication generation/run provenance.  A
+        # timestamp window would misattribute post-publish findings to the
+        # following run, so fail this subsection closed instead of fabricating
+        # historical evidence.
+        "new_findings": [],
+        "new_findings_count": 0,
+        "findings_delta": {
+            "status": "unavailable",
+            "reason": "run-linked immutable finding history is not recorded",
+        },
         "change_impact": change_impact,
         "summary": {
             "symbols_added": _section("Symbol")["added_count"],
@@ -1252,10 +1523,10 @@ async def compare_runs(
             "edges_removed": len(edge_removed),
             "contracts_changed": (_section("Contract")["added_count"]
                                   + _section("Contract")["removed_count"]),
-            "new_findings": len(new_findings),
+            "new_findings": None,
             "impacted_callers": sum(c["affected_count"] for c in change_impact),
         },
-        "note": "certainty preserved per change; older run is 'before'. "
-                "Bitemporal diff — a re-indexing tool without history cannot "
-                "produce this.",
+        "note": "certainty preserved per graph change; older publication is "
+                "'before'. Finding deltas are unavailable until findings carry "
+                "immutable run/generation provenance.",
     }

@@ -66,24 +66,37 @@ POST /api/v1/projects/{id}/analyze           (app/api/analysis.py)
   ↓ persists AnalysisRun (status=queued)
   ↓ enqueues "run_ingest" via ARQ
 worker picks up run_ingest                   (app/orchestrator/jobs.py)
-  ↓ status=running, ProgressBus bound
+  ↓ status=running, capture GraphHead base generation, ProgressBus bound
   for language in project.languages:
     for verb in (symbols, contracts, calls, data_access):
       StageTracker { subprocess analyzer }   (app/analyzers/runner.py)
-        ↓ JSON lines → _record_payload → upsert_node / upsert_edge
-                                         (app/merge/writer.py)
+        ↓ JSON lines → _record_payload → graph_node_stage / graph_edge_stage
+                                         (app/graph_publication.py)
   for pdb in ProjectDBs:                    ← Phase D: live DB schema stage
     maintenance_window gate                  (app/data_sampler/maintenance.py)
     decrypt secret                           (app/safety/crypto.py → kms.py)
     subprocess analyzer(live_schema) with MNEMOS_DB_CONN env
-      ↓ JSON lines → upsert DataEntity nodes
+      ↓ JSON lines → staged DataEntity nodes
+  seal complete producer coverage
+  promote_staged_graph (one DB transaction)
+    → reconcile changed/omitted Node+Edge versions
+    → CAS GraphHead + immutable receipt + status=published
+  reconcile runtime observations             (app/merge/runtime.py)
+    → durable logical-edge overlay + overlay generation
   rebuild_findings                           (app/merge/findings.py)
     → 6 detectors run in order
-  summarise_l1 / l2 / l3                     (app/extractor/runner.py)
-    → Anthropic Claude messages.create() per leaf / file / module
-    → hash-stamped Summary rows persisted
-  status=completed, analysis_runs_total.inc (app/obs/metrics.py)
+  requested summarise_l1 / l2 / l3           (app/extractor/runner.py)
+    → direct Anthropic or Claude Agent SDK per leaf / file / module
+    → evidence-hash + source/overlay-revision Summary rows persisted
+  status=completed or partial, analysis_runs_total.inc (app/obs/metrics.py)
 ```
+
+Before promotion, committed stage rows are invisible to current graph readers;
+failure or cancellation leaves the previous head intact. After promotion, the
+source receipt remains usable even if a derived stage fails, in which case the
+run closes as `partial`. HTTP, MCP, artifact, and source-file readers pin and
+revalidate the source and overlay revisions so a READ COMMITTED transaction
+cannot silently combine two graph states.
 
 Each stage is wrapped in `StageTracker` (`app/orchestrator/stages.py`) which
 persists progress to `analysis_stages` and emits SSE events on the
@@ -93,53 +106,103 @@ persists progress to `analysis_stages` and emits SSE events on the
 
 ```
 Dev agent → POST /api/v1/projects/{id}/plans
-  ↓ impact_analysis() run + worktree created
-  ↓ Plan row {status=draft}
+  ↓ lock canonical GraphHead/AnalysisRun receipt
+  ↓ impact_analysis() + detached worktree at the publication's exact git_sha
+  ↓ Plan {run_id, git_sha, source_generation, overlay_generation}
 Human reviewer → POST /api/v1/plans/{id}/decide (approve / reject)
-  ↓ audit record
+  ↓ exact current revision + worktree HEAD revalidated, audit record
 Dev agent → MCP edit_file_in_worktree / run_in_sandbox
 Dev agent → POST /api/v1/diff_submissions
   ↓ run_pipeline: 6-pass ultrareview         (app/safety/review/pipeline.py)
       rules → contracts → data_access → impact → second_opinion → validator
-  ↓ DiffSubmission {status=pending_approval | blocked}
+  ↓ head locked/rechecked after review
+  ↓ DiffSubmission {status=pending_approval | blocked, review revision}
 Operator → POST /api/v1/diff_submissions/{id}/approve
-  ↓ (block verdict requires explicit override + ≥20-char rationale, audited)
+  ↓ submission + Plan + worktree + current review revision revalidated
+  ↓ blocked verdict requires a one-use, two-person, same-revision grant
   ↓ create_mr_from_worktree                  (app/gitlab_client/mr.py)
   ↓ status=approved, gitlab_mr_url recorded
 ```
 
 ## 3. Data model
 
-All tables live in one Postgres schema. Migrations are numbered `0001` →
-`0011`; each is an ordinary Alembic upgrade/downgrade pair (the perf-indexes
-migration uses `CONCURRENTLY` outside the transaction).
+All tables live in one Postgres schema. The repository's **current Alembic
+head** is authoritative; do not infer the supported schema from a numbered
+range in an older report. Upgrades must traverse the full single-head chain.
+The performance-index revision uses `CONCURRENTLY` outside the transaction,
+and graph-publication revisions require the worker-drain procedure in
+`operator-guide/deployment.md`.
 
-| Domain | Tables | Lineage |
-|---|---|---|
-| Identity | `users`, `organizations`, `api_keys`, `platform_settings` | 0001, 0002, 0010 |
-| Secrets | `secrets` | 0001 |
-| Projects | `projects`, `project_dbs` | 0002, 0009 |
-| Audit | `audit_logs` | 0003 |
-| Knowledge graph | `nodes`, `edges`, `node_sources` | 0004 |
-| Samples | `data_samples`, `data_query_log` | 0005 |
-| Findings & summaries | `findings`, `summaries` | 0006 |
-| Plans | `plans`, `diff_submissions` | 0007 |
-| Stages | `analysis_runs`, `analysis_stages` | 0002, 0008 |
-| Perf indexes | (CONCURRENTLY on existing tables) | 0011 |
+| Domain | Current tables / contract |
+|---|---|
+| Identity | `users`, `organizations`, `api_keys`, `platform_settings` |
+| Secrets | `secrets` |
+| Projects | `projects`, `project_dbs` |
+| Audit | `audit_logs` |
+| Knowledge graph | `nodes`, `edges`, `node_sources`, `graph_heads`, `graph_node_stage`, `graph_edge_stage` |
+| Durable graph evidence | node/edge human overlays plus edge runtime overlays/cursors |
+| Samples | `data_samples` (source/overlay-revision authorised), `data_query_log` |
+| Derived current products | `findings`, `summaries`, each authorized by source/overlay revision markers at the current head |
+| Plans | source-bound `plans`, revision-bound `diff_submissions` and break-glass grants |
+| Runs and stages | `analysis_runs`, `analysis_stages` |
 
 ### 3.1 Bitemporal graph
 
 `nodes` and `edges` keep history via `valid_from` / `valid_to`. Only the row
-with `valid_to IS NULL` is "current". Upsert semantics (`app/merge/writer.py`):
+with `valid_to IS NULL` is "current". Production ingest never mutates those
+rows one analyzer record at a time. Each run materializes one candidate per
+logical identity in staging, freezes its complete producer/deletion authority,
+and promotes under the project head lock. Semantically unchanged rows retain
+their current version; changed or authoritatively omitted rows close at the
+same publication timestamp used by the next head generation.
 
-1. Set `valid_to = now()` on the row where `(project_id, id, valid_to IS NULL)`.
-2. Insert a new row with `valid_from = now(), valid_to = NULL`.
-3. Append to `node_sources` so multi-source reconciliation is traceable.
+Partial unique indexes enforce one current Node identity and one current Edge
+`(source,target,kind)` identity while allowing historical versions. Human and
+runtime facts live in durable logical-identity overlays and are re-materialized
+onto a replacement version; analyzer semantic hashes explicitly exclude those
+overlay-owned fields. Automatic history pruning is disabled until a retained-
+from watermark can make historical comparison fail closed instead of silently
+dropping evidence.
 
-Index `idx_nodes_current` is a partial index on `(project_id, id) WHERE
-valid_to IS NULL`, so "current" reads stay cheap regardless of history size.
+### 3.2 Publication, overlay, and derived-currentness contract
 
-### 3.2 Multi-tenancy
+The source graph and its derived products deliberately have separate revision
+boundaries:
+
+```text
+queued → running → staging → sealed → published → completed
+                                                    └→ partial
+running → failed | cancelled       (before publication only)
+```
+
+Promotion locks the project `GraphHead`, verifies the run's captured base
+generation, reconciles staged candidates, and commits the new generation,
+immutable publication receipt, and `AnalysisRun.status=published` in one
+transaction. A retry with the same receipt is idempotent. Staging commits are
+not current graph commits; a pre-publication failure cannot expose a mixed run.
+
+`GraphHead.generation` identifies the published source graph.
+`GraphHead.overlay_generation` identifies durable human/runtime overlay state.
+Overlay writers lock the head and increment the overlay generation, and source
+promotion re-materializes the latest overlay facts on replacement physical
+versions. Current HTTP, MCP, artifact, and source-snapshot consumers capture
+both values and revalidate them before returning a result.
+
+Findings and summaries are post-publication products. A row is current only
+when its stored graph and overlay validation markers match the ready head;
+legacy or mismatched rows are hidden rather than served as current. Therefore
+`published` means the source receipt is readable, not that narration and
+findings are complete. `completed` means post-processing finished; `partial`
+means the source remains readable but at least one post-publication stage did
+not finish successfully.
+
+Historical comparison accepts only receipt-validated terminal source
+publications and fails closed when their immutable provenance is unavailable.
+Finding history is not reconstructed from mutable current-product rows.
+Automatic graph-history pruning remains disabled because no retained-from
+watermark exists yet.
+
+### 3.3 Multi-tenancy
 
 `organizations` (migration `0010`) is joined to both `users` and `projects`
 via nullable FKs. NULL is treated as "pre-migration / single-tenant" and
@@ -227,24 +290,35 @@ Implemented in `app/merge/findings.py`:
 | `schema_mismatch` | `detect_schema_mismatches` | READS/WRITES target missing from live DataEntity set |
 | `opaque_component_failing` | `detect_opaque_failing_components` | opaque component with `errors/calls ≥ 0.1` |
 
-`_upsert_finding` is idempotent on `(project_id, kind, subject_node_id)` so
-successive runs update `last_seen_at` rather than duplicate.
+Finding identity is stable across physical bitemporal versions. Node findings
+key on their logical node subject; edge findings key on
+`(source_id, target_id, edge.kind)`. `run_all()` locks one ready head, stamps
+all detected rows with that source/overlay revision, and resolves previously
+validated open rows that disappeared. Direct detector calls remain useful for
+diagnostics but deliberately clear currentness markers.
 
 ### 5.3 LLM summarisation
 
-`app/extractor/agent.py` wraps the Anthropic SDK; the runner
-(`app/extractor/runner.py`) packs evidence, hash-stamps it into Summary
-rows, and skips re-summarisation when the hash matches. L1 fires per
-function, L2 per file, L3 per module — each level feeds the next via
-`pack_by_budget()`. When `ANTHROPIC_API_KEY` is unset the agent returns a
-deterministic stub so the pipeline stays testable offline.
+`app/extractor/agent.py` supports a direct Anthropic SDK call when an API key is
+configured, then the Claude Agent SDK subscription path when available. If no
+backend is available, a budget is exceeded, or a provider result fails the
+schema/grounding boundary, it returns an explicitly labelled deterministic
+stub with a fallback reason; a stub is diagnostic output, not source truth.
+
+The runner (`app/extractor/runner.py`) packs complete bounded JSON evidence,
+hash-stamps it into Summary rows, and skips re-summarisation only for a valid
+cache hit at the same source/overlay revision. L1 fires per function, L2 per
+file, and L3 per module; each level feeds the next via `pack_by_budget()`.
 
 ### 5.4 MCP server
 
-`app/mcp/server.py` exposes 18 tools via STDIO. Categories:
+`app/mcp/server.py` exposes a bounded, count-independent tool registry via
+STDIO. Categories:
 
-- **Graph queries** — `search_symbols`, `get_symbol`, `find_callers`,
-  `find_callees`, `impact_analysis`, `get_contract`, `find_runtime_path`.
+- **Orientation and graph queries** — `get_project_index`,
+  `get_task_context_pack`, `search_symbols`, `get_symbol`, `find_callers`,
+  `find_callees`, `impact_analysis`, `get_contract`, `get_data_access`,
+  `list_flows`, `find_runtime_path`, `compare_runs`.
 - **Summaries & findings** — `get_module_summary`, `list_findings`.
 - **Data** — `get_data_entity`, `get_sample_data`, `get_column_stats`,
   `search_data`.
@@ -305,32 +379,28 @@ started in `_startup` (`app/orchestrator/jobs.py`).
 
 ## 7. Dashboard
 
-Jinja + HTMX + vanilla JS. 13 tabs, each a real working surface:
+Jinja + HTMX + vanilla JS expose the current route registry without freezing a
+tab count in this document:
 
-| Tab | Path | Role gate | Fetches |
-|---|---|---|---|
-| dashboard | `/` | any | projects count, 7d runs, open findings, readiness |
-| projects | `/projects` | any | `/api/v1/projects` (org-scoped) + CRUD |
-| analysis | `/analysis` | any | trigger run + SSE stage stream |
-| data | `/data` | any | `/data_entities` + sample viewer |
-| plans | `/plans` | any | plan list + approve/reject |
-| diffs | `/diffs` | any view, operator approve | full ultrareview render |
-| findings | `/findings` | any | filtered list + rebuild |
-| audit | `/audit` | any | org-scoped audit search |
-| settings | `/settings` | admin mutations | secrets CRUD + per-project DB listing |
-| organizations | `/organizations` | admin | CRUD |
-| sso | `/sso` | admin | runtime probe + env reference |
-| gdpr | `/gdpr` | admin | export JSON / erase user |
-| login | `/login` | public | local password + SSO link |
+| Surface | Paths | Purpose |
+|---|---|---|
+| Orientation | `/`, `/projects`, `/analysis` | project inventory, run trigger, and SSE stage lifecycle |
+| Source analysis | `/ask`, `/chat`, `/graph`, `/report`, `/docs` | graph-grounded inquiry, bounded navigation, and generated guidance |
+| Evidence and change workflow | `/data`, `/findings`, `/plans`, `/diffs` | data impact, revision-current findings, plans, and ultrareview |
+| Operations | `/health`, `/audit`, `/settings`, `/profile` | readiness, org-scoped audit, connections/settings, and user profile |
+| Administration | `/users`, `/organizations`, `/sso`, `/gdpr` | admin-only mutations; API authorization remains authoritative |
+| Public authentication | `/login`, `/forgot`, `/reset`, `/invite` | local/SSO entry and credential/invite flows |
 
 ## 8. Deployment posture
 
 - Image is multi-stage Python 3.12 slim; platform + worker share it.
 - Optional monitoring stack (`docker-compose.monitoring.yml`) adds
   Prometheus + Grafana with provisioned dashboard + datasource.
-- Analyzer binaries are **not** built into the platform image by default;
-  operators choose between baking them via multi-stage COPY or running
-  them as sidecars via the Docker socket. Documented in
+- The standard platform/worker image bundles the in-repo Python,
+  TypeScript/JavaScript, C/C++, Java, Kotlin, Web, and configured tree-sitter
+  analyzers. C#, live MSSQL/Oracle, and other standalone projects still need
+  an explicitly installed contract-compatible command; merely building the
+  Compose analyzer profile does not wire a sidecar into `run_ingest`. See
   `operator-guide/deployment.md` §10b.
 - Backups — `scripts/backup.sh` dumps Postgres custom-format with
   retention pruning; `scripts/restore.sh` refuses to run without
@@ -340,22 +410,27 @@ Jinja + HTMX + vanilla JS. 13 tabs, each a real working surface:
 
 ## 9. Testing
 
-- 60 unit tests in `server/tests/` exercise masking, policy, RBAC, org
-  scope, maintenance windows, TCP probe parsing, Fernet rewrap, KMS
-  backends, OIDC signature verification, and finding maths.
-- 10 integration tests marked `integration` that hit the ASGI app, the
-  DB, and Redis. Opt-in via `MNEMOS_SKIP_INTEGRATION=1`.
-- CI runs ruff + `alembic upgrade → downgrade → upgrade` + full pytest +
-  docker build + trivy HIGH/CRITICAL scan (uploading SARIF to GitHub code
-  scanning) + CycloneDX SBOM artefact.
+- `server/tests/` contains focused unit and integration suites for analyzer
+  bounds, graph publication, overlay preservation, lifecycle transitions,
+  source/overlay-pinned readers, finding/summary currentness, structured LLM
+  boundaries, security, and operator surfaces. Test counts are intentionally
+  not frozen in architecture documentation.
+- Service-backed cases declare their PostgreSQL/Redis requirements; a local
+  SQLite/mock pass is not evidence that those cases ran against real services.
+- The CI workflow defines lint, migration round-trip, pytest, image build,
+  vulnerability scan, and SBOM jobs. For the atomic-publication change set,
+  the highest recorded evidence is local E2; real PostgreSQL CI, hard-kill
+  injection, live-provider canaries, and the 50 K-file soak remain unrun. See
+  `04-eval/atomic-graph-publication-phase-b-2026-07-15.md`.
 
 ## 10. Known limits (operator responsibility)
 
 The platform intentionally stops at its process boundary. The following
 belong to the deployment, not the code:
 
-1. **Analyzer binaries** — see §10b of the operator guide for the two
-   supported procurement modes.
+1. **Optional analyzer binaries** — languages outside the standard bundled
+   set require a contract-compatible command on the worker `PATH`; see §10b
+   of the operator guide.
 2. **TLS termination** — the uvicorn server listens plain HTTP on 8080;
    nginx/caddy/traefik must front it.
 3. **Vault token renewal** — when `KMS_BACKEND=vault`, a sidecar must

@@ -15,8 +15,8 @@ are inspected for the structural invariants the dashboard depends on:
   doesn't appear as a current valid node) is wired
 - the opaque_component_failing detector's seed (a Component with
   opacity=binary plus a CALLS edge with runtime_errors > 0) is wired
-- the three analysis runs cover the three status values the analysis
-  tab renders (completed / failed / running)
+- the three analysis runs cover safe status values the analysis
+  tab renders (completed / failed / queued)
 
 The ``seed_demo`` async orchestrator itself is integration-tested
 with a mock SessionLocal — verifying it commits, doesn't double-add
@@ -169,13 +169,19 @@ def test_findings_include_lifecycle_examples():
 
 def test_runs_cover_three_status_values():
     """The analysis tab renders different state machines for
-    completed / failed / running. Seed one of each so every code
-    path has a real row to render."""
+    completed / failed / queued. Seed one of each without planting an
+    ownerless running writer that would permanently block graph reads."""
     from app.seed_demo import _build_runs
 
     runs = _build_runs(PID)
     statuses = {r.status for r in runs}
-    assert {"completed", "failed", "running"} <= statuses
+    assert {"completed", "failed", "queued"} <= statuses
+    completed = next(run for run in runs if run.status == "completed")
+    publication = completed.stats["graph_publication"]
+    assert completed.graph_base_generation == 0
+    assert completed.graph_authoritative_sources == ["seed-demo"]
+    assert publication["atomic"] is True
+    assert publication["generation"] == 1
 
 
 def test_summaries_target_real_graph_nodes():
@@ -252,6 +258,16 @@ async def test_seed_demo_commits_and_returns_counts():
     # findings + runs + summaries + 1 audit log row.
     add_count = len(fake_session._added)
     assert add_count >= 30, f"expected ≥30 add() calls, got {add_count}"
+    heads = [row for row in fake_session._added if row.__class__.__name__ == "GraphHead"]
+    assert len(heads) == 1
+    assert heads[0].state == "ready"
+    assert heads[0].generation == 1
+    completed = next(
+        row
+        for row in fake_session._added
+        if row.__class__.__name__ == "AnalysisRun" and row.status == "completed"
+    )
+    assert heads[0].current_run_id == completed.id
 
 
 @pytest.mark.asyncio
@@ -277,6 +293,105 @@ async def test_seed_demo_keeps_existing_demo_user_password():
     # No fresh password printed when reusing an existing user.
     assert "password" not in summary
     assert "password_note" in summary
+
+
+@pytest.mark.asyncio
+async def test_ready_demo_head_can_be_wiped_and_reseeded_with_foreign_keys(
+    monkeypatch,
+):
+    """The published-run RESTRICT FK must not break seed-demo idempotency."""
+    from sqlalchemy import func, select, text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import StaticPool
+
+    from app import seed_demo as mod
+    from app.models import (  # noqa: F401
+        audit,
+        auth,
+        comments,
+        findings,
+        graph,
+        onboarding,
+        organization,
+        plans,
+        projects,
+        runtime,
+        samples,
+        stages,
+    )
+    from app.models.base import Base
+    from app.models.graph import AnalysisRun, GraphHead
+    from app.models.projects import Project
+    from app.graph_publication import promote_staged_graph
+    from app.source_snapshot import find_unpublished_refresh
+    from app.testing.sqlite_polyglot import install_polyglot
+
+    install_polyglot()
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(mod, "SessionLocal", session_factory)
+    monkeypatch.setattr(mod, "hash_password", lambda _raw: "$fake$hash$")
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: SimpleNamespace(mnemos_env="test"),
+    )
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+
+        first = await mod.seed_demo(force=True)
+        second = await mod.seed_demo(force=True)
+        first_id = uuid.UUID(first["project_id"])
+        second_id = uuid.UUID(second["project_id"])
+        assert second_id != first_id
+
+        async with session_factory() as session:
+            assert int(
+                (await session.execute(text("PRAGMA foreign_keys"))).scalar_one()
+            ) == 1
+            assert await session.get(GraphHead, first_id) is None
+            assert int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(AnalysisRun)
+                        .where(AnalysisRun.project_id == first_id)
+                    )
+                ).scalar_one()
+            ) == 0
+            assert int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(Project)
+                        .where(Project.name == mod.DEMO_PROJECT_NAME)
+                    )
+                ).scalar_one()
+            ) == 1
+            head = await session.get(GraphHead, second_id)
+            assert head is not None
+            assert head.state == "ready"
+            assert head.generation == 1
+            assert head.current_run_id is not None
+            assert (
+                await find_unpublished_refresh(session, project_id=second_id)
+                is None
+            )
+            published_run_id = head.current_run_id
+            await session.rollback()
+            retry = await promote_staged_graph(
+                session,
+                project_id=second_id,
+                run_id=published_run_id,
+            )
+            assert retry.idempotent is True
+            assert retry.generation == 1
+    finally:
+        await engine.dispose()
 
 
 def _build_fake_session(*, existing_user=None):
@@ -308,6 +423,11 @@ def _build_fake_session(*, existing_user=None):
             obj.id = uuid.uuid4()
         if obj.__class__.__name__ == "User" and getattr(obj, "id", None) is None:
             obj.id = 99
+        if (
+            obj.__class__.__name__ == "AnalysisRun"
+            and getattr(obj, "id", None) is None
+        ):
+            obj.id = uuid.uuid4()
     session.add = _add
 
     async def _commit():

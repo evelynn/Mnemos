@@ -11,6 +11,7 @@ from app.artifacts import (
     build_project_index,
     build_task_context_pack,
 )
+from app.api.graph_guard import require_readable_current_graph
 from app.auth.deps import CurrentUser
 from app.auth.org_scope import require_project_org
 from app.db import get_session
@@ -85,7 +86,10 @@ async def get_project_index_json(
     return JSONResponse(await build_project_index(db, project_id=project_id, top_k=top_k))
 
 
-@router.get("/task-context-pack.json")
+@router.get(
+    "/task-context-pack.json",
+    dependencies=[Depends(require_readable_current_graph, scope="function")],
+)
 async def get_task_context_pack_json(
     project_id: uuid.UUID,
     _: CurrentUser,

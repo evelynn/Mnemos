@@ -10,6 +10,9 @@ a running server, not CI).
 from __future__ import annotations
 
 import os
+import uuid
+
+import pytest
 
 os.environ.setdefault("MNEMOS_ENV", "test")
 os.environ.setdefault("SECRET_KEY", "ci-test-pr149")
@@ -18,9 +21,11 @@ os.environ.setdefault("MNEMOS_SKIP_STARTUP_VERIFY", "1")
 
 
 def test_ask_route_registered():
-    from app.main import app
+    from app.api.ask import router
 
-    assert "/api/v1/projects/{project_id}/ask" in {getattr(r, "path", "") for r in app.routes}
+    assert "/api/v1/projects/{project_id}/ask" in {
+        getattr(r, "path", "") for r in router.routes
+    }
 
 
 def test_terms_and_confidence():
@@ -60,3 +65,37 @@ def test_candidate_ranker_prefers_matching_file(tmp_path):
     # language is classified for extraction
     langs = {p.name: lang for p, lang in ranked}
     assert langs["orders_handler.py"] == "python"
+
+
+@pytest.mark.asyncio
+async def test_ask_source_root_is_ignored_and_deepening_is_explicitly_disabled(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from app.api import ask as ask_api
+
+    async def no_hits(*args, **kwargs):  # noqa: ANN002, ANN003
+        return []
+
+    async def no_audit(*args, **kwargs):  # noqa: ANN002, ANN003
+        return None
+
+    monkeypatch.setattr(ask_api, "search_symbols", no_hits)
+    monkeypatch.setattr(ask_api, "audit_record", no_audit)
+
+    result = await ask_api.ask(
+        uuid.uuid4(),
+        ask_api.AskRequest(
+            question="Where is the missing implementation?",
+            source_root="C:\\Windows\\System32",
+            deepen=True,
+        ),
+        SimpleNamespace(id=uuid.uuid4()),
+        object(),
+    )
+
+    assert result["answered"] is False
+    assert result["deepened"] is False
+    assert result["deepening_status"] == "snapshot_bound_deepening_not_implemented"
+    assert result["extracted_files"] == []

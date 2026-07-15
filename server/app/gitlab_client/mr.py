@@ -17,6 +17,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auth import PlatformSetting
+from app.sandbox.worktree import (
+    WorktreeDiffError,
+    canonical_committed_diff,
+    canonical_staged_diff,
+)
 
 
 @dataclass
@@ -25,6 +30,10 @@ class MRResult:
     iid: int | None
     url: str | None
     message: str
+
+
+class MRPayloadChanged(RuntimeError):
+    """The Git index no longer matches the payload approved by Gate B."""
 
 
 async def _get_setting(session: AsyncSession, key: str) -> str | None:
@@ -49,6 +58,7 @@ async def create_mr_from_worktree(
     plan_title: str,
     task_id: str,
     description: str,
+    expected_diff: str | None = None,
 ) -> MRResult:
     base_url = await _get_setting(session, "gitlab_base_url")
     token = await _get_setting(session, "gitlab_token")
@@ -77,14 +87,72 @@ async def create_mr_from_worktree(
     for cmd in [
         ["git", "checkout", "-b", branch],
         ["git", "add", "-A"],
-        ["git", "-c", "user.email=mnemos@local", "-c", "user.name=Mnemos", "commit", "-m", f"{plan_title} ({task_id})"],
-        ["git", "push", "-u", "origin", branch],
     ]:
         code, output = await _run(cmd)
         if code != 0:
             return MRResult(
                 ok=False, iid=None, url=None, message=f"git_step_failed: {' '.join(cmd)}: {output[:400]}"
             )
+
+    if expected_diff is not None:
+        try:
+            staged_diff = await canonical_staged_diff(worktree)
+        except WorktreeDiffError as exc:
+            raise MRPayloadChanged(
+                "could not prove the final Git index matches the reviewed diff"
+            ) from exc
+        if staged_diff != expected_diff:
+            raise MRPayloadChanged(
+                "final Git index differs from the reviewed Gate-B payload"
+            )
+
+    # The commit consumes the exact index snapshot compared above. Verify the
+    # resulting commit too: repository hooks may legally rewrite and re-stage
+    # files during ``git commit``. Nothing is pushed until that final tree is
+    # proven byte-for-byte equal to Gate B's payload.
+    commit_cmd = [
+        "git",
+        "-c",
+        "user.email=mnemos@local",
+        "-c",
+        "user.name=Mnemos",
+        "commit",
+        "-m",
+        f"{plan_title} ({task_id})",
+    ]
+    code, output = await _run(commit_cmd)
+    if code != 0:
+        return MRResult(
+            ok=False,
+            iid=None,
+            url=None,
+            message=f"git_step_failed: {' '.join(commit_cmd)}: {output[:400]}",
+        )
+    if expected_diff is not None:
+        try:
+            committed_diff = await canonical_committed_diff(worktree)
+        except WorktreeDiffError as exc:
+            await _run(["git", "reset", "--mixed", "HEAD^"])
+            raise MRPayloadChanged(
+                "could not prove the committed tree matches the reviewed diff"
+            ) from exc
+        if committed_diff != expected_diff:
+            # Restore the authorised parent while preserving hook-modified
+            # files for a fresh Gate-B review.
+            await _run(["git", "reset", "--mixed", "HEAD^"])
+            raise MRPayloadChanged(
+                "committed tree differs from the reviewed Gate-B payload"
+            )
+
+    push_cmd = ["git", "push", "-u", "origin", branch]
+    code, output = await _run(push_cmd)
+    if code != 0:
+        return MRResult(
+            ok=False,
+            iid=None,
+            url=None,
+            message=f"git_step_failed: {' '.join(push_cmd)}: {output[:400]}",
+        )
 
     # Create MR via python-gitlab
     try:

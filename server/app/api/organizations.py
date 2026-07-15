@@ -1,32 +1,26 @@
-"""CRUD for organisations.
+"""Fail-closed organisation visibility for tenant administrators.
 
-Admin-only. Phase C-1 foundation — subsequent work retrofits every
-project/finding/secret endpoint to enforce the tenancy boundary via
-``require_project_org`` from ``app.auth.org_scope``.
+Mnemos has no platform-admin role. An admin may read only their own concrete
+organisation; tenant creation and deletion remain disabled until a separate
+platform ownership workflow exists.
 """
 
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.audit.logger import record as audit_record
 from app.auth.rbac import require_admin
 from app.db import get_session
 from app.models.auth import User
 from app.models.organization import Organization
 
 router = APIRouter(prefix="/api/v1/organizations", tags=["organizations"])
-
-_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
-
 
 class OrgCreate(BaseModel):
     slug: str = Field(min_length=2, max_length=64)
@@ -51,7 +45,11 @@ async def list_organizations(
     db: AsyncSession = Depends(get_session),
     user: User = Depends(require_admin),
 ) -> list[OrgOut]:
-    result = await db.execute(select(Organization).order_by(Organization.created_at.desc()))
+    if user.organization_id is None:
+        return []
+    result = await db.execute(
+        select(Organization).where(Organization.id == user.organization_id)
+    )
     return [_to_out(o) for o in result.scalars().all()]
 
 
@@ -61,23 +59,12 @@ async def create_organization(
     db: AsyncSession = Depends(get_session),
     user: User = Depends(require_admin),
 ) -> OrgOut:
-    if not _SLUG.match(body.slug):
-        raise HTTPException(status_code=422, detail="invalid_slug")
-    org = Organization(slug=body.slug, display_name=body.display_name)
-    db.add(org)
-    try:
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail="slug_taken")
-    await db.refresh(org)
-    await audit_record(
-        actor=f"user:{user.id}",
-        action="organization.create",
-        target=str(org.id),
-        details={"slug": org.slug},
+    # There is no platform-admin role. A tenant admin must not mint a new
+    # tenant and implicitly become a global organisation administrator.
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="platform_admin_required",
     )
-    return _to_out(org)
 
 
 @router.delete("/{org_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -86,19 +73,21 @@ async def delete_organization(
     db: AsyncSession = Depends(get_session),
     user: User = Depends(require_admin),
 ) -> None:
-    # Refuse to delete the bootstrap ``default`` org since existing
-    # single-tenant data still lives there.
+    if user.organization_id is None:
+        raise HTTPException(status_code=404, detail="not_found")
     org = (
-        await db.execute(select(Organization).where(Organization.id == org_id))
+        await db.execute(
+            select(Organization).where(
+                Organization.id == org_id,
+                Organization.id == user.organization_id,
+            )
+        )
     ).scalar_one_or_none()
     if org is None:
         raise HTTPException(status_code=404, detail="not_found")
-    if org.slug == "default":
-        raise HTTPException(status_code=409, detail="cannot_delete_default_org")
-    await db.execute(delete(Organization).where(Organization.id == org_id))
-    await db.commit()
-    await audit_record(
-        actor=f"user:{user.id}",
-        action="organization.delete",
-        target=str(org_id),
+    # Tenant deletion needs a platform-level ownership transfer workflow.
+    # No such role/workflow exists, so even self-org deletion is disabled.
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="organization_deletion_disabled",
     )

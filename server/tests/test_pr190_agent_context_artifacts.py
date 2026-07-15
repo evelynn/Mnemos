@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -19,29 +19,86 @@ os.environ.setdefault("SECRET_KEY", "ci-test-pr190")
 os.environ.setdefault("FERNET_KEY", "4oEY9MJGAjGCbrScyvvi4CZgm8KxFuQuklXSQwUYpys=")
 os.environ.setdefault("MNEMOS_SKIP_STARTUP_VERIFY", "1")
 
+from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from app.artifacts.agent_context import (  # noqa: E402
+    DEFAULT_AGENT_CONTEXT_MAX_BYTES,
     SCHEMA_PROJECT_INDEX,
     SCHEMA_TASK_PACK,
+    _summary_ref,
     build_project_index,
     build_task_context_pack,
 )
 from app.artifacts.agents_md import build_agents_md  # noqa: E402
+from app.extractor.agent_flow import (  # noqa: E402
+    FLOW_RESULT_CONTRACT,
+    build_flow_summary_content,
+)
 from app.models import auth as _auth  # noqa: E402,F401
 from app.models import findings as _findings  # noqa: E402,F401
 from app.models import graph as _graph  # noqa: E402,F401
 from app.models import organization as _org  # noqa: E402,F401
 from app.models import projects as _projects  # noqa: E402,F401
 from app.models.base import Base  # noqa: E402
+from app.finding_identity import finding_identity_key  # noqa: E402
 from app.models.findings import Finding, Summary  # noqa: E402
-from app.models.graph import AnalysisRun, Edge, Node  # noqa: E402
+from app.models.graph import AnalysisRun, Edge, GraphHead, Node  # noqa: E402
 from app.models.projects import Project  # noqa: E402
 from app.models.stages import AnalysisStage  # noqa: E402
+from app.testing.graph_publication import published_run_fields  # noqa: E402
 from app.testing.sqlite_polyglot import install_polyglot  # noqa: E402
 
 install_polyglot()
+
+
+def _flow_summary_sections(run_id: uuid.UUID) -> list[dict]:
+    flow = {
+        "contract": FLOW_RESULT_CONTRACT,
+        "summary": "Create-order flow crosses API validation and persistence.",
+        "detailed": "POST /orders validates the payload and writes orders.",
+        "steps": [
+            {
+                "order": 1,
+                "tier": "backend",
+                "component": "orders.py",
+                "action": "create order",
+                "signal": {
+                    "kind": "function_call",
+                    "name": "create_order",
+                    "fields": [],
+                },
+            }
+        ],
+        "flags": [],
+        "data_touched": [],
+        "open_questions": [],
+    }
+    content = build_flow_summary_content(
+        flow,
+        analysis_run_id=run_id,
+        revision="a" * 40,
+        source_scope={
+            "provided_files": ["orders.py"],
+            "files": [
+                {
+                    "label": "orders.py",
+                    "tier": "backend",
+                    "language": "python",
+                    "provided_chars": 27,
+                    "included_chars": 27,
+                    "prompt_truncated": False,
+                    "input_truncated": False,
+                }
+            ],
+            "omitted_files": [],
+            "included_source_chars": 27,
+            "max_source_chars": 28_000,
+            "truncated": False,
+        },
+    )
+    return content.sections
 
 
 @pytest.fixture()
@@ -62,9 +119,10 @@ async def seeded_session():
         )
         session.add(project)
         now = datetime.now(tz=timezone.utc)
+        run_id = uuid.uuid4()
         session.add(
             AnalysisRun(
-                id=uuid.uuid4(),
+                id=run_id,
                 project_id=pid,
                 status="completed",
                 triggered_by="test",
@@ -72,7 +130,22 @@ async def seeded_session():
                 scope="full",
                 started_at=now,
                 completed_at=now,
-                stats={"symbols": 2, "edges": 3},
+                **published_run_fields(
+                    generation=1,
+                    published_at=now,
+                    stats={"symbols": 2, "edges": 3},
+                ),
+            )
+        )
+        await session.flush()
+        session.add(
+            GraphHead(
+                project_id=pid,
+                current_run_id=run_id,
+                generation=1,
+                state="ready",
+                published_at=now,
+                updated_at=now,
             )
         )
         session.add_all(
@@ -163,6 +236,10 @@ async def seeded_session():
             id=uuid.uuid4(),
             project_id=pid,
             kind="schema_mismatch",
+            identity_key=finding_identity_key(
+                kind="schema_mismatch",
+                subject_node_id="sym:orders:create_order",
+            ),
             severity="warning",
             status="open",
             subject_node_id="sym:orders:create_order",
@@ -174,6 +251,9 @@ async def seeded_session():
             remediation="Align the write target with the live schema.",
             first_seen_at=now,
             last_seen_at=now,
+            validated_graph_generation=1,
+            validated_overlay_generation=0,
+            validated_at=now,
         )
         session.add(finding)
         session.add(
@@ -182,6 +262,9 @@ async def seeded_session():
                 project_id=pid,
                 target_id="sym:orders:create_order",
                 level=1,
+                validated_graph_generation=1,
+                validated_overlay_generation=0,
+                validated_at=now,
                 summary="Creates an order after validation and writes the orders table.",
                 model_used="test",
             )
@@ -192,14 +275,13 @@ async def seeded_session():
                 project_id=pid,
                 target_id="flow:create-order",
                 level=4,
+                validated_graph_generation=1,
+                validated_overlay_generation=0,
+                validated_at=now,
                 summary="Create-order flow crosses API validation and order persistence.",
                 detailed="POST /orders invokes create_order, validates payload, and writes orders.",
-                claims=[
-                    {
-                        "section": "steps",
-                        "data": ["POST /orders", "create_order", "orders write"],
-                    }
-                ],
+                claims=_flow_summary_sections(run_id),
+                open_questions=[],
                 model_used="test",
             )
         )
@@ -217,8 +299,13 @@ async def test_project_index_is_bounded_agent_map(seeded_session):
     assert index["project"]["name"] == "agent-context-demo"
     assert index["agent_contract"]["do_not_load_whole_repo"] is True
     assert index["agent_contract"]["source_of_truth"] == "mnemos_graph"
+    assert index["agent_contract"]["role"] == "source_reference_and_analysis_guide"
+    assert index["agent_contract"]["ai_summaries_are_optional_narration"] is True
     assert index["analysis_snapshot"]["node_counts"]["Symbol"] == 2
     assert index["analysis_snapshot"]["edge_counts"]["WRITES"] == 1
+    assert index["analysis_snapshot"]["graph_queries_safe"] is True
+    assert index["analysis_snapshot"]["diagnostic_only"] is False
+    assert index["analysis_snapshot"]["unpublished_refresh"] is None
     assert "get_task_context_pack" in index["mcp_workflows"]["modify_symbol"]
     assert index["entrypoints"]["contracts"][0]["id"] == "contract:POST /orders"
     assert index["risk_queue"]["findings"][0]["finding_id"] == str(finding_id)
@@ -227,6 +314,67 @@ async def test_project_index_is_bounded_agent_map(seeded_session):
         hint["tool"] for hint in index["analysis_entrypoints"]["search_hints"]
     } >= {"search_symbols", "list_flows", "impact_analysis"}
     assert index["truncation"]["top_k"] == 2
+
+
+@pytest.mark.asyncio
+async def test_project_index_default_keeps_orientation_surface_small(
+    seeded_session,
+):
+    session, pid, _finding_id = seeded_session
+
+    index = await build_project_index(session, project_id=pid)
+
+    assert index["truncation"]["top_k"] == 10
+
+
+@pytest.mark.asyncio
+async def test_failed_staged_refresh_keeps_published_index_readable(
+    seeded_session,
+):
+    session, pid, _finding_id = seeded_session
+    baseline = (
+        await session.execute(
+            select(AnalysisRun)
+            .where(
+                AnalysisRun.project_id == pid,
+                AnalysisRun.status == "completed",
+            )
+        )
+    ).scalar_one()
+    failed_started = baseline.completed_at + timedelta(seconds=1)
+    failed = AnalysisRun(
+        id=uuid.uuid4(),
+        project_id=pid,
+        status="failed",
+        triggered_by="test",
+        git_sha="def456",
+        scope="incremental",
+        started_at=failed_started,
+        completed_at=failed_started + timedelta(seconds=1),
+        error_log="analyzer_failed",
+        graph_base_generation=1,
+    )
+    # Staged runs never mutate current Node/Edge rows. A failed attempt and a
+    # newer queued request therefore leave the published head readable.
+    queued = AnalysisRun(
+        id=uuid.uuid4(),
+        project_id=pid,
+        status="queued",
+        triggered_by="test",
+        git_sha="fedcba",
+        scope="incremental",
+    )
+    session.add_all([failed, queued])
+    await session.commit()
+
+    index = await build_project_index(session, project_id=pid, top_k=2)
+
+    snapshot = index["analysis_snapshot"]
+    assert snapshot["snapshot_consistency"] == "refreshing"
+    assert snapshot["graph_queries_safe"] is True
+    assert snapshot["diagnostic_only"] is False
+    assert snapshot["graph_publication"]["run_id"] == str(baseline.id)
+    assert index["entrypoints"]["contracts"]
 
 
 @pytest.mark.asyncio
@@ -293,6 +441,127 @@ async def test_task_context_pack_for_finding_points_back_to_subject(seeded_sessi
     assert pack["impact"]["affected_data_entities"] == ["data:orders"]
     assert pack["next_mcp_queries"][0]["tool"] == "get_task_context_pack"
     assert "repo.write_raw_legacy_order" not in json.dumps(pack)
+
+
+def test_historical_summary_fields_are_bounded_before_artifact_packing():
+    summary = Summary(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        target_id="sym:oversized",
+        level=2,
+        summary="요약" * 5_000,
+        detailed="detail " * 10_000,
+        claims=[{"claim": "x" * 700} for _ in range(100)],
+        open_questions=["question " * 200 for _ in range(100)],
+        model_used="historical-test",
+    )
+
+    ref = _summary_ref(summary)
+
+    assert len(ref["summary"]) <= 1_200
+    assert len(ref["detailed"]) <= 4_000
+    assert len(ref["claims"]) == 20
+    assert len(ref["open_questions"]) == 12
+    assert ref["truncation"]["claims"] == {"kept": 20, "total": 100}
+    assert ref["truncation"]["open_questions"] == {
+        "kept": 12,
+        "total": 100,
+    }
+
+
+@pytest.mark.asyncio
+async def test_task_context_pack_has_hard_serialized_byte_ceiling(seeded_session):
+    session, pid, _finding_id = seeded_session
+    oversized_claim = {f"field_{i}": "한" * 700 for i in range(80)}
+    session.add_all(
+        [
+            Summary(
+                id=uuid.uuid4(),
+                project_id=pid,
+                    target_id="sym:orders:create_order",
+                    level=level,
+                    validated_graph_generation=1,
+                    validated_overlay_generation=0,
+                    validated_at=datetime.now(tz=timezone.utc),
+                summary="요약" * 5_000,
+                detailed="detail " * 20_000,
+                claims=[dict(oversized_claim) for _ in range(100)],
+                open_questions=["question " * 500 for _ in range(100)],
+                model_used="hostile-history",
+            )
+            for level in range(10, 18)
+        ]
+    )
+    await session.commit()
+
+    pack = await build_task_context_pack(
+        session,
+        project_id=pid,
+        target_id="sym:orders:create_order",
+        budget_items=200,
+    )
+    serialized_bytes = len(json.dumps(pack, default=str).encode("utf-8"))
+    budget = pack["truncation"]["serialized_budget"]
+
+    assert serialized_bytes <= DEFAULT_AGENT_CONTEXT_MAX_BYTES
+    assert budget["actual_bytes"] == serialized_bytes
+    assert budget["max_bytes"] == DEFAULT_AGENT_CONTEXT_MAX_BYTES
+    assert budget["truncated"] is True
+    assert budget["reason"] == "serialized_byte_ceiling"
+    assert pack["truncation"]["summaries"] == {
+        "kept": 8,
+        "more_available": True,
+    }
+    assert pack["schema"] == SCHEMA_TASK_PACK
+    assert pack["target"] == {
+        "id": "sym:orders:create_order",
+        "kind": "Symbol",
+        "intent": None,
+    }
+    assert pack["evidence_refs"][0]["id"] == "sym:orders:create_order"
+
+    # The artifact contract fits the MCP transport contract without invoking
+    # its independent emergency truncation/fallback shape.
+    from app.mcp.server import _cap_response
+
+    transported = json.loads(_cap_response(pack))
+    assert "response_truncated" not in transported
+    assert transported["schema"] == SCHEMA_TASK_PACK
+
+
+@pytest.mark.asyncio
+async def test_project_index_has_hard_serialized_byte_ceiling(seeded_session):
+    session, pid, _finding_id = seeded_session
+    hostile_data = {
+        "name": "hostile-contract",
+        **{f"field_{i}": "界" * 700 for i in range(80)},
+    }
+    session.add_all(
+        [
+            Node(
+                id=f"contract:hostile:{i:03d}",
+                project_id=pid,
+                kind="Contract",
+                data=dict(hostile_data),
+                certainty="inferred",
+                created_by=["historical-import"],
+            )
+            for i in range(100)
+        ]
+    )
+    await session.commit()
+
+    index = await build_project_index(session, project_id=pid, top_k=100)
+    serialized_bytes = len(json.dumps(index, default=str).encode("utf-8"))
+    budget = index["truncation"]["serialized_budget"]
+
+    assert serialized_bytes <= DEFAULT_AGENT_CONTEXT_MAX_BYTES
+    assert budget["actual_bytes"] == serialized_bytes
+    assert budget["max_bytes"] == DEFAULT_AGENT_CONTEXT_MAX_BYTES
+    assert budget["truncated"] is True
+    assert index["schema"] == SCHEMA_PROJECT_INDEX
+    assert index["project"]["id"] == str(pid)
+    assert index["entrypoints"]["contracts"][0]["evidence"]["type"] == "node"
 
 
 @pytest.mark.asyncio
@@ -392,7 +661,22 @@ async def cpp_gap_session():
                 scope="full",
                 started_at=now,
                 completed_at=now,
-                stats={"symbols": 2},
+                **published_run_fields(
+                    generation=1,
+                    published_at=now,
+                    stats={"symbols": 2},
+                ),
+            )
+        )
+        await session.flush()
+        session.add(
+            GraphHead(
+                project_id=pid,
+                current_run_id=rid,
+                generation=1,
+                state="ready",
+                published_at=now,
+                updated_at=now,
             )
         )
         session.add_all(
@@ -470,6 +754,9 @@ async def cpp_gap_session():
                 project_id=pid,
                 target_id="ts:rpc.ts:callTool@15:1",
                 level=1,
+                validated_graph_generation=1,
+                validated_overlay_generation=0,
+                validated_at=now,
                 summary="structural stub",
                 model_used="stub",
                 fallback_reason="no_backend",
@@ -510,10 +797,11 @@ async def test_relative_file_normalization_across_path_styles(cpp_gap_session):
     ts = by_id["ts:rpc.ts:callTool@15:1"]
     py = by_id["py:mcp_stdio.py:call_tool@30"]
     # POSIX-absolute and Windows-absolute both normalise to one stable
-    # project-relative path; the original absolute path is preserved.
+    # project-relative path.  Temporary checkout paths must not leak through
+    # the AI-facing context after normalisation.
     assert ts["location"]["relative_file"] == "graph-ui/src/api/rpc.ts"
     assert py["location"]["relative_file"] == "tests/windows/mcp_stdio.py"
-    assert ts["location"]["file"].startswith("E:")
+    assert ts["location"]["file"] == "graph-ui/src/api/rpc.ts"
 
     pack = await build_task_context_pack(
         session, project_id=pid, target_id="ts:rpc.ts:callTool@15:1"

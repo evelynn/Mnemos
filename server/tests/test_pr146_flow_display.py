@@ -31,6 +31,7 @@ def test_mcp_server_registers_list_flows_tool_and_dispatch():
     import uuid
 
     from app.mcp import server as mcp_server
+    from app.mcp.auth import MCPAuthContext
 
     names = {t.name for t in mcp_server._TOOLS}
     assert "list_flows" in names, "list_flows MCP tool must be registered"
@@ -43,7 +44,16 @@ def test_mcp_server_registers_list_flows_tool_and_dispatch():
 
     src = inspect.getsource(mcp_server.build_server)
     assert 'name == "list_flows"' in src
-    assert isinstance(mcp_server.build_server(uuid.uuid4()), object)
+    context = MCPAuthContext(
+        api_key_id=uuid.uuid4(),
+        user_id=uuid.uuid4(),
+        username="flow-test",
+        role="viewer",
+        organization_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        token_hash="0" * 64,
+    )
+    assert isinstance(mcp_server.build_server(context), object)
 
 
 def test_report_tab_fetches_and_renders_level4_flows():
@@ -53,3 +63,4 @@ def test_report_tab_fetches_and_renders_level4_flows():
     # has a container + renders steps/flags
     assert 'id="rp-flows"' in html
     assert "flow-steps" in html and "flow-flags" in html
+    assert "(f.sections || [])" in html

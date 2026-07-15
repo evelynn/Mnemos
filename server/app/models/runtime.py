@@ -35,6 +35,14 @@ class RuntimeObservation(Base):
             "kind",
             name="uq_runtime_obs_org_svc_op_kind",
         ),
+        # Durable edge-runtime cursors scope an observation to the project
+        # whose graph consumed it.  PostgreSQL requires the exact referenced
+        # column set to be unique for that composite FK; ``id`` remains the PK.
+        UniqueConstraint(
+            "id",
+            "project_id",
+            name="uq_runtime_obs_id_project",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

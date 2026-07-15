@@ -12,28 +12,122 @@ import json
 from typing import Any, Iterable
 
 
+MAX_EVIDENCE_PROMPT_CHARS = 16_000
+
+
+class EvidencePromptTooLarge(ValueError):
+    """Complete evidence JSON cannot fit the provider input contract."""
+
+
+def serialize_evidence(
+    evidence: list[dict[str, Any]],
+    *,
+    max_chars: int = MAX_EVIDENCE_PROMPT_CHARS,
+) -> str:
+    """Serialize one complete evidence scope or reject it before a call.
+
+    Blind character slicing can leave invalid JSON and expose IDs to a model
+    that the downstream validator never saw.  Provider adapters share this
+    function so their prompt contains exactly the rows accepted as the
+    validation scope.
+    """
+
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
+    serialized = json.dumps(evidence, default=str)
+    if len(serialized) > max_chars:
+        raise EvidencePromptTooLarge(
+            f"evidence JSON exceeds hard limit ({len(serialized)} > {max_chars})"
+        )
+    return serialized
+
+
 def evidence_hash(evidence: list[dict[str, Any]]) -> str:
     """Stable hash of the evidence list used to decide whether to re-summarise.
 
-    The hash is order-insensitive (we sort on a stable key) and ignores the
-    free-form ``data`` payloads on edges — only IDs + edge kinds + certainty
-    are significant inputs.
+    Hash semantic evidence, including node payloads and child-summary text.
+    Physical edge UUIDs are deliberately removed: a bitemporal rewrite of the
+    same logical ``(source, target, kind)`` edge is not new evidence.
     """
-    keyed: list[tuple[str, str, str]] = []
+    canonical: list[dict[str, Any]] = []
     for ev in evidence:
-        kind = ev.get("kind", "")
-        identifier = str(ev.get("node_id") or ev.get("edge_id") or "")
-        cert = str(ev.get("certainty") or ev.get("edge_kind") or "")
-        keyed.append((kind, identifier, cert))
-    keyed.sort()
+        item = dict(ev)
+        if item.get("kind") == "edge":
+            item.pop("edge_id", None)
+        canonical.append(item)
+    canonical.sort(
+        key=lambda item: (
+            str(item.get("kind") or ""),
+            str(item.get("node_id") or item.get("source_id") or ""),
+            str(item.get("target_id") or ""),
+            str(item.get("edge_kind") or ""),
+            json.dumps(item, sort_keys=True, separators=(",", ":"), default=str),
+        )
+    )
     h = hashlib.sha256()
-    h.update(json.dumps(keyed, separators=(",", ":")).encode())
+    h.update(b"mnemos.evidence.v2\0")
+    h.update(
+        json.dumps(
+            canonical,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+    )
     return h.hexdigest()
 
 
 def _approx_tokens(obj: Any) -> int:
-    """Rough token estimate (chars/4) — good enough for packing decisions."""
-    return max(1, len(json.dumps(obj, default=str)) // 4)
+    """Conservative JSON estimate used by the packer's hard bound."""
+    # Match the provider prompt serializer (default JSON separators) so the
+    # bound cannot be defeated by whitespace omitted only in the estimate.
+    chars = len(json.dumps(obj, default=str))
+    return max(1, (chars + 3) // 4)
+
+
+def _bounded_item(item: dict[str, Any], max_tokens: int) -> dict[str, Any]:
+    """Replace one oversized item with identity + digest + bounded preview."""
+
+    if _approx_tokens([item]) <= max_tokens:
+        return item
+    serialized = json.dumps(
+        item, sort_keys=True, separators=(",", ":"), default=str
+    )
+    bounded: dict[str, Any] = {
+        "truncated": True,
+        "content_sha256": hashlib.sha256(serialized.encode()).hexdigest(),
+    }
+    # Add identity fields only while the complete one-item JSON chunk fits.
+    # This prevents an adversarially long node id escaping the pack bound.
+    for key in (
+        "kind",
+        "node_id",
+        "source_id",
+        "target_id",
+        "edge_kind",
+        "certainty",
+    ):
+        if key not in item:
+            continue
+        candidate = {**bounded, key: item[key]}
+        if _approx_tokens([candidate]) <= max_tokens:
+            bounded = candidate
+
+    # JSON escaping makes char slicing nonlinear, so find the largest preview
+    # that still fits using the same final estimator.
+    low, high = 0, len(serialized)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        candidate = {**bounded, "preview": serialized[:midpoint]}
+        if _approx_tokens([candidate]) <= max_tokens:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    if low:
+        bounded["preview"] = serialized[:low]
+    if _approx_tokens([bounded]) > max_tokens:
+        raise ValueError("max_tokens is too small for truncated evidence")
+    return bounded
 
 
 def pack_by_budget(
@@ -47,17 +141,22 @@ def pack_by_budget(
     has many files: each chunk yields one partial summary, then a rollup
     pass condenses the partials.
     """
+    if max_tokens < 32:
+        raise ValueError("max_tokens must be >= 32")
     chunks: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
-    current_tokens = 0
     for item in items:
-        t = _approx_tokens(item)
-        if current and current_tokens + t > max_tokens:
+        bounded_item = _bounded_item(item, max_tokens)
+        candidate = [*current, bounded_item]
+        if current and _approx_tokens(candidate) > max_tokens:
             chunks.append(current)
             current = []
-            current_tokens = 0
-        current.append(item)
-        current_tokens += t
+            candidate = [bounded_item]
+        if _approx_tokens(candidate) > max_tokens:
+            raise ValueError("bounded evidence item exceeds max_tokens")
+        current.append(bounded_item)
     if current:
         chunks.append(current)
+    if any(_approx_tokens(chunk) > max_tokens for chunk in chunks):
+        raise AssertionError("evidence pack exceeded max_tokens")
     return chunks

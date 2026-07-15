@@ -8,9 +8,9 @@ Design notes
 * **Operator-gated.** Voice is a command surface — the same authority bar
   as ``POST /ask`` (``require_operator``). A viewer can't drive the system
   by voice any more than they can by typing.
-* **Not project-scoped.** Transcription just turns audio into text; it
-  touches no project graph or DB, so it needs no org/project ACL. The
-  *resulting* text is then sent to the already-scoped ``/ask`` endpoint.
+* **Optional audit project is scoped.** Transcription itself is project-free,
+  but when the caller attaches a project id for audit correlation that id
+  must belong to the caller's concrete organisation.
 * **Graceful when disabled.** No engine installed → ``503 stt_unavailable``
   (mirrors ``ask.py``'s ``agent_sdk_unavailable``). The UI calls
   ``GET /voice/status`` first and hides the mic when unavailable.
@@ -29,10 +29,13 @@ import uuid
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.org_scope import resolve_project_org, same_org
 from app.auth.rbac import require_operator
+from app.db import get_session
 from app.voice.engine import (
     STTConfig,
     STTUnavailable,
@@ -84,15 +87,30 @@ async def status(user: CurrentUser) -> dict:
 
 
 def _coerce_project_id(raw: str | None) -> uuid.UUID | None:
-    """The form may send an empty string (no project picked) — treat that
-    and any unparseable value as "no project" rather than 422-ing the
-    whole transcription over an audit-only field."""
-    if not raw:
+    """Parse a non-empty optional audit project id."""
+    if not raw or not raw.strip():
         return None
     try:
         return uuid.UUID(raw.strip())
     except ValueError:
         return None
+
+
+async def _resolve_audit_project(
+    raw: str | None,
+    user: CurrentUser,
+    db: AsyncSession,
+) -> uuid.UUID | None:
+    """Resolve caller-supplied audit ownership without leaking existence."""
+    if not raw or not raw.strip():
+        return None
+    project_id = _coerce_project_id(raw)
+    if project_id is None:
+        raise HTTPException(status_code=404, detail="not_found")
+    project_org = await resolve_project_org(db, project_id)
+    if not same_org(user, project_org):
+        raise HTTPException(status_code=404, detail="not_found")
+    return project_id
 
 
 @router.post("/transcribe", dependencies=[Depends(require_operator)])
@@ -101,7 +119,9 @@ async def transcribe(
     audio: UploadFile = File(...),
     language: str | None = Form(default=None),
     project_id: str | None = Form(default=None),
+    db: AsyncSession = Depends(get_session),
 ) -> dict:
+    audit_project_id = await _resolve_audit_project(project_id, user, db)
     if not is_stt_available():
         raise HTTPException(status_code=503, detail="stt_unavailable")
 
@@ -139,7 +159,7 @@ async def transcribe(
         actor=f"user:{user.id}",
         action="voice.transcribe",
         target=text[:120],
-        project_id=_coerce_project_id(project_id),
+        project_id=audit_project_id,
         details={
             "engine": result.engine,
             "model": result.model,

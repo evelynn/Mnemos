@@ -141,9 +141,8 @@ async def test_within_run_duplicate_id_ends_one_current(session):
 
 
 @pytest.mark.asyncio
-async def test_reanalysis_non_fresh_supersedes(session):
-    """A second run on a non-empty graph (fresh=False) must still supersede —
-    the bitemporal history is preserved."""
+async def test_reanalysis_non_fresh_identical_payload_is_noop(session):
+    """Unchanged re-analysis keeps the original bitemporal version stable."""
     pid = uuid.uuid4()
     # First (fresh) write.
     await _record_payload(
@@ -164,7 +163,7 @@ async def test_reanalysis_non_fresh_supersedes(session):
     allrows = (await session.execute(
         select(Node).where(Node.id == "sym:a"))).scalars().all()
     assert len(current) == 1
-    assert len(allrows) == 2  # old superseded + new current
+    assert len(allrows) == 1
 
 
 @pytest.mark.asyncio
@@ -188,4 +187,4 @@ async def test_fresh_edge_duplicate_ends_one_current(session):
     current = await _current(session, Edge)
     allrows = (await session.execute(select(Edge))).scalars().all()
     assert len(current) == 1
-    assert len(allrows) == 2
+    assert len(allrows) == 1, "same logical edge must not create history churn"

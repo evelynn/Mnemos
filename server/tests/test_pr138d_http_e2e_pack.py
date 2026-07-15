@@ -84,6 +84,12 @@ def seeded_state(tmp_path_factory, event_loop):
         except Exception:  # noqa: BLE001
             pass
         importlib.reload(_db)
+        # ``audit.logger`` imports the session factory by value rather than
+        # looking it up on ``app.db`` at call time. Rebind that test-only
+        # captured reference after the deliberate DB-module reload so a prior
+        # test's Postgres URL cannot leak into this SQLite E2E pack.
+        if "app.audit.logger" in sys.modules:
+            sys.modules["app.audit.logger"].SessionLocal = _db.SessionLocal
     # Same treatment for any modules that may have captured
     # ``SessionLocal`` at import time. seed_demo + local_mode both
     # re-import lazily; force re-load for safety.
@@ -113,7 +119,10 @@ def client(seeded_state, event_loop):
     async def _open():
         return AsyncClient(
             transport=ASGITransport(app=app),
-            base_url="http://testserver",
+            # A prior test may have imported auth settings with secure cookies
+            # enabled. HTTPS makes this E2E session valid in either setting and
+            # removes collection-order dependence without weakening auth.
+            base_url="https://testserver",
         )
 
     c = event_loop.run_until_complete(_open())
@@ -138,6 +147,12 @@ def logged_in(client, seeded_state, event_loop):
 
     event_loop.run_until_complete(_login())
     return client, seeded_state["project_id"]
+
+
+@pytest.fixture(scope="module")
+def readable_graph(seeded_state, event_loop):
+    """The real seed is already a safe, published graph; never rewrite it."""
+    return seeded_state
 
 
 # ─── 1. Full first-session flow ───────────────────────────────────
@@ -252,7 +267,7 @@ def test_llm_fallback_breakdown_groups_by_reason(logged_in, event_loop):
 
 
 def test_graph_component_map_returns_nodes_and_edges(
-    logged_in, event_loop,
+    logged_in, readable_graph, event_loop,
 ):
     """The graph tab calls this on every render. Was the missing
     endpoint per the original audit's #3 finding (which turned out
@@ -273,7 +288,9 @@ def test_graph_component_map_returns_nodes_and_edges(
     event_loop.run_until_complete(_go())
 
 
-def test_graph_certainty_breakdown_counts_classes(logged_in, event_loop):
+def test_graph_certainty_breakdown_counts_classes(
+    logged_in, readable_graph, event_loop
+):
     c, pid = logged_in
 
     async def _go():
@@ -290,7 +307,7 @@ def test_graph_certainty_breakdown_counts_classes(logged_in, event_loop):
     event_loop.run_until_complete(_go())
 
 
-def test_graph_stats_sanity(logged_in, event_loop):
+def test_graph_stats_sanity(logged_in, readable_graph, event_loop):
     """``/graph/stats`` returns ``{nodes_current: N}`` per the current
     impl (analysis.py:240). N > 0 for the seeded project."""
     c, pid = logged_in
@@ -300,6 +317,41 @@ def test_graph_stats_sanity(logged_in, event_loop):
         assert r.status_code == 200
         body = r.json()
         assert body.get("nodes_current", 0) > 0
+
+    event_loop.run_until_complete(_go())
+
+
+def test_seed_demo_head_and_guarded_task_pack_are_immediately_readable(
+    logged_in, readable_graph, event_loop
+):
+    """The demo must not need a test-only status rewrite before graph use."""
+    c, pid = logged_in
+
+    async def _go():
+        import uuid
+
+        from app.db import SessionLocal
+        from app.models.graph import GraphHead
+        from app.source_snapshot import find_unpublished_refresh
+
+        async with SessionLocal() as session:
+            project_id = uuid.UUID(pid)
+            head = await session.get(GraphHead, project_id)
+            assert head is not None
+            assert head.state == "ready"
+            assert head.generation == 1
+            assert head.current_run_id is not None
+            assert (
+                await find_unpublished_refresh(session, project_id=project_id)
+                is None
+            )
+
+        response = await c.get(
+            f"/api/v1/projects/{pid}/artifacts/task-context-pack.json",
+            params={"target_id": "sym:orders-api:CreateOrder"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["target_node"]["id"] == "sym:orders-api:CreateOrder"
 
     event_loop.run_until_complete(_go())
 

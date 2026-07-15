@@ -1,11 +1,9 @@
-"""PR-179 — AI-provider config: encrypted storage, DB resolution, masking.
+"""PR-179 provider runtime config and its platform-ownership boundary.
 
-The Settings UI writes provider config through ``chat_config`` (keys to the
-encrypted ``Secret`` table, models/base_url to ``PlatformSetting``), and
-``llm_providers.resolve_config`` reads it back DB-over-env at chat time.
-These exercise that round-trip on a self-contained in-memory SQLite DB
-(same polyglot layer serve_local uses), so they run in CI with no Postgres
-and no live LLM. Auditing is stubbed to keep the test on the config path.
+Provider configuration is global, while Mnemos currently has tenant-admin
+roles only.  Tenant admins therefore cannot read or mutate the config API.
+Runtime resolution still supports platform-provisioned encrypted rows and
+environment fallback.
 """
 
 import pytest
@@ -16,6 +14,8 @@ from sqlalchemy.pool import StaticPool
 
 from app.api import chat_config as cc
 from app.api import llm_providers as lp
+from app.models.auth import PlatformSetting, Secret
+from app.safety.crypto import encrypt
 
 
 class _StubUser:
@@ -25,6 +25,20 @@ class _StubUser:
 
 async def _noop(*a, **k):
     return None
+
+
+async def _store_global_key(session, provider: str, value: str) -> None:
+    ciphertext, iv = encrypt(value)
+    session.add(
+        Secret(
+            label=lp.secret_label(provider),
+            kind=lp.SECRET_KIND,
+            ciphertext=ciphertext,
+            iv=iv,
+            organization_id=None,
+        )
+    )
+    await session.commit()
 
 
 @pytest_asyncio.fixture
@@ -70,14 +84,13 @@ async def test_put_then_resolve_reads_key_and_model(sqlite_session, monkeypatch)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
 
-    res = await cc.put_provider_config(
-        "openai",
-        cc.ProviderConfigUpdate(api_key="sk-secret-xyz", model="gpt-4o-mini"),
-        user=_StubUser(), db=sqlite_session,
+    sqlite_session.add(
+        PlatformSetting(
+            key=lp.SETTING_KEY,
+            value={"openai": {"model": "gpt-4o-mini"}},
+        )
     )
-    assert res["has_key"] is True
-    assert res["model"] == "gpt-4o-mini"
-    assert res["available"] is True
+    await _store_global_key(sqlite_session, "openai", "sk-secret-xyz")
 
     cfg = await lp.resolve_config(sqlite_session)
     assert cfg["openai"]["api_key"] == "sk-secret-xyz"   # decrypts back
@@ -85,25 +98,34 @@ async def test_put_then_resolve_reads_key_and_model(sqlite_session, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_get_config_never_returns_the_key(sqlite_session):
-    await cc.put_provider_config(
-        "openai", cc.ProviderConfigUpdate(api_key="sk-top-secret"),
-        user=_StubUser(), db=sqlite_session,
+async def test_provider_config_endpoints_require_platform_admin(sqlite_session):
+    calls = (
+        cc.get_provider_config(user=_StubUser(), db=sqlite_session),
+        cc.put_provider_config(
+            "openai",
+            cc.ProviderConfigUpdate(api_key="sk-top-secret"),
+            user=_StubUser(),
+            db=sqlite_session,
+        ),
+        cc.test_provider_config(
+            "openai",
+            user=_StubUser(),
+            db=sqlite_session,
+        ),
     )
-    got = await cc.get_provider_config(user=_StubUser(), db=sqlite_session)
-    assert "sk-top-secret" not in str(got)
-    op = next(p for p in got["providers"] if p["id"] == "openai")
-    assert op["has_key"] is True
-    assert op["suggested_models"]  # dropdown seeds present
+    for call in calls:
+        with pytest.raises(HTTPException) as raised:
+            await call
+        assert (raised.value.status_code, raised.value.detail) == (
+            403,
+            "platform_admin_required",
+        )
 
 
 @pytest.mark.asyncio
 async def test_db_key_overrides_env(sqlite_session, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
-    await cc.put_provider_config(
-        "openai", cc.ProviderConfigUpdate(api_key="sk-from-db"),
-        user=_StubUser(), db=sqlite_session,
-    )
+    await _store_global_key(sqlite_session, "openai", "sk-from-db")
     cfg = await lp.resolve_config(sqlite_session)
     assert cfg["openai"]["api_key"] == "sk-from-db"
 
@@ -111,16 +133,17 @@ async def test_db_key_overrides_env(sqlite_session, monkeypatch):
 @pytest.mark.asyncio
 async def test_clear_key_removes_it(sqlite_session, monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    await cc.put_provider_config(
-        "openai", cc.ProviderConfigUpdate(api_key="sk-a"),
-        user=_StubUser(), db=sqlite_session,
-    )
-    await cc.put_provider_config(
-        "openai", cc.ProviderConfigUpdate(clear_key=True),
-        user=_StubUser(), db=sqlite_session,
-    )
+    await _store_global_key(sqlite_session, "openai", "sk-a")
+    with pytest.raises(HTTPException) as raised:
+        await cc.put_provider_config(
+            "openai",
+            cc.ProviderConfigUpdate(clear_key=True),
+            user=_StubUser(),
+            db=sqlite_session,
+        )
+    assert raised.value.status_code == 403
     cfg = await lp.resolve_config(sqlite_session)
-    assert cfg["openai"]["api_key"] is None
+    assert cfg["openai"]["api_key"] == "sk-a"
 
 
 @pytest.mark.asyncio
@@ -128,26 +151,22 @@ async def test_atlas_config_persisted(sqlite_session, monkeypatch):
     monkeypatch.delenv("ATLAS_BASE_URL", raising=False)
     monkeypatch.delenv("ATLAS_API_KEY", raising=False)
     monkeypatch.delenv("ATLAS_AGENT_ID", raising=False)
-    await cc.put_provider_config(
-        "atlas",
-        cc.ProviderConfigUpdate(
-            api_key="a-key", base_url="https://atlas.hansol/api/v1/public",
-            agent_id="agent-xyz",
-        ),
-        user=_StubUser(), db=sqlite_session,
+    sqlite_session.add(
+        PlatformSetting(
+            key=lp.SETTING_KEY,
+            value={
+                "atlas": {
+                    "base_url": "https://atlas.hansol/api/v1/public",
+                    "agent_id": "agent-xyz",
+                }
+            },
+        )
     )
+    await _store_global_key(sqlite_session, "atlas", "a-key")
     cfg = await lp.resolve_config(sqlite_session)
     assert cfg["atlas"]["base_url"] == "https://atlas.hansol/api/v1/public"
     assert cfg["atlas"]["agent_id"] == "agent-xyz"
     assert lp.is_provider_available("atlas", cfg) is True
-
-    # Without an agent ID, Atlas is not usable even with a key.
-    await cc.put_provider_config(
-        "atlas", cc.ProviderConfigUpdate(agent_id=""),
-        user=_StubUser(), db=sqlite_session,
-    )
-    cfg2 = await lp.resolve_config(sqlite_session)
-    assert lp.is_provider_available("atlas", cfg2) is False
 
 
 @pytest.mark.asyncio
@@ -178,10 +197,15 @@ def test_status_dot_reflects_last_test():
 
 
 @pytest.mark.asyncio
-async def test_put_unknown_provider_404(sqlite_session):
+async def test_put_unknown_provider_does_not_bypass_platform_boundary(
+    sqlite_session,
+):
     with pytest.raises(HTTPException) as ei:
         await cc.put_provider_config(
             "bogus", cc.ProviderConfigUpdate(model="x"),
             user=_StubUser(), db=sqlite_session,
         )
-    assert ei.value.status_code == 404
+    assert (ei.value.status_code, ei.value.detail) == (
+        403,
+        "platform_admin_required",
+    )

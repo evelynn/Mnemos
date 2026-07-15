@@ -311,6 +311,14 @@ async def callback(
     user = (
         await db.execute(select(User).where(User.username == username))
     ).scalar_one_or_none()
+    if user is not None and user.disabled_at is not None:
+        await audit_record(
+            actor=f"user:{user.id}",
+            action="auth.oidc_login_blocked_disabled",
+            target=username,
+            details={"issuer": s.oidc_issuer},
+        )
+        raise HTTPException(status_code=401, detail="invalid_credentials")
     if user is None:
         # JIT provisioning: default org, viewer role. Admins can elevate.
         default_org = (

@@ -52,8 +52,17 @@ _BINARIES = {
 }
 
 
-# Languages with a deterministic ggoss analyzer. Languages outside this
-# set fall back to Claude-Code agent extraction (PR-140) when eligible.
+# ``mssql`` and ``oracle`` are live-database connector kinds, not source
+# languages.  Their CLIs intentionally implement ``live_schema``/sampling
+# verbs and cannot satisfy the four source-index verbs.  Keeping the two
+# capabilities explicit prevents a Project language from being routed to a
+# connector binary and then failing (or, worse, completing with no graph).
+DB_ANALYZER_KINDS = frozenset({"mssql", "oracle"})
+SOURCE_ANALYZER_LANGUAGES = frozenset(_BINARIES).difference(DB_ANALYZER_KINDS)
+
+# Backwards-compatible union used by health/probe code that reports every
+# shipped binary.  Project creation and source orchestration must use
+# ``SOURCE_ANALYZER_LANGUAGES`` instead.
 ANALYZER_LANGUAGES = frozenset(_BINARIES)
 
 

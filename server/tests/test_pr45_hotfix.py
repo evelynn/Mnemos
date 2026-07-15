@@ -168,9 +168,11 @@ def test_forgot_template_present():
     body = _read(_TPL / "forgot.html")
     assert 'data-i18n="Forgot password"' in body
     assert '/api/v1/auth/reset/request' in body
-    # The token is surfaced inline if the username matched so an
-    # admin without SMTP can still hand-deliver it.
-    assert "token" in body
+    # No secure outbound delivery exists, so the anonymous page must never
+    # surface a credential or construct a reset link from the response.
+    assert "payload.token" not in body
+    assert 'href="/reset#token=' not in body
+    assert "No reset credential was issued." in body
 
 
 def test_reset_template_reads_token_from_fragment():

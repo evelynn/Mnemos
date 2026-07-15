@@ -1,5 +1,10 @@
 # Round PR-162 — run.stats가 distinct 현재 그래프를 보고 (dogfood 과대계수 결함)
 
+> **Historical round record.** 아래 `upsert_node` supersede/insert 설명은
+> 당시 live-writer 구현을 기록한다. 현재 production ingest는
+> run-scoped staging→seal→atomic head publication을 사용하며, 이 보고의 수치와
+> 수정은 해당 dogfood round의 historical evidence다.
+
 작성: 2026-06-15 · 브랜치 `claude/round-pr160-analyzer-write-contention` · 이전 commit `792f339`
 트리거: Mnemos를 **실제 외부 프로젝트**(Smart-AI-Report-V4 — Next.js 16, src 343파일/57.6k LoC)에
 dogfood로 분석해 본 결과 발견. 사용자 요청("부족한 점을 제대로 확인해 개선점을 도출하고 실제로

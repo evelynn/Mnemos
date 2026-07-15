@@ -1,5 +1,10 @@
 # 대규모 분석 throughput 실측 + 병목 규명 — 2026-07-08
 
+> **Historical benchmark checkpoint.** 아래 row-by-row `upsert_edge`
+> 병목은 2026-07-08 live-writer 경로의 실측이다. 현재 ingest는
+> run-scoped staging과 atomic promotion을 사용하므로 이 수치를 현재 Phase-B
+> 처리량 증거로 재사용하지 않는다.
+
 > 성숙도·안정성 보강 ① — "초대형 모노레포 처리량". 가짜 fix 대신 실측 + 진짜
 > 제약 규명. 대상: codebase-memory-mcp(1,775 files, C 본체), run 1aaa1048.
 

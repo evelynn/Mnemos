@@ -548,4 +548,7 @@ def test_env_example_documents_tts():
 
 def test_env_example_still_under_budget():
     env = (_SERVER.parent / ".env.example").read_text(encoding="utf-8")
-    assert len(env) < 6000
+    # Immutable-source settings and the bounded seen-index knob are part of
+    # the source-analysis safety contract.  Keep a modest ceiling without
+    # forcing those operator-visible settings out of the example.
+    assert len(env) < 6500
