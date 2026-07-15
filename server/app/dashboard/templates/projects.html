@@ -16,19 +16,19 @@
         <option value="typescript">typescript</option>
       </select>
     </label>
-    <button type="submit" class="primary">Create</button>
+    <button type="submit" class="primary" data-i18n="Create project">Create</button>
   </form>
   <pre id="create-result" class="muted"></pre>
   <div id="post-create-cta" class="onboarding-step-cta" hidden>
-    <strong>Next:</strong>
-    <a class="primary" href="/analysis?onboard=1">Start the first analysis run →</a>
+    <strong data-i18n="Next:">Next:</strong>
+    <a class="primary" href="/analysis?onboard=1" data-i18n="Start the first analysis run →">Start the first analysis run →</a>
   </div>
 </section>
 
 <section>
-  <h2>Projects in your organisation</h2>
-  <button class="primary" onclick="loadProjects()">Refresh</button>
-  <div id="projects-list"><p class="muted">Click refresh.</p></div>
+  <h2 data-i18n="Projects in your organisation">Projects in your organisation</h2>
+  <button class="primary" onclick="loadProjects()" data-i18n="Refresh">Refresh</button>
+  <div id="projects-list"><p class="muted" data-i18n="Click refresh.">Click refresh.</p></div>
 </section>
 
 <script>
@@ -114,18 +114,25 @@ async function loadProjects() {
         )) + '</a></p>';
     return;
   }
-  let html = '<table class="data"><thead><tr><th>Name</th><th>Languages</th><th>Branch</th><th>ID</th><th></th></tr></thead><tbody>';
+  let html = '<table class="data"><thead><tr>'
+    + `<th data-i18n="Name">${MnemosUI.t("Name")}</th>`
+    + `<th data-i18n="Languages">${MnemosUI.t("Languages")}</th>`
+    + `<th data-i18n="Branch">${MnemosUI.t("Branch")}</th>`
+    + `<th data-i18n="ID">${MnemosUI.t("ID")}</th>`
+    + '<th></th></tr></thead><tbody>';
+  const _esc = MnemosUI.escapeHtml;
   for (const p of rows) {
     html += `<tr>
-      <td>${p.name}</td>
-      <td>${(p.languages || []).join(", ")}</td>
-      <td><code>${p.default_branch}</code></td>
-      <td><code class="muted">${p.id}</code></td>
-      <td><a href="/analysis?project=${p.id}">Analyse</a></td>
+      <td>${_esc(p.name)}</td>
+      <td>${_esc((p.languages || []).join(", "))}</td>
+      <td><code>${_esc(p.default_branch)}</code></td>
+      <td><code class="muted">${_esc(p.id)}</code></td>
+      <td><a href="/analysis?project=${encodeURIComponent(p.id)}" data-i18n="Analyse">${MnemosUI.t("Analyse")}</a></td>
     </tr>`;
   }
   html += "</tbody></table>";
   out.innerHTML = html;
+  MnemosUI.applyI18n(out);
 }
 
 loadProjects();

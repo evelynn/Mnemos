@@ -13,6 +13,7 @@ Both close here.
 
 from __future__ import annotations
 
+import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -52,10 +53,14 @@ def test_stale_run_cron_uses_advisory_lock():
         or '"reset_stale_runs"' in body
 
 
-def test_stale_run_cron_sql_filters_running_only():
+def test_stale_run_cron_covers_running_and_expired_queued_rows():
     body = _read(_CRON)
     assert "status = 'running'" in body
     assert "started_at < :cutoff" in body
+    assert 'AnalysisRun.status == "queued"' in body
+    assert "AnalysisRun.created_at < queued_cutoff" in body
+    assert "JobStatus.complete" in body
+    assert "JobStatus.not_found" in body
 
 
 def test_stale_run_cron_sets_error_log():
@@ -65,12 +70,13 @@ def test_stale_run_cron_sets_error_log():
     # not the analyzer itself.
     assert "[reset_stale_runs]" in body
     assert "heartbeat lost" in body
+    assert "queued job expired before worker pickup" in body
 
 
-def test_stale_run_cutoff_is_six_hours():
+def test_stale_run_cutoff_is_longer_than_worker_timeout():
     body = _read(_CRON)
     assert "_STALE_RUN_AFTER_SEC" in body
-    assert "6 * 60 * 60" in body
+    assert "24 * 60 * 60" in body
 
 
 def test_stale_run_cron_registered_on_arq_schedule():
@@ -141,18 +147,23 @@ async def test_reset_stale_runs_returns_zero_when_nothing_to_reset():
 
 
 @pytest.mark.asyncio
-async def test_reset_stale_runs_uses_six_hour_cutoff():
+async def test_reset_stale_runs_uses_twenty_four_hour_cutoff():
     from app.orchestrator.cron_jobs import _reset_stale_runs
 
     session = _FakeSession(returning=[])
     before = datetime.now(tz=timezone.utc)
     await _reset_stale_runs(session)  # type: ignore[arg-type]
     after = datetime.now(tz=timezone.utc)
-    # The bound parameter must be roughly ``now - 6h``.
+    # The bound parameter must be roughly ``now - 24h``.  The worker hard
+    # timeout is eight hours, so a six-hour sweep could fail a live run while
+    # it was still publishing graph facts.
     cutoff = session.executed[0][1]["cutoff"]
-    assert before - timedelta(hours=6, seconds=2) <= cutoff <= after - timedelta(
-        hours=6, seconds=-2
+    assert before - timedelta(hours=24, seconds=2) <= cutoff <= after - timedelta(
+        hours=24, seconds=-2
     )
+    from app.orchestrator.cron_jobs import _STALE_QUEUED_AFTER_SEC
+
+    assert _STALE_QUEUED_AFTER_SEC == 25 * 60 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +255,129 @@ async def test_create_mr_happy_path_with_mock_gitlab():
     assert result.iid == 4242
     assert result.url == "https://gitlab.example.com/group/repo/-/merge_requests/4242"
     assert result.message == "created"
+
+
+@pytest.mark.asyncio
+async def test_create_mr_rejects_late_index_payload_change_before_commit(
+    tmp_path: Path,
+):
+    """The final staged snapshot must still equal the Gate-B patch."""
+
+    from app.gitlab_client import mr as mr_mod
+
+    worktree = tmp_path / "worktree"
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main", str(worktree)],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "config", "user.email", "t@t"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "config", "user.name", "t"],
+        check=True,
+    )
+    (worktree / "tracked.txt").write_text("base\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(worktree), "commit", "-q", "-m", "base"],
+        check=True,
+    )
+    base_sha = subprocess.check_output(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    (worktree / "late.txt").write_text("late unreviewed content\n")
+
+    async def configured(_session, key):
+        return {
+            "gitlab_base_url": "https://gitlab.example.com",
+            "gitlab_token": "glpat-test",
+        }.get(key) or "group/repo"
+
+    with patch.object(mr_mod, "_get_setting", new=configured):
+        with pytest.raises(mr_mod.MRPayloadChanged, match="differs"):
+            await mr_mod.create_mr_from_worktree(
+                session=MagicMock(),
+                project_id=uuid.uuid4(),
+                worktree=worktree,
+                plan_title="payload fence",
+                task_id="task-1",
+                description="must not commit",
+                expected_diff="reviewed payload that is now stale",
+            )
+
+    assert subprocess.check_output(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        text=True,
+    ).strip() == base_sha
+
+
+@pytest.mark.asyncio
+async def test_create_mr_rejects_hook_changed_commit_before_push(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A commit-hook rewrite is reset to the authorised parent, never pushed."""
+
+    from app.gitlab_client import mr as mr_mod
+    from app.sandbox.worktree import canonical_worktree_diff
+
+    worktree = tmp_path / "hook-worktree"
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main", str(worktree)],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "config", "user.email", "t@t"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "config", "user.name", "t"],
+        check=True,
+    )
+    tracked = worktree / "tracked.txt"
+    tracked.write_text("base\n")
+    subprocess.run(["git", "-C", str(worktree), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(worktree), "commit", "-q", "-m", "base"],
+        check=True,
+    )
+    base_sha = subprocess.check_output(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    tracked.write_text("reviewed\n")
+    expected_diff = await canonical_worktree_diff(worktree)
+
+    async def configured(_session, key):
+        return {
+            "gitlab_base_url": "https://gitlab.example.com",
+            "gitlab_token": "glpat-test",
+        }.get(key) or "group/repo"
+
+    async def hook_changed_payload(_worktree):
+        return expected_diff + "hook-added-content"
+
+    monkeypatch.setattr(mr_mod, "_get_setting", configured)
+    monkeypatch.setattr(mr_mod, "canonical_committed_diff", hook_changed_payload)
+    with pytest.raises(mr_mod.MRPayloadChanged, match="committed tree"):
+        await mr_mod.create_mr_from_worktree(
+            session=MagicMock(),
+            project_id=uuid.uuid4(),
+            worktree=worktree,
+            plan_title="hook payload fence",
+            task_id="task-2",
+            description="must not push",
+            expected_diff=expected_diff,
+        )
+
+    assert subprocess.check_output(
+        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+        text=True,
+    ).strip() == base_sha
+    assert tracked.read_text() == "reviewed\n"
 
 
 @pytest.mark.asyncio

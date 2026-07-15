@@ -44,8 +44,11 @@ def test_e1_unknown_language_yields_none_not_a_default():
     """Skipping is the right default for an unknown language —
     falling back to a generic binary would point a project at the
     wrong analyzer."""
-    assert binary_for("ruby") is None
-    assert runner_for("ruby") is None
+    # Ruby gained deterministic tree-sitter support.  Keep this assertion on
+    # a genuinely unregistered language so the no-guessing contract remains
+    # covered when the supported-language set expands.
+    assert binary_for("haskell") is None
+    assert runner_for("haskell") is None
 
 
 def test_e1_dotnet_binary_kind_is_distinguished_from_source_csharp():

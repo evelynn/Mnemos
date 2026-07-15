@@ -18,42 +18,39 @@
  * ────────────────────────────────────────────────────────────── */
 
 :root {
-  /* Light theme — the legacy palette, now tokenised. */
-  --bg:                   #f7f7f8;
-  --surface:              #ffffff;
-  --surface-alt:          #f6f8fa;
-  --surface-tint:         #eef0f3;
-  --border:               #d0d7de;
-  --border-soft:          #e1e4e8;
+  /* Theme: Nord Light — Snow Storm canvas + Polar Night ink + Frost accent.
+     Every component reads these vars, so the whole dashboard re-skins from
+     this one block. The dark theme below is One Dark Pro. */
+  --bg:                   #eceff4;   /* nord6 snow storm canvas */
+  --surface:              #ffffff;   /* cards                   */
+  --surface-alt:          #e5e9f0;   /* nord5 subtle fill       */
+  --surface-tint:         #e5e9f0;
+  --border:               #d8dee9;   /* nord4                   */
+  --border-soft:          #e5e9f0;
 
-  --text:                 #1f2328;
-  --text-muted:           #6b7178;
-  --text-inverted:        #ffffff;
+  --text:                 #2e3440;   /* nord0 polar night       */
+  --text-muted:           #4c566a;   /* nord3                   */
+  --text-inverted:        #eceff4;
 
-  /* PR-48 — bumped from #1f6feb (4.18:1 on white) to #0a5fc7
-     which clears WCAG 2.1 AA (4.74:1). The audit team flagged
-     the original for the brand-logo + small-text use cases on a
-     light surface. Dark-mode accent already passes (8.2:1). */
-  --accent:               #0a5fc7;
-  --accent-soft:          #eef5ff;
-  --accent-strong:        #0a3b8c;
+  --accent:               #4c6f93;   /* darker nord frost, AA   */
+  --accent-soft:          #e3eaf2;   /* light frost tint        */
+  --accent-strong:        #4c6f99;   /* deeper frost            */
 
-  --success:              #145a1f;
-  --success-bg:           #dff4e0;
-  --warn:                 #6a4b00;
-  --warn-bg:              #fff1c2;
-  --danger:               #82071e;
-  --danger-bg:            #ffdede;
-  --danger-button:        #c93c37;
-  --danger-banner:        #c62828;
+  --success:              #4f7a3e;   /* nord14 darkened (AA)    */
+  --success-bg:           #eaf1e3;
+  --warn:                 #94621a;   /* nord13 darkened (AA)    */
+  --warn-bg:              #f7efdd;
+  --danger:               #b04a52;   /* nord11 darkened (AA)    */
+  --danger-bg:            #f6e7e8;
+  --danger-button:        #bf616a;   /* nord11                  */
+  --danger-banner:        #bf616a;
 
-  --sidebar-bg:           #1f2328;
-  --sidebar-fg:           #d0d4d8;
-  --sidebar-active:       #313840;
-  --sidebar-active-fg:    #ffffff;
+  /* Nord light sidebar — clean snow panel. */
+  --sidebar-bg:           #ffffff;
+  --sidebar-fg:           #4c566a;   /* nord3                   */
+  --sidebar-active:       #e3eaf2;   /* frost tint active       */
+  --sidebar-active-fg:    #2e3440;
 
-  /* Spacing scale — a single source of truth so the audit team can
-     stop catching margin: 0.25rem vs 0.3rem drift. */
   --sp-1: 0.25rem;
   --sp-2: 0.5rem;
   --sp-3: 0.75rem;
@@ -62,18 +59,18 @@
   --sp-6: 1.5rem;
   --sp-8: 2rem;
 
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
+  --radius-sm: 7px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
   --radius-pill: 999px;
 
-  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.06);
-  --shadow-hover: 0 1px 4px rgba(31, 111, 235, 0.18);
-  --shadow-modal: 0 12px 32px rgba(0, 0, 0, 0.2);
-  --shadow-toast: 0 2px 8px rgba(0, 0, 0, 0.15);
+  --shadow-card:  0 1px 2px 0 rgba(0, 0, 0, 0.04);
+  --shadow-hover: 0 1px 3px 0 rgba(0, 0, 0, 0.10);
+  --shadow-modal: 0 10px 38px -10px rgba(0, 0, 0, 0.22), 0 10px 20px -15px rgba(0, 0, 0, 0.14);
+  --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.12);
 
-  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", monospace;
+  --font-body: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", "Cascadia Code", monospace;
 
   --transition-fast: 0.15s;
 }
@@ -82,39 +79,40 @@
    theme switcher, or when the browser reports prefers-color-scheme:
    dark and no explicit preference is stored. */
 :root[data-theme="dark"] {
-  --bg:                   #0d1117;
-  --surface:              #161b22;
-  --surface-alt:          #1c2129;
-  --surface-tint:         #21262d;
-  --border:               #30363d;
-  --border-soft:          #21262d;
+  /* Theme: One Dark Pro */
+  --bg:                   #21252b;   /* canvas (gutter)   */
+  --surface:              #282c34;   /* editor bg = cards  */
+  --surface-alt:          #2c313c;   /* selection fill     */
+  --surface-tint:         #2c313c;
+  --border:               #3b4048;
+  --border-soft:          #2a2e36;
 
-  --text:                 #e6edf3;
-  --text-muted:           #8b949e;
-  --text-inverted:        #0d1117;
+  --text:                 #abb2bf;   /* one dark fg        */
+  --text-muted:           #7f8794;   /* brightened comment */
+  --text-inverted:        #282c34;
 
-  --accent:               #4493f8;
-  --accent-soft:          #1d2742;
-  --accent-strong:        #79b8ff;
+  --accent:               #61afef;   /* one dark blue      */
+  --accent-soft:          #20303d;   /* dark blue tint     */
+  --accent-strong:        #82c0ff;
 
-  --success:              #56d364;
-  --success-bg:           #1b3a26;
-  --warn:                 #d8a657;
-  --warn-bg:              #3a2e16;
-  --danger:               #f85149;
-  --danger-bg:            #3a1818;
-  --danger-button:        #da3633;
-  --danger-banner:        #b62324;
+  --success:              #98c379;   /* one dark green     */
+  --success-bg:           #1d2a1a;
+  --warn:                 #e5c07b;   /* one dark yellow    */
+  --warn-bg:              #2c2614;
+  --danger:               #e06c75;   /* one dark red       */
+  --danger-bg:            #2f1d20;
+  --danger-button:        #e06c75;
+  --danger-banner:        #be5046;
 
-  --sidebar-bg:           #010409;
-  --sidebar-fg:           #c9d1d9;
-  --sidebar-active:       #161b22;
-  --sidebar-active-fg:    #ffffff;
+  --sidebar-bg:           #21252b;
+  --sidebar-fg:           #868e9b;
+  --sidebar-active:       #2c313c;
+  --sidebar-active-fg:    #d7dae0;
 
-  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.3);
-  --shadow-hover: 0 1px 4px rgba(68, 147, 248, 0.35);
-  --shadow-modal: 0 12px 32px rgba(0, 0, 0, 0.5);
-  --shadow-toast: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-card:  0 1px 2px 0 rgba(0, 0, 0, 0.30);
+  --shadow-hover: 0 1px 3px 0 rgba(0, 0, 0, 0.40);
+  --shadow-modal: 0 10px 38px -10px rgba(0, 0, 0, 0.60);
+  --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.50);
 }
 
 /* No-preference-stored fallback: respect the OS setting. The
@@ -122,30 +120,30 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     color-scheme: dark;
-    --bg:                   #0d1117;
-    --surface:              #161b22;
-    --surface-alt:          #1c2129;
-    --surface-tint:         #21262d;
-    --border:               #30363d;
-    --border-soft:          #21262d;
-    --text:                 #e6edf3;
-    --text-muted:           #8b949e;
-    --text-inverted:        #0d1117;
-    --accent:               #4493f8;
-    --accent-soft:          #1d2742;
-    --accent-strong:        #79b8ff;
-    --success:              #56d364;
-    --success-bg:           #1b3a26;
-    --warn:                 #d8a657;
-    --warn-bg:              #3a2e16;
-    --danger:               #f85149;
-    --danger-bg:            #3a1818;
-    --danger-button:        #da3633;
-    --danger-banner:        #b62324;
-    --sidebar-bg:           #010409;
-    --sidebar-fg:           #c9d1d9;
-    --sidebar-active:       #161b22;
-    --sidebar-active-fg:    #ffffff;
+    --bg:                   #21252b;
+    --surface:              #282c34;
+    --surface-alt:          #2c313c;
+    --surface-tint:         #2c313c;
+    --border:               #3b4048;
+    --border-soft:          #2a2e36;
+    --text:                 #abb2bf;
+    --text-muted:           #7f8794;
+    --text-inverted:        #282c34;
+    --accent:               #61afef;
+    --accent-soft:          #20303d;
+    --accent-strong:        #82c0ff;
+    --success:              #98c379;
+    --success-bg:           #1d2a1a;
+    --warn:                 #e5c07b;
+    --warn-bg:              #2c2614;
+    --danger:               #e06c75;
+    --danger-bg:            #2f1d20;
+    --danger-button:        #e06c75;
+    --danger-banner:        #be5046;
+    --sidebar-bg:           #21252b;
+    --sidebar-fg:           #868e9b;
+    --sidebar-active:       #2c313c;
+    --sidebar-active-fg:    #d7dae0;
   }
 }
 
@@ -1187,3 +1185,252 @@ dialog.modal .countdown { font-variant-numeric: tabular-nums; }
 .flow-steps li { margin: 0.2rem 0; }
 .flow-flags { margin: 0.25rem 0 0.5rem 1.25rem; }
 .flow-flags li { margin: 0.2rem 0; }
+
+/* ════════════════════════════════════════════════════════════════════
+ * shadcn-vue refinement layer (PR-165 UX overhaul).
+ *
+ * The token values at the top already restyle every page to the shadcn
+ * palette; this layer adds the component polish — bordered light sidebar,
+ * shadcn buttons/inputs/cards/tables/badges, focus rings, typography and
+ * breathing room. Specific class selectors only, so the specialized
+ * widgets (theme/locale/mic/notif buttons) keep their own styling.
+ * ════════════════════════════════════════════════════════════════════ */
+
+body.app { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; line-height: 1.55; }
+.content { padding: var(--sp-8); max-width: 1200px; }
+@media (max-width: 768px) { .content { padding: var(--sp-5) var(--sp-4); padding-top: 3.5rem; } }
+h1 { font-size: 1.5rem; font-weight: 650; letter-spacing: -0.02em; line-height: 1.25; }
+h2 { font-size: 1.2rem; font-weight: 650; letter-spacing: -0.01em; }
+h3 { font-size: 1rem; font-weight: 600; }
+.page-head { margin-bottom: var(--sp-6); }
+
+/* Light sidebar → bordered panel with shadcn nav rows. */
+.sidebar { border-right: 1px solid var(--border); gap: 2px; }
+.sidebar nav { gap: 2px; }
+.sidebar nav a {
+  font-size: 0.875rem; font-weight: 500; padding: 0.45rem 0.6rem;
+  display: flex; align-items: center; border-radius: var(--radius-md);
+}
+.sidebar nav a.active { background: var(--accent-soft); color: var(--accent-strong); font-weight: 600; }
+.sidebar nav a:hover:not(.active) { background: var(--surface-alt); color: var(--text); }
+.nav-section {
+  font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.07em;
+  font-weight: 600; color: var(--text-muted); margin: var(--sp-4) 0.6rem var(--sp-1);
+}
+
+/* PR-168 — collapsible nav groups (Analysis / More) so the sidebar
+   shows the core links plus two folds, not 15 flat items. */
+.nav-group { margin-top: var(--sp-2); }
+.nav-group-toggle {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%; background: none; border: 0; cursor: pointer;
+  font-family: inherit; font-size: 0.68rem; text-transform: uppercase;
+  letter-spacing: 0.07em; font-weight: 600; color: var(--text-muted);
+  padding: 0.4rem 0.6rem; border-radius: var(--radius-md);
+}
+.nav-group-toggle:hover { color: var(--text); background: var(--surface-alt); }
+.nav-group-toggle .chev { opacity: 0.65; transition: transform 0.15s ease; flex: none; }
+.nav-group.open > .nav-group-toggle .chev { transform: rotate(90deg); }
+.nav-group:not(.open) > .nav-group-items { display: none; }
+.nav-group-items { display: flex; flex-direction: column; gap: 2px; }
+.nav-group-items a { padding-left: 1.1rem; }
+
+/* PR-173 — global project selector at the sidebar top. */
+.global-project { padding: var(--sp-3) 0.6rem var(--sp-1); }
+.global-project .gp-label {
+  display: block; font-size: 0.68rem; text-transform: uppercase;
+  letter-spacing: 0.07em; font-weight: 600; color: var(--text-muted);
+  margin-bottom: 0.3rem;
+}
+.global-project select { width: 100%; font-size: 0.85rem; }
+.logout-form { border-top: 1px solid var(--border); padding-top: var(--sp-3); margin-top: var(--sp-3); }
+.logout-form button {
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  font-weight: 500; font-size: 0.85rem; border-radius: var(--radius-md); padding: 0.4rem;
+}
+.logout-form button:hover { background: var(--surface-alt); }
+
+/* Generic card + reuse for the existing card-like blocks. */
+.card {
+  border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--surface); box-shadow: var(--shadow-card); padding: var(--sp-5);
+}
+
+/* shadcn buttons — solid primary, outline secondary, destructive. */
+button.primary, a.primary, .login-form button, .mini-btn, input[type=submit].primary {
+  background: var(--accent); color: #fff; border: 1px solid transparent;
+  border-radius: var(--radius-md); padding: 0.5rem 0.9rem; font-weight: 500;
+  font-size: 0.875rem; cursor: pointer; line-height: 1.2;
+  transition: background var(--transition-fast), box-shadow var(--transition-fast), filter var(--transition-fast);
+}
+button.primary:hover, a.primary:hover, .login-form button:hover, .mini-btn:hover { background: var(--accent-strong); filter: none; }
+button.danger {
+  background: var(--danger-button); color: #fff; border: 1px solid transparent;
+  border-radius: var(--radius-md); padding: 0.5rem 0.9rem; font-weight: 500; font-size: 0.875rem;
+}
+button.danger:hover { filter: brightness(0.94); }
+.btn-outline {
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius-md); padding: 0.5rem 0.9rem; font-weight: 500; font-size: 0.875rem; cursor: pointer;
+}
+.btn-outline:hover { background: var(--surface-alt); }
+
+/* shadcn inputs + focus ring. */
+input[type=text], input[type=password], input[type=search], input[type=email],
+input[type=number], input[type=url], textarea, select, .login-form input {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--radius-md); padding: 0.5rem 0.7rem; font-size: 0.875rem; font-family: inherit;
+}
+input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* Tables → bordered, rounded, quiet header. */
+table.data { border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; font-size: 0.875rem; }
+table.data th {
+  background: var(--surface-alt); color: var(--text-muted); font-weight: 600;
+  font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em;
+}
+table.data tr:last-child td { border-bottom: 0; }
+table.data tbody tr:hover td { background: var(--surface-alt); }
+
+/* Badge → shadcn pill. */
+.badge {
+  display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.72rem; font-weight: 600;
+  padding: 0.12rem 0.55rem; border-radius: var(--radius-pill);
+  background: var(--surface-alt); color: var(--text-muted); border: 1px solid var(--border-soft);
+}
+
+/* shadcn focus ring (offset double ring). */
+:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent); border-radius: var(--radius-sm); }
+.sidebar nav a:focus-visible { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
+
+pre.code, .code-block { border-radius: var(--radius-md); }
+
+/* Ask answer card — human-first presentation (PR-165). */
+.ask-answer { margin-top: var(--sp-4); }
+.ask-text {
+  font-size: 1.02rem; line-height: 1.62; margin: 0 0 var(--sp-3); color: var(--text);
+}
+.ask-text code {
+  background: var(--surface-alt); padding: 0.05rem 0.35rem;
+  border-radius: var(--radius-sm); font-size: 0.9em; font-family: var(--font-mono);
+}
+.ask-meta { display: flex; gap: var(--sp-2); align-items: center; margin-bottom: var(--sp-3); flex-wrap: wrap; }
+.ask-kind {
+  font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--accent-strong); background: var(--accent-soft);
+  padding: 0.12rem 0.5rem; border-radius: var(--radius-pill);
+}
+.ask-loc { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-muted); }
+.ask-da { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; margin-top: var(--sp-2); }
+.ask-da-label {
+  font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-muted); margin-right: 0.2rem;
+}
+.chip {
+  display: inline-flex; align-items: center; font-family: var(--font-mono); font-size: 0.78rem;
+  background: var(--surface-alt); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 0.1rem 0.45rem; color: var(--text);
+}
+.ask-matches { padding-left: 0; margin: var(--sp-2) 0 0; }
+.ask-matches li { margin: 0.35rem 0; list-style: none; }
+.ask-kind-sm { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; }
+/* Not-confident answer: a clear disclaimer + a muted/amber framing so a
+   closest-guess isn't mistaken for a definitive answer (PR-169). */
+.ask-tentative { margin: 0 0 var(--sp-2); font-size: 0.85rem; }
+.ask-card-tentative { border-left: 3px solid var(--warn); padding-left: var(--sp-3); }
+
+/* ══════════════════════════════════════════════════════════════════
+ * P2 redesign — Linear/paperclip refinement (overrides above; markup
+ * untouched). Softer radii (tokens) + cleaner nav + lifted cards +
+ * roomier rhythm. Reads theme tokens so it works in Nord Light & One
+ * Dark Pro identically.
+ * ════════════════════════════════════════════════════════════════ */
+
+/* nav rows — taller hit area, Linear-style inset accent bar on active */
+.sidebar nav a, .nav-group-items a {
+  min-height: 34px; gap: 0.55rem; padding: 0.4rem 0.65rem;
+  transition: background .12s ease, color .12s ease, box-shadow .12s ease;
+}
+.sidebar nav a.active, .nav-group-items a.active {
+  background: var(--accent-soft); color: var(--accent); font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.sidebar nav a:hover:not(.active), .nav-group-items a:hover:not(.active) {
+  background: var(--surface-alt); color: var(--text);
+}
+
+/* sidebar brand + project picker spacing */
+.sidebar-head { padding-bottom: var(--sp-2); }
+.brand-name { font-weight: 680; letter-spacing: -0.01em; }
+.global-project { padding-bottom: var(--sp-3); }
+.global-project select { height: 36px; box-shadow: var(--shadow-card); }
+
+/* cards lift on hover; quiet by default */
+.card { transition: box-shadow .15s ease, border-color .15s ease; }
+.card:hover { box-shadow: var(--shadow-hover); }
+
+/* primary buttons — subtle elevation, taller */
+button.primary, a.primary, .login-form button, input[type=submit].primary {
+  padding: 0.52rem 1rem; box-shadow: var(--shadow-card);
+}
+button.primary:hover, a.primary:hover, .login-form button:hover {
+  box-shadow: var(--shadow-hover);
+}
+.btn-outline, button.danger { padding: 0.52rem 1rem; }
+
+/* inputs — roomier, consistent height */
+input[type=text], input[type=password], input[type=search], input[type=email],
+input[type=number], input[type=url], select, .login-form input {
+  min-height: 38px; padding: 0.5rem 0.75rem;
+}
+textarea { padding: 0.6rem 0.75rem; line-height: 1.6; }
+
+/* headings + rhythm */
+h1 { letter-spacing: -0.025em; }
+.page-head { margin-bottom: var(--sp-5); padding-bottom: var(--sp-3); border-bottom: 1px solid var(--border-soft); }
+.content { padding: var(--sp-6) var(--sp-8); }
+
+/* badges — slightly crisper pill */
+.badge { padding: 0.16rem 0.6rem; }
+
+/* ══════════════════════════════════════════════════════════════════
+ * P2b redesign — topbar shell (project selector moved to the top, icon
+ * sidebar). Matches the approved mockup. The main column is now a flex
+ * stack: sticky topbar + scrollable content.
+ * ════════════════════════════════════════════════════════════════ */
+.main { display: flex; flex-direction: column; min-width: 0; min-height: 100vh; }
+.topbar {
+  flex: none; height: 56px; display: flex; align-items: center; gap: 12px;
+  padding: 0 var(--sp-8); border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  backdrop-filter: blur(8px); position: sticky; top: 0; z-index: 20;
+}
+.topbar-title { font-weight: 650; font-size: 1rem; letter-spacing: -0.01em; color: var(--text); display: flex; align-items: center; gap: 8px; }
+.topbar-title .crumb { color: var(--text-muted); font-weight: 400; }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.topbar-proj {
+  width: auto !important; min-width: 210px; max-width: 300px; height: 36px; min-height: 36px;
+  font-size: 0.85rem; font-weight: 500; box-shadow: var(--shadow-card);
+}
+.topbar-gear {
+  width: 36px; height: 36px; display: grid; place-items: center; flex: none;
+  border-radius: var(--radius-md); color: var(--text-muted); border: 1px solid transparent;
+}
+.topbar-gear:hover { background: var(--surface-alt); color: var(--text); }
+.topbar-gear.active { background: var(--accent-soft); color: var(--accent); }
+.content { flex: 1; min-width: 0; }
+
+/* icon nav rows */
+.nav-ic { width: 17px; height: 17px; flex: none; stroke-width: 1.7; }
+.sidebar nav a { gap: 0.6rem; }
+.nav-group-items a { padding-left: 0.65rem; }
+.nav-group-items a .nav-ic { opacity: 0.92; }
+
+/* mobile: leave room for the hamburger over the topbar */
+@media (max-width: 768px) {
+  .topbar { padding-left: 3.4rem; }
+  .content { padding-top: var(--sp-5); }
+  .topbar-proj { min-width: 130px; }
+}

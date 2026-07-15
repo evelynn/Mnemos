@@ -22,11 +22,18 @@ notices.
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.graph_publication import (
+    GraphPublicationInvariantError,
+    validate_graph_publication_receipt,
+)
+from app.models.graph import AnalysisRun
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +136,8 @@ async def _expire_break_glass(session: AsyncSession) -> dict[str, int]:
 
 async def _probe_recheck_one(session: AsyncSession) -> dict[str, int]:
     """Re-probe ProjectDBs whose probe is older than the recheck window."""
+    from fastapi import HTTPException
+
     from app.api.project_dbs import _resolve_conn_ref
     from app.data_sampler.probe import probe_via_analyzer
     from app.models.projects import ProjectDB
@@ -172,7 +181,19 @@ async def _probe_recheck_one(session: AsyncSession) -> dict[str, int]:
                 )
             continue
 
-        conn = await _resolve_conn_ref(session, row.secret_id)
+        try:
+            conn = await _resolve_conn_ref(session, row.project_id, row.secret_id)
+        except HTTPException as exc:
+            # Missing and cross-org Secret UUIDs are both fail-closed by the
+            # shared resolver. Keep one contaminated row from aborting the
+            # fleet-wide cron pass, but never hand its credential to a probe.
+            if exc.status_code != 404:
+                raise
+            log.warning(
+                "probe_recheck: ProjectDB %s has unavailable tenant-scoped secret",
+                row.id,
+            )
+            continue
         if conn is None:
             continue
         result = await probe_via_analyzer(row.kind, conn)
@@ -286,10 +307,11 @@ async def run_retention_purge(ctx: dict) -> dict[str, int] | None:
 # A run is considered abandoned when its ``started_at`` is older than
 # the longest stage budget plus a margin. The orchestrator's per-stage
 # ``time_budget_sec`` defaults to 1800s (30 min); the maximum pipeline
-# walks ~12 stages, so 6h is the soft ceiling beyond which a running
-# row almost certainly means a worker crash. Operators on monorepos
-# that legitimately exceed this can override via env without forking
-# the cron job code.
+# walks many stages and the worker hard timeout is 8h.  The stale threshold
+# must be strictly longer than that timeout or an idle worker's cron task can
+# mark a legitimate run failed while it is still mutating the graph.  The
+# conservative 24h default matches .env.example; operators can lower it only
+# together with the worker timeout.
 def _stale_run_after_sec() -> int:
     import os
     raw = os.environ.get("MNEMOS_STALE_RUN_AFTER_SEC", "")
@@ -299,23 +321,76 @@ def _stale_run_after_sec() -> int:
             return n
     except ValueError:
         pass
-    return 6 * 60 * 60
+    return 24 * 60 * 60
 
 
 _STALE_RUN_AFTER_SEC = _stale_run_after_sec()
+# ARQ's enqueue contract expires an unstarted job after 24 hours by default
+# (plus its short defer).  Once that payload is gone, the database row can
+# never leave ``queued`` on its own.  A one-hour margin avoids racing the
+# Redis expiry boundary while still guaranteeing eventual terminal state.
+_STALE_QUEUED_AFTER_SEC = 25 * 60 * 60
 
 
-async def _reset_stale_runs(session: AsyncSession) -> dict[str, int]:
-    """Flip ``status='running'`` rows whose worker is long gone to
-    ``status='failed'`` with an explanatory ``error_log``.
+async def _find_expired_queued_runs(
+    session: AsyncSession, redis: Any
+) -> set[uuid.UUID]:
+    """Return old queued rows whose ARQ job can no longer execute.
+
+    Age alone is not enough: a deliberately serialized large-repository queue
+    may legitimately wait more than a day.  Only terminal/missing ARQ jobs (or
+    rows with no persisted job id) are safe to fail. Redis lookup errors retain
+    the row so an observability outage cannot discard a source revision.
+    """
+
+    from arq.jobs import Job, JobStatus
+
+    queued_cutoff = datetime.now(tz=timezone.utc) - timedelta(
+        seconds=_STALE_QUEUED_AFTER_SEC
+    )
+    rows = (
+        await session.execute(
+            select(AnalysisRun.id, AnalysisRun.stats)
+            .where(
+                AnalysisRun.status == "queued",
+                AnalysisRun.created_at < queued_cutoff,
+            )
+            .order_by(AnalysisRun.created_at)
+            .limit(500)
+        )
+    ).all()
+    expired: set[uuid.UUID] = set()
+    for run_id, stats in rows:
+        job_id = stats.get("job_id") if isinstance(stats, dict) else None
+        if not isinstance(job_id, str) or not job_id:
+            expired.add(run_id)
+            continue
+        try:
+            job_status = await Job(job_id, redis).status()
+        except Exception:  # noqa: BLE001 — retain source revision on Redis faults
+            log.exception("queued analysis job status unavailable run_id=%s", run_id)
+            continue
+        if job_status in {JobStatus.complete, JobStatus.not_found}:
+            expired.add(run_id)
+    return expired
+
+
+async def _reset_stale_runs(
+    session: AsyncSession,
+    expired_queued_ids: set[uuid.UUID] | None = None,
+) -> dict[str, int]:
+    """Terminalize abandoned running rows and expired queued rows.
 
     Spec §2.7's "always-on" promise needs this — without the sweep,
-    a SIGKILLed worker leaves the GUI showing "running" forever and
-    the operator has no way to re-trigger without admin SQL access.
+    a SIGKILLed worker leaves the GUI showing "running" forever. Likewise,
+    ARQ removes an unstarted job payload after 24 hours while its database
+    row otherwise remains "queued" forever. Both cases need an auditable
+    terminal transition so the operator can retry without admin SQL access.
 
     The sweep is harmless when nothing is wrong: rows that finished
     cleanly have ``status='completed'`` or ``'failed'`` already and
-    are excluded by the WHERE clause.
+    are excluded by the WHERE clause. ``published`` is also excluded here:
+    its source graph is durable and may only become ``partial``, never failed.
     """
     cutoff = datetime.now(tz=timezone.utc) - timedelta(
         seconds=_STALE_RUN_AFTER_SEC
@@ -327,13 +402,31 @@ async def _reset_stale_runs(session: AsyncSession) -> dict[str, int]:
             "  completed_at = now(), "
             "  error_log = coalesce(error_log, '') "
             "    || E'\\n[reset_stale_runs] worker heartbeat lost; "
-            "run exceeded 6h budget' "
+            "run exceeded configured stale-run budget' "
             " WHERE status = 'running' AND started_at < :cutoff "
             " RETURNING id"
         ),
         {"cutoff": cutoff},
     )
-    reset_ids = [row[0] for row in res.fetchall()]
+    reset_ids = {row[0] for row in res.fetchall()}
+    if expired_queued_ids:
+        queued_res = await session.execute(
+            update(AnalysisRun)
+            .where(
+                AnalysisRun.id.in_(expired_queued_ids),
+                AnalysisRun.status == "queued",
+            )
+            .values(
+                status="failed",
+                completed_at=datetime.now(tz=timezone.utc),
+                error_log=(
+                    func.coalesce(AnalysisRun.error_log, "")
+                    + "\n[reset_stale_runs] queued job expired before worker pickup"
+                ),
+            )
+            .returning(AnalysisRun.id)
+        )
+        reset_ids.update(row[0] for row in queued_res.fetchall())
     await session.commit()
     if reset_ids:
         log.warning(
@@ -343,9 +436,99 @@ async def _reset_stale_runs(session: AsyncSession) -> dict[str, int]:
     return {"reset": len(reset_ids)}
 
 
+async def _partialize_stale_published_runs(
+    session: AsyncSession,
+) -> dict[str, int]:
+    """Close orphan post-processing while preserving its published graph."""
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(
+        seconds=_STALE_RUN_AFTER_SEC
+    )
+    rows = (
+        await session.execute(
+            select(AnalysisRun)
+            .where(
+                AnalysisRun.status == "published",
+                AnalysisRun.started_at < cutoff,
+            )
+            .order_by(AnalysisRun.started_at)
+            .limit(500)
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars().all()
+    completed_at = datetime.now(tz=timezone.utc)
+    message = (
+        "[reset_stale_runs] source graph was published, but postprocess "
+        "heartbeat was lost"
+    )
+    partialized = 0
+    for run in rows:
+        stats = dict(run.stats) if isinstance(run.stats, dict) else {}
+        try:
+            publication = validate_graph_publication_receipt(run)
+        except GraphPublicationInvariantError as exc:
+            log.error(
+                "stale published run has invalid receipt run_id=%s: %s",
+                run.id,
+                exc,
+            )
+            continue
+        receipt = publication.to_payload()
+        error = {
+            "stage": "stale_recovery",
+            "type": "WorkerHeartbeatLost",
+            "message": message,
+            "cancelled": False,
+            "at": completed_at.isoformat(),
+        }
+        prior_postprocess = stats.get("postprocess")
+        postprocess = (
+            dict(prior_postprocess) if isinstance(prior_postprocess, dict) else {}
+        )
+        postprocess.update(
+            {
+                "status": "partial",
+                "completed_at": completed_at.isoformat(),
+                "errors": [error],
+                "findings_freshness": {
+                    "status": "unknown",
+                    "reason": "stale_published_postprocess",
+                },
+            }
+        )
+        run.status = "partial"
+        run.completed_at = completed_at
+        run.error_log = message
+        run.stats = {
+            **stats,
+            "graph_publication": receipt,
+            "postprocess": postprocess,
+            "postprocess_error": error,
+        }
+        partialized += 1
+    await session.commit()
+    if partialized:
+        log.warning(
+            "reset_stale_runs: %d published runs closed as partial",
+            partialized,
+        )
+    return {"partial": partialized}
+
+
 async def run_reset_stale_runs(ctx: dict) -> dict[str, int] | None:
+    async def _reset_with_queue_check(session: AsyncSession) -> dict[str, int]:
+        redis = ctx.get("redis")
+        expired = (
+            await _find_expired_queued_runs(session, redis)
+            if redis is not None
+            else set()
+        )
+        reset = await _reset_stale_runs(session, expired)
+        partial = await _partialize_stale_published_runs(session)
+        return {**reset, **partial}
+
     return await with_advisory_lock(
-        SessionLocal_factory(), "reset_stale_runs", _reset_stale_runs
+        SessionLocal_factory(), "reset_stale_runs", _reset_with_queue_check
     )
 
 

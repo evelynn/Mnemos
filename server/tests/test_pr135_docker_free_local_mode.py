@@ -111,8 +111,10 @@ async def test_inline_queue_dedups_job_id(monkeypatch):
 
     q = InlineQueue()
     monkeypatch.setattr(q, "_registry", lambda: {"run_ingest": fake_job})
-    await q.enqueue_job("run_ingest", "a", _job_id="dup")
-    await q.enqueue_job("run_ingest", "b", _job_id="dup")
+    first = await q.enqueue_job("run_ingest", "a", _job_id="dup")
+    duplicate = await q.enqueue_job("run_ingest", "b", _job_id="dup")
+    assert first is not None
+    assert duplicate is None  # same contract as ARQ enqueue_job
     await asyncio.sleep(0.05)
     assert len(ran) == 1, "duplicate _job_id must run only once"
 
@@ -123,7 +125,51 @@ async def test_inline_queue_unknown_job_is_safe(monkeypatch):
     q = InlineQueue()
     monkeypatch.setattr(q, "_registry", lambda: {})
     job = await q.enqueue_job("nonexistent", "x")  # must not raise
+    assert job is None
+
+
+@pytest.mark.asyncio
+async def test_inline_queue_seen_cache_is_ttl_and_size_bounded(monkeypatch):
+    import asyncio
+
+    from app.local_mode import InlineQueue
+
+    async def fake_job(ctx, *args):
+        return None
+
+    q = InlineQueue(seen_ttl_sec=0.01, max_seen_job_ids=2)
+    monkeypatch.setattr(q, "_registry", lambda: {"run_ingest": fake_job})
+    for job_id in ("one", "two", "three"):
+        assert await q.enqueue_job("run_ingest", _job_id=job_id) is not None
+        await asyncio.sleep(0)
+    assert len(q._seen_job_ids) <= 2
+
+    await asyncio.sleep(0.02)
+    # Expired ids can be used again and pruning remains bounded.
+    assert await q.enqueue_job("run_ingest", _job_id="three") is not None
+    assert len(q._seen_job_ids) <= 2
+
+
+@pytest.mark.asyncio
+async def test_inline_queue_deferred_job_can_be_cancelled(monkeypatch):
+    import asyncio
+
+    from app.local_mode import InlineQueue
+
+    ran = []
+
+    async def fake_job(ctx, *args):
+        ran.append(args)
+
+    q = InlineQueue()
+    monkeypatch.setattr(q, "_registry", lambda: {"run_ingest": fake_job})
+    job = await q.enqueue_job(
+        "run_ingest", "late", _job_id="deferred", _defer_by=60
+    )
     assert job is not None
+    assert await q.abort_job("deferred") is True
+    await asyncio.sleep(0)
+    assert ran == []
 
 
 # ─── redis_pool / sessions / queue 분기 ──────────────────────────

@@ -22,6 +22,7 @@ This file proves:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -141,19 +142,18 @@ def test_ggoss_py_identifies_mnemos_hotspots():
         f"in-project resolution rate too low: {len(in_proj)} / "
         f"{len(edges)} total"
     )
-    # Bucket callees by bare name and confirm the seed-demo helpers
-    # _node / _edge / _to_out are top hitters (they ARE — manual
-    # measurement during PR-115 showed _out 23x, _edge 16x).
+    # Bucket callees by bare name and confirm the seed-demo helpers remain
+    # high-fan-in. The application has grown substantially since PR-115, so a
+    # global top-5 rank is not stable; the measured call counts are the actual
+    # analyzer contract (_out 20+, several related helpers 10+).
     from collections import Counter
     def _bare(s: str) -> str:
         return s.split(":")[-1].split("@")[0].split(".")[-1]
     callees = Counter(_bare(e["target_id"]) for e in in_proj)
-    # _out is the seed_demo helper that builds graph envelopes;
-    # it's called by _node, _edge, _to_out — definitely top-5.
-    top_5 = {name for name, _ in callees.most_common(5)}
-    assert any(name in top_5 for name in {"_out", "_edge", "_node", "_to_out"}), (
-        f"expected seed_demo helpers in top-5 callees, got: "
-        f"{[n for n,_ in callees.most_common(5)]}"
+    helpers = {name: callees[name] for name in {"_out", "_edge", "_node", "_to_out"}}
+    assert helpers["_out"] >= 20, f"seed-demo _out fan-in regressed: {helpers}"
+    assert sum(count >= 10 for count in helpers.values()) >= 3, (
+        f"expected at least three high-fan-in seed-demo helpers, got {helpers}"
     )
 
 
@@ -242,4 +242,38 @@ def test_syntax_error_is_recoverable_not_fatal():
         assert any(
             e.get("level") == "error" and e.get("recoverable") is True
             for e in err_lines
+        )
+
+
+def test_nonfatal_ast_warnings_do_not_pollute_jsonl_stderr(tmp_path):
+    """A valid legacy escape must not turn an authoritative verb partial.
+
+    Python changed this diagnostic from ``DeprecationWarning`` to
+    ``SyntaxWarning`` across releases. Force warnings on so the regression is
+    observable on every supported interpreter.
+    """
+
+    source = tmp_path / "legacy_escape.py"
+    source.write_text(
+        r"PATTERN = '\d+'" + "\n"
+        "def matches(value):\n"
+        "    return PATTERN == value\n",
+        encoding="utf-8",
+    )
+    env = {**os.environ, "PYTHONWARNINGS": "always"}
+
+    for verb in ("symbols", "calls", "contracts", "data_access"):
+        completed = subprocess.run(
+            [sys.executable, str(_PY_ANALYZER), verb, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+            env=env,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stderr == "", (
+            f"{verb} leaked a non-fatal AST warning into analyzer stderr: "
+            f"{completed.stderr!r}"
         )

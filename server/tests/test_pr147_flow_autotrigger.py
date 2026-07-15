@@ -26,13 +26,16 @@ import pytest
 
 
 def test_auto_route_and_request_model():
-    from app.api.flow import TraceFlowAutoRequest
-    from app.main import app
+    from app.api.flow import TraceFlowAutoRequest, router
 
-    paths = {getattr(r, "path", "") for r in app.routes}
+    paths = {getattr(r, "path", "") for r in router.routes}
     assert "/api/v1/projects/{project_id}/trace_flow/auto" in paths
     m = TraceFlowAutoRequest(entry="x", source_root="/tmp")
     assert m.max_files == 8 and m.persist is True
+    assert m.source_root == "/tmp"  # accepted only for compatibility; endpoint ignores it
+    # Auto resolution uses the latest completed graph/snapshot pair; selecting
+    # an older snapshot while querying the current graph would mix revisions.
+    assert "analysis_run_id" not in TraceFlowAutoRequest.model_fields
 
 
 @pytest.mark.asyncio
@@ -42,6 +45,7 @@ async def test_gather_files_from_graph_spans_tiers():
     from app.api.flow import _gather_files_from_graph
     from app.models.base import Base
     from app.models.graph import Edge, Node
+    from app.models.organization import Organization  # noqa: F401
     from app.testing.sqlite_polyglot import install_polyglot
 
     install_polyglot()
@@ -53,13 +57,13 @@ async def test_gather_files_from_graph_spans_tiers():
     async with AsyncSession(eng, expire_on_commit=False) as s:
         s.add_all([
             Node(id="js:frontend/checkout.js::placeOrder", project_id=pid, kind="Symbol",
-                 data={"name": "placeOrder", "file": "frontend/checkout.js"}, certainty="inferred", created_by="test"),
+                 data={"name": "placeOrder", "location": {"file": "frontend/checkout.js"}}, certainty="inferred", created_by="test"),
             Node(id="py:backend/orders.py::handle_create_order", project_id=pid, kind="Symbol",
-                 data={"name": "handle_create_order", "file": "backend/orders.py"}, certainty="inferred", created_by="test"),
+                 data={"name": "handle_create_order", "location": {"file": "backend/orders.py"}}, certainty="inferred", created_by="test"),
             Node(id="data:orders", project_id=pid, kind="DataEntity",
-                 data={"name": "orders", "file": "db/schema.sql"}, certainty="inferred", created_by="test"),
+                 data={"name": "orders", "location": {"file": "db/schema.sql"}}, certainty="inferred", created_by="test"),
             Node(id="py:other::unrelated", project_id=pid, kind="Symbol",
-                 data={"name": "unrelated", "file": "backend/other.py"}, certainty="inferred", created_by="test"),
+                 data={"name": "unrelated", "location": {"file": "backend/other.py"}}, certainty="inferred", created_by="test"),
         ])
         # backend handler WRITES the orders table (one hop -> pulls the DB file)
         s.add(Edge(project_id=pid, source_id="py:backend/orders.py::handle_create_order",

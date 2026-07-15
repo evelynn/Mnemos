@@ -35,7 +35,7 @@ def test_search_symbols_accepts_component_id():
 def test_search_symbols_tool_schema_advertises_component_id():
     body = _read(_APP / "mcp" / "server.py")
     idx = body.find('name="search_symbols"')
-    slab = body[idx:idx + 900]
+    slab = body[idx:idx + 2000]
     assert '"component_id"' in slab
 
 
@@ -49,11 +49,13 @@ def test_search_symbols_dispatch_threads_component_id():
 def test_find_runtime_path_accepts_time_window():
     body = _read(_APP / "mcp" / "queries.py")
     idx = body.find("async def find_runtime_path(")
-    slab = body[idx:idx + 3500]
+    next_fn = body.find("\nasync def ", idx + 1)
+    slab = body[idx:next_fn]
     assert "time_window: str | None = None" in slab
     assert "_parse_time_window" in slab
-    # The cutoff actually filters last_seen_at.
-    assert 'Edge.data["last_seen_at"]' in slab
+    # The cutoff filters the durable runtime overlay's canonical read view.
+    assert "GraphEdgeRuntimeOverlay" in slab
+    assert 'view["data"].get("last_seen_at")' in slab
 
 
 def test_parse_time_window_unit():
@@ -75,6 +77,6 @@ def test_stale_run_window_overridable(monkeypatch):
 
     assert _stale_run_after_sec() == 12345
     monkeypatch.setenv("MNEMOS_STALE_RUN_AFTER_SEC", "garbage")
-    assert _stale_run_after_sec() == 6 * 60 * 60
+    assert _stale_run_after_sec() == 24 * 60 * 60
     monkeypatch.delenv("MNEMOS_STALE_RUN_AFTER_SEC", raising=False)
-    assert _stale_run_after_sec() == 6 * 60 * 60
+    assert _stale_run_after_sec() == 24 * 60 * 60

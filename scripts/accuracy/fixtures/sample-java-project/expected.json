@@ -1,0 +1,22 @@
+{
+  "_about": "Hand-curated ground truth for ggoss-java on the orders fixture (Spring). Mirrors the py/ts fixtures. Update source and this file together.",
+  "symbols": [
+    {"kind": "class",  "name": "OrdersController", "location": {"file": "OrdersController.java"}},
+    {"kind": "method", "name": "OrdersController", "location": {"file": "OrdersController.java"}},
+    {"kind": "method", "name": "getById",          "location": {"file": "OrdersController.java"}},
+    {"kind": "method", "name": "create",           "location": {"file": "OrdersController.java"}},
+    {"kind": "method", "name": "validate",         "location": {"file": "OrdersController.java"}},
+    {"kind": "class",  "name": "OrdersRepo",       "location": {"file": "OrdersRepo.java"}},
+    {"kind": "method", "name": "findById",         "location": {"file": "OrdersRepo.java"}},
+    {"kind": "method", "name": "save",             "location": {"file": "OrdersRepo.java"}},
+    {"kind": "method", "name": "load",             "location": {"file": "OrdersRepo.java"}},
+    {"kind": "method", "name": "persist",          "location": {"file": "OrdersRepo.java"}}
+  ],
+  "edges": [
+    {"kind": "CALLS",   "source": "getById",  "target": "findById"},
+    {"kind": "CALLS",   "source": "create",   "target": "validate"},
+    {"kind": "CALLS",   "source": "create",   "target": "save"},
+    {"kind": "CALLS",   "source": "findById", "target": "load"},
+    {"kind": "CALLS",   "source": "save",     "target": "persist"}
+  ]
+}

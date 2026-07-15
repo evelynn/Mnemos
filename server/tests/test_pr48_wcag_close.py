@@ -6,7 +6,6 @@ the "product complete" state.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 _SERVER = Path(__file__).resolve().parents[1]
@@ -25,16 +24,16 @@ def _read(p: Path) -> str:
 
 
 def test_light_accent_passes_wcag_aa():
-    """The previous accent (#1f6feb) measured 4.18:1 against white,
-    failing AA's 4.5:1 floor for small-text + UI components. PR-48
-    moves it to #0a5fc7 (4.74:1)."""
+    """The accent has to clear AA's 4.5:1 floor on white. History:
+    Nord #5e81ac was only 4.03:1; #4c6f93 keeps the palette while clearing
+    the floor at roughly 5.25:1."""
     body = _read(_STATIC / "app.css")
     # The new value must be the one in the light :root block.
     light_idx = body.find(":root {")
     end = body.find(":root[data-theme=\"dark\"]")
     light_block = body[light_idx:end]
-    assert "--accent:               #0a5fc7" in light_block, (
-        "light --accent must be #0a5fc7 (4.74:1 on white)"
+    assert "--accent:               #4c6f93" in light_block, (
+        "light --accent must be #4c6f93 (about 5.25:1 on white)"
     )
 
 
@@ -56,18 +55,18 @@ def _relative_luminance(rgb: tuple[int, int, int]) -> float:
 
 def test_light_accent_contrast_arithmetic():
     """Belt-and-braces: actually compute the ratio against white
-    and assert it's at least 4.5:1."""
-    accent_l = _relative_luminance(_hex_to_rgb("#0a5fc7"))
+    and assert it's at least 4.5:1. Tracks the live accent (#4c6f93)."""
+    accent_l = _relative_luminance(_hex_to_rgb("#4c6f93"))
     white_l = _relative_luminance(_hex_to_rgb("#ffffff"))
     ratio = (max(accent_l, white_l) + 0.05) / (min(accent_l, white_l) + 0.05)
     assert ratio >= 4.5, f"accent on white = {ratio:.2f}:1, want ≥ 4.5"
 
 
 def test_dark_accent_still_passes():
-    """The dark-mode override is unchanged but we re-verify the
-    contrast against the dark surface anyway."""
-    accent_l = _relative_luminance(_hex_to_rgb("#4493f8"))
-    surface_l = _relative_luminance(_hex_to_rgb("#161b22"))  # --surface
+    """Re-verify the dark-mode accent against the dark surface. PR-165
+    moved these to indigo-400 #818cf8 on zinc-900 #18181b (~5.9:1)."""
+    accent_l = _relative_luminance(_hex_to_rgb("#818cf8"))
+    surface_l = _relative_luminance(_hex_to_rgb("#18181b"))  # --surface (dark)
     ratio = (max(accent_l, surface_l) + 0.05) / (min(accent_l, surface_l) + 0.05)
     assert ratio >= 4.5, f"dark accent on surface = {ratio:.2f}:1, want ≥ 4.5"
 
@@ -105,11 +104,11 @@ def test_readme_records_team_product_phase():
 def test_readme_records_current_state():
     body = _read(_README)
     assert "**Current state**" in body
-    # Test counts are stated in the "N unit + M integration" shape; the
-    # numbers themselves move with the suite, so pin the shape only.
-    assert re.search(r"[\d,]+ unit \+ \d+ integration", body)
+    # The remediation charter deliberately avoids presenting a moving test
+    # count as production-readiness evidence.
+    assert "Do not infer production readiness from" in body
     # Spec §2 still fully preserved.
-    assert "10 of 10" in body
+    assert "10. Single-operator-friendly" in body
 
 
 # ---------------------------------------------------------------------------

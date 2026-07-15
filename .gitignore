@@ -45,3 +45,5 @@ analyzers/*/src/obj/
 scripts/accuracy/fixtures/*/bin/
 scripts/accuracy/fixtures/*/obj/
 /tmp/ggoss-*-out/
+.gstack/
+.karin/

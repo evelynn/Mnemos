@@ -1,43 +1,54 @@
-# Mnemos — Knowledge Production Platform
+# Mnemos — AI Source Analysis Guide
 
-Self-hosted platform that continuously analyses multi-language, multi-database
-production systems (C#, TypeScript, Python, MSSQL, Oracle, .NET binaries) and
-turns the extracted knowledge into an accessible asset for development, Q&A,
-and safe data lookup.
+Mnemos deterministically indexes large, multi-language source trees into a
+grounded, bitemporal graph that an AI can re-query through MCP. It is a source
+reference and analysis guide: it supplies source-located symbols, relationships,
+certainty, coverage gaps, and bounded task context. Analyzer coverage and
+certainty determine which references are exact; unsupported language features
+remain explicit gaps. It is not a generic SaaS, chatbot, or administrator
+product, and it does not ask an LLM to form an
+expensive opinion about the whole repository up front.
 
-**Status**: beta. Single-organisation self-hosted deployments are production-
-capable. See [`docs/architecture.md`](docs/architecture.md) for the delivered
-architecture and [`docs/operator-guide/deployment.md`](docs/operator-guide/deployment.md)
-for operator workflows. For a zero-dependency test drive, see
+**Status**: beta, not production-qualified. The core source-index/MCP workflow
+has unit, mock-integration, and one external-repository evaluation. Run-scoped
+staging, atomic graph-head publication, durable evidence overlays, and
+source/overlay generation-pinned readers are connected to ingest; real
+Postgres/provider validation, hard-kill fault injection, and a 50 K-file soak
+remain.
+See the [Phase-B contract and evidence report](docs/04-eval/atomic-graph-publication-phase-b-2026-07-15.md)
+and [`docs/architecture.md`](docs/architecture.md) for the delivered architecture.
+The [token/refresh research](docs/04-eval/token-refresh-architecture-research-2026-07-15.md)
+and [July 14 remediation assessment](docs/04-eval/source-analysis-purpose-and-remediation-2026-07-14.md)
+are historical checkpoints that explain the original failure modes;
+operator workflows are in
+[`docs/operator-guide/deployment.md`](docs/operator-guide/deployment.md). For a
+zero-external-service test drive, see
 [Quick start (docker-free)](#quick-start-docker-free-local-mode) below.
 
 ## 목적 (Purpose)
 
-> **운영 중인 복합 언어·복합 DB 시스템을 지속적으로 분석·축적하여, 그 축적된 지식 자산으로
-> 개발·질의응답·데이터 조회 요청을 상시 처리하는 자체 호스팅 플랫폼.**
-> *(Mnemos_spec.md §1.1)*
+> **AI가 거대한 소스를 정확히 분석하도록, 소스를 결정적으로 인덱싱하고 근거·경로·영향
+> 범위·불확실성을 작게 재조회할 수 있게 제공하는 보조 도구.**
 
-Mnemos exists to solve three problems that plague enterprise polyglot
-systems (C# + TypeScript + Oracle/MSSQL + opaque .NET DLLs):
+Mnemos exists to solve three failures of direct repo prompting:
 
 1. **Knowledge decay** — docs go stale, expertise lives in people's heads,
    and one-shot analyses are obsolete the moment they finish.
-2. **Operational risk** — generic AI coding tools have no concrete knowledge
-   of a specific production system and cannot be trusted with read-write
-   access to live data or `main` branches.
-3. **Data opacity** — schemas alone don't reveal what actually lives in a
-   column; safe sampling with PII masking is required.
+2. **Context cost** — repeatedly sending a whole repository consumes tokens
+   before the AI has identified the small evidence slice it needs.
+3. **Unsupported conclusions** — without file/line/edge evidence and explicit
+   coverage gaps, an AI confuses guesses with source facts.
 
-### Three first-class request types
+### How the index is consumed
 
-The platform's purpose is **request handling on top of accumulated knowledge**,
-not one-shot analysis. The three request types are co-equal:
+All consumers are downstream of the source-analysis graph; none broadens the
+product into a generic workflow platform.
 
 | Type | Example | Tooling |
 |------|---------|---------|
-| **Q&A** | "Where is the retry logic for failed payments?" | Ask tab (`POST /projects/{id}/ask`, with automatic on-demand deepening) + MCP `search_symbols`, `get_symbol`, graph traversal |
-| **Data lookup** | "Show me 10 sample rows from `Orders`, masked." | MCP `get_sample_data`, `search_data`, `get_column_stats` — PII masked, audited, rate-limited |
-| **Development** | "Add caching to this endpoint." | MCP `submit_plan` → Gate A → `edit_file_in_worktree` / `run_in_sandbox` → `submit_diff` → Gate B → GitLab MR |
+| **Q&A** | "Where is the retry logic for failed payments?" | Ask tab (`POST /projects/{id}/ask`) + MCP `search_symbols`, `get_symbol`, graph traversal, then a narrow immutable-snapshot `read_file` check |
+| **Data impact** | "Which code reads `Orders`?" | MCP `get_data_access`, `get_data_entity`; optional safe DB evidence remains subordinate to source analysis |
+| **Development analysis** | "What is the blast radius of changing this endpoint?" | MCP task pack + callers/callees/contracts/data access + narrow source verification |
 
 ### Non-negotiable design principles (spec §2)
 
@@ -45,48 +56,57 @@ not one-shot analysis. The three request types are co-equal:
 2. Boundaries are joined by **contracts**, not source-to-source links.
 3. Information contributes only what it can prove — every node/edge carries a
    `certainty` flag (`verified` / `asserted` / `inferred`).
-4. Conversation & coding loops are delegated to Claude Code; we wrap them
-   with knowledge production, safety gates, and tools.
+4. The AI performs the reasoning; Mnemos supplies bounded, grounded guidance
+   and never promotes optional narration above deterministic facts.
 5. **The production system is sacred** — no direct writes to `main`,
    no writes to operational DBs, no production deploys. Bypass switches
    are **not** built.
-6. Bottom-up incremental analysis — no LLM call ever sees the whole
-   codebase.
-7. The platform is an always-on service, not a batch job; state is
-   restart-safe.
+6. Deterministic index first: a normal first pass uses zero LLM tokens.
+   Optional agent extraction and narration share hard call/input/wall budgets;
+   no LLM call sees the whole codebase.
+7. The platform is designed as an always-on service. Analyzer output is isolated
+   by run and becomes current through one atomic publication receipt; optional
+   post-publication products may finish as explicitly `partial` without corrupting
+   or rolling back the readable source generation.
 8. Data access is least-privilege, masked, and audited.
-9. Every operator function is reachable from the GUI.
+9. Required source-analysis operator workflows should be reachable from the GUI;
+   a missing surface is a product gap, not a reason to broaden scope.
 10. Single-operator-friendly — Docker Compose, single Python server,
     minimal external dependencies (or fully docker-free local mode).
 
-### Phase 1 success criteria (spec §1.5)
+### Core success criteria
 
-- Register a real C# + TS + MSSQL/Oracle system via GUI → first full analysis
-  in ≤ 8 hours.
-- After registration, run in **always-on mode** — react to git push, schema
-  changes, and runtime traces.
-- Q&A / data / dev requests all natural from Claude Code over MCP.
-- Data lookups always return PII-masked samples.
-- Dev requests pass Gate A + Gate B and land as a GitLab MR.
-- All LLM / MCP / file-write / DB / data-query operations are audit-logged.
-- The three safety isolations (source, DB, runtime) are enforced
-  automatically.
+- A full source index consumes zero LLM tokens unless AI work was explicitly
+  requested.
+- MCP starts with a top-10 project index; project indexes and task packs omit
+  raw source and enforce a 50 KiB serialized hard cap instead of dumping the
+  repository into context.
+- A same-content refresh runs no analyzer and creates no false temporal diff.
+- Changed analyzer families refresh; deleted/renamed source facts close only
+  after a successful authoritative-root scan. Shared facts are deleted only
+  during a safe all-producer reconciliation until contribution rows exist.
+- Analyzer output, memory queue, wall time, cancellation, and retry behavior
+  are bounded so one bad process cannot stop the service.
+- Structured AI claims are schema-valid, project-scoped, and evidence-backed;
+  inferred relationships remain visibly inferred.
 
 ## What's in the box
 
-- **Analysis pipeline** — six language/DB analyzers (C#, TypeScript,
-  Python, MSSQL, Oracle, .NET binary) feed a bitemporal knowledge graph
+- **Analysis pipeline** — the default worker bundles deterministic Python,
+  TypeScript/JavaScript, C/C++, Java, Kotlin, Web, and tree-sitter source
+  analyzers. C#, MSSQL/Oracle, and .NET-binary analyzers are present in the
+  repository but are not wired into the standard Compose worker. Analyzer
+  facts feed a bitemporal knowledge graph
   (nodes + edges with `valid_from`/`valid_to`), reconciled into six Finding
   types (duplicate endpoints, unverified claims, dynamic calls, dead paths,
   schema mismatches, opaque components failing). The Python analyzer
   (`ggoss-py`) is pure-stdlib and also runs in-repo without Docker.
-- **LLM summarisation** — L1 (function) → L2 (file) → L3 (module) hierarchy
-  with evidence hashing so the LLM only re-summarises when underlying facts
-  change.
-- **Ask (Q&A) with on-demand deepening** — `POST /projects/{id}/ask` answers
-  from the graph when a confident symbol match exists; otherwise it ranks
-  candidate files, extracts them on demand, and re-answers, so a bounded
-  first-pass analysis still converges on the right answer.
+- **Optional LLM narration** — explicit L1 (function) → L2 (file) → L3
+  (module) pass over bounded graph evidence. Semantic evidence hashes skip
+  unchanged targets; this layer is not required for source lookup or MCP.
+- **Ask (Q&A)** — `POST /projects/{id}/ask` answers from graph evidence.
+  Arbitrary host-path deepening is disabled; agents can verify a selected range
+  through the bounded MCP reader tied to the latest completed Git snapshot.
 - **Hybrid search scaffold** — `search_symbols` is BM25/lexical by default;
   set `MNEMOS_EMBEDDING_PROVIDER` (`voyage` or `openai`) to enable the vector
   half of the spec's vector + BM25 ensemble.
@@ -94,7 +114,7 @@ not one-shot analysis. The three request types are co-equal:
   regex-based `masking_rules`, Korean PII validators (RRN / foreigner ID /
   Luhn / driver's licence), Oracle `allow_awr` consent, and cron-expression
   `maintenance_windows`. Every query is masked, audited, and rate-limited.
-- **MCP server** — 20 tools exposing the graph (symbols, callers/callees,
+- **MCP server** — tools exposing the graph (symbols, callers/callees,
   impact analysis, contracts, flows, runtime paths), data samples, column
   stats, file reads, plan submission, sandboxed worktree editing, and diff
   submission to IDE agents.
@@ -103,8 +123,9 @@ not one-shot analysis. The three request types are co-equal:
   approved. Worktrees are real `git worktree`s with read-only bind mounts;
   `run_in_sandbox` executes commands under an allowlist.
 - **Runtime observation** — OTLP trace receiver assembles trace trees into
-  `runtime_observations` and upserts `EXPOSES`/`CALLS` edges into the graph
-  (14-day retention sweep built in).
+  `runtime_observations`, reconciles `EXPOSES`/`CALLS` evidence into durable
+  logical-edge overlays, and materializes it onto the current graph version
+  (14-day observation-retention sweep built in).
 - **Voice on the Ask tab** — a full **local** voice loop: *speak* a
   question (mic → STT) and *hear* the answer (🔊 → TTS). STT defaults to
   **Moonshine tiny-ko** (optional `[voice]` extra — ~26M params, ONNX,
@@ -127,7 +148,7 @@ not one-shot analysis. The three request types are co-equal:
   GDPR tools.
 - **Operability** — JSON logs with `x-request-id` correlation, Prometheus
   `/metrics` (optional bearer-token auth), deep `/health/ready` covering
-  DB + Redis + worker heartbeat + analyzer image presence, Fernet key
+  DB + Redis + worker heartbeat + analyzer availability, Fernet key
   rotation CLI, `pg_dump` backup / restore scripts, pluggable KMS (local
   env or self-hosted HashiCorp Vault), startup self-verification.
 
@@ -135,7 +156,7 @@ not one-shot analysis. The three request types are co-equal:
 
 The fastest way to try the platform — a single Python 3.12+ process with
 **zero external services** (SQLite + in-process fakeredis, jobs inline,
-in-repo Python analyzer):
+available in-repo analyzers):
 
 ```bash
 cd server
@@ -145,11 +166,16 @@ python -m app.serve_local --seed-demo   # boots on :8080 with a demo dataset
 
 ## Quick start (Docker Compose)
 
-The production topology: Postgres + Redis + platform + ARQ worker + six
-analyzer images.
+The service topology is Postgres + Redis + platform + one ARQ worker. The
+platform and worker images contain the runnable in-repo source analyzers listed
+above; standalone analyzer-profile images are optional contract-test artifacts.
 
 ```bash
 cp .env.example .env
+
+# Host repository mounted read-only as /work for a manual analysis.
+# Use an absolute path. If omitted, the Mnemos checkout itself is mounted.
+echo "MNEMOS_SOURCE_ROOT=/absolute/path/to/source-repo" >> .env
 
 # Generate FERNET_KEY (encrypts the secrets table).
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" \
@@ -161,14 +187,8 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 python -c "import secrets; print(f'SECRET_KEY={secrets.token_urlsafe(48)}')" \
   >> .env
 
-docker compose up -d
+docker compose up -d --build
 docker compose exec platform alembic upgrade head
-
-# Build the six language-analyzer images (one-time; the platform
-# invokes them via `docker run`). Omitting this step leaves their
-# stages reporting "analyzer_binary_not_found" instead of crashing —
-# /api/v1/health/ready lists which are missing.
-docker compose --profile analyzers build
 
 # create the first admin
 docker compose exec platform python -m app.cli create-user --username admin --role admin
@@ -182,6 +202,11 @@ backups, and upgrades, see
 [`docs/operator-guide/deployment.md`](docs/operator-guide/deployment.md);
 for a guided first session, see
 [`docs/operator-guide/getting-started.md`](docs/operator-guide/getting-started.md).
+On the Analysis tab use source path `/work`, keep `summarize` unchecked for the
+zero-token index, and use a revision that exists in that Git checkout.
+The standard Compose worker enforces `SOURCE_ALLOWED_ROOT=/work`, so a manual
+request cannot select arbitrary container files. Completed Git runs keep only
+a root-relative repository locator and MCP reads reopen the exact commit.
 
 ## Optional: monitoring stack
 
@@ -198,7 +223,7 @@ Grafana lands at `:3000` with the **Mnemos Overview** dashboard pre-provisioned.
 Mnemos/
 ├── Mnemos_spec.md                  # the platform specification (§ references)
 ├── docker-compose.yml              # core: postgres, redis, platform, worker
-│                                   # + analyzer build profiles (6 images)
+│                                   # + optional standalone analyzer profiles
 ├── docker-compose.monitoring.yml   # optional: prometheus + grafana
 ├── server/                         # FastAPI platform (Python 3.12)
 │   ├── app/
@@ -216,10 +241,10 @@ Mnemos/
 │   │   ├── analyzers/              # subprocess runner + language registry
 │   │   ├── orchestrator/           # ARQ jobs, stages, cron, worker
 │   │   │                           #   heartbeat, progress bus
-│   │   ├── merge/                  # node/edge upsert, finding detectors
+│   │   ├── merge/                  # runtime reconciliation + finding detectors
 │   │   ├── extractor/              # L1-L3 LLM summarisation
 │   │   ├── data_sampler/           # masking, project_db policy, maintenance
-│   │   ├── mcp/                    # MCP server (20 tools) + embeddings
+│   │   ├── mcp/                    # bounded MCP tool registry + embeddings
 │   │   │                           #   adapter (vector/BM25 hybrid scaffold)
 │   │   ├── sandbox/                # git worktree, command allowlist, runner
 │   │   ├── runtime_receiver/       # OTLP trace ingest + scrubbing
@@ -246,19 +271,22 @@ Mnemos/
 │   │   ├── cli.py                  # create-user, key rotation, verify, …
 │   │   ├── main.py                 # FastAPI app factory
 │   │   └── worker.py               # ARQ worker entrypoint
-│   ├── alembic/versions/           # migrations 0001 → 0024
-│   └── tests/                      # pytest suite — 1,598 unit + 16
-│                                   # integration tests
-│                                   # (`pytest -m "not integration"` for the
-│                                   #  unit-only run that needs no services)
-├── analyzers/                      # language/DB analyzer source (6)
+│   ├── alembic/versions/           # single-head chain; use current Alembic head
+│   └── tests/                      # pytest unit/integration suites;
+│                                   # service requirements are declared per case
+├── analyzers/                      # language/DB analyzer source (11)
+│   ├── ggoss-binary-dotnet/
+│   ├── ggoss-cpp/
 │   ├── ggoss-csharp/
-│   ├── ggoss-ts/
+│   ├── ggoss-java/
+│   ├── ggoss-kotlin/
 │   ├── ggoss-py/                   # pure-stdlib; also runs in-repo
 │   │                               #   without Docker (local mode)
 │   ├── ggoss-sql-mssql/
 │   ├── ggoss-sql-oracle/
-│   └── ggoss-binary-dotnet/
+│   ├── ggoss-treesitter/
+│   ├── ggoss-ts/
+│   └── ggoss-web/
 ├── monitoring/                     # Prometheus config + Grafana dashboards
 ├── scripts/                        # backup.sh, restore.sh, loadtest/,
 │   │                               # accuracy/ (extraction + Korean STT WER),
@@ -294,25 +322,24 @@ consecutive zero-defect rounds. Condensed phase log:
 | Phase 2 — UX backlog sprint + convergence | PR-20 → PR-31 | 9/10 P2 items shipped (i18n, SSE cross-tab, pagination, drill-down, OTLP Tier 2, runtime observations + retention). |
 | Large-system readiness | PR-32 → PR-37 | Analyzer subprocess contract pins, 5 operator scenarios (E1–E5), crashed-worker recovery cron, scale stress tests, D1–D5 invariants. |
 | Team product (RBAC/UX/design) | PR-38 → PR-48 | Users CRUD + invites + resets, CSRF/lockout/rate-limit/sliding TTL, design tokens + dark mode + responsive drawer, comments + assignees, notification centre, command palette. |
-| Productisation & dogfooding | PR-49 → PR-154+ | Docker-free local mode (`serve_local`), in-repo Python analyzer, Ask tab with on-demand deepening, real-LLM E2E dogfooding, graph/report/docs/health GUI tabs, Excel export, voice (STT/TTS), security deep-audit fixes, OpenAPI/env-example integrity gates. Round notes live in [`docs/04-eval/`](docs/04-eval/). |
+| Productisation & dogfooding | PR-49 → PR-154+ | Docker-free local mode (`serve_local`), in-repo analyzers, graph-backed Ask, agent context artifacts, graph/report/docs/health GUI tabs, and safety/contract hardening. Historical round notes live in [`docs/04-eval/`](docs/04-eval/) and do not supersede the current limitations. |
 
 For per-PR detail, see the round notes in [`docs/04-eval/`](docs/04-eval/),
 [`docs/operator-guide/phase2_backlog.md`](docs/operator-guide/phase2_backlog.md),
 [`docs/operator-guide/score-evidence.md`](docs/operator-guide/score-evidence.md),
 and `git log`.
 
-**Current state**: 1,598 unit + 16 integration tests, `ruff check` clean,
-24 alembic migrations (`0001` → `0024`), 20 MCP tools, 6 analyzer images,
-19 dashboard pages, full Korean i18n surface, spec §2 (10 of 10 principles)
-preserved end-to-end.
+**Current state**: the repository includes unit/integration suites, migrations,
+MCP tools, analyzers, and the dashboard. Do not infer production readiness from
+their counts; the current evidence and unverified workflows are recorded in the
+Phase-B evidence report linked above.
 
 ## Tests
 
 ```bash
 cd server
-pytest -m "not integration"    # 1,598 unit tests, no external services
-pytest                         # full suite — adds 16 integration tests
-                               # (requires Postgres + Redis)
+pytest -m "not integration"    # no external services
+pytest                         # integration cases require their declared services
 ruff check .
 ```
 

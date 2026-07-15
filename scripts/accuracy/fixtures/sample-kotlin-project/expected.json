@@ -1,0 +1,21 @@
+{
+  "_about": "Hand-curated ground truth for ggoss-kotlin on the orders fixture (Spring). Mirrors the py/ts/java fixtures. Kotlin methods are kind 'function'. Update source and this file together.",
+  "symbols": [
+    {"kind": "class",    "name": "OrdersController", "location": {"file": "Orders.kt"}},
+    {"kind": "function", "name": "getById",          "location": {"file": "Orders.kt"}},
+    {"kind": "function", "name": "create",           "location": {"file": "Orders.kt"}},
+    {"kind": "function", "name": "validate",         "location": {"file": "Orders.kt"}},
+    {"kind": "class",    "name": "OrdersRepo",       "location": {"file": "Orders.kt"}},
+    {"kind": "function", "name": "findById",         "location": {"file": "Orders.kt"}},
+    {"kind": "function", "name": "save",             "location": {"file": "Orders.kt"}},
+    {"kind": "function", "name": "load",             "location": {"file": "Orders.kt"}},
+    {"kind": "function", "name": "persist",          "location": {"file": "Orders.kt"}}
+  ],
+  "edges": [
+    {"kind": "CALLS",   "source": "getById",  "target": "findById"},
+    {"kind": "CALLS",   "source": "create",   "target": "validate"},
+    {"kind": "CALLS",   "source": "create",   "target": "save"},
+    {"kind": "CALLS",   "source": "findById", "target": "load"},
+    {"kind": "CALLS",   "source": "save",     "target": "persist"}
+  ]
+}

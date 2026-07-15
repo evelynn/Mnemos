@@ -48,7 +48,7 @@ requires_real_analyzer = pytest.mark.skipif(
 def _run_analyzer(verb: str) -> list[dict]:
     cp = subprocess.run(
         [_NODE, str(_TS_INDEX), verb, str(_FIXTURE)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert cp.returncode == 0, f"ggoss-ts {verb} failed: {cp.stderr[:400]}"
     return [json.loads(line) for line in cp.stdout.splitlines() if line.strip()]
@@ -147,7 +147,7 @@ def test_real_ggoss_ts_runs_on_mnemos_own_ui_js():
     static_dir = _ROOT / "server" / "app" / "dashboard" / "static"
     cp = subprocess.run(
         [_NODE, str(_TS_INDEX), "symbols", str(static_dir)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert cp.returncode == 0, f"dogfood symbols crashed: {cp.stderr[:400]}"
     lines = [line for line in cp.stdout.splitlines() if line.strip()]
@@ -158,7 +158,7 @@ def test_real_ggoss_ts_runs_on_mnemos_own_ui_js():
 
     cp2 = subprocess.run(
         [_NODE, str(_TS_INDEX), "calls", str(static_dir)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert cp2.returncode == 0
     edge_lines = [line for line in cp2.stdout.splitlines() if line.strip()]

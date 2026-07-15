@@ -5,7 +5,7 @@
 
 <section id="onboarding-card" class="onboarding" hidden>
   <h2 data-i18n="Welcome to Mnemos">Welcome to Mnemos</h2>
-  <p class="muted" id="onb-summary">
+  <p class="muted" id="onb-summary" data-i18n="Three steps to get to your first finding:">
     Three steps to get to your first finding:
   </p>
   <ol>
@@ -34,22 +34,22 @@
 
 <section class="summary-grid">
   <a class="stat-card stat-link" href="/projects" aria-label="Manage projects">
-    <h3>Projects</h3>
+    <h3 data-i18n="Projects">Projects</h3>
     <div class="big" id="stat-projects">…</div>
-    <span class="muted">Manage →</span>
+    <span class="muted" data-i18n="Manage →">Manage →</span>
   </a>
   <a class="stat-card stat-link" href="/analysis" aria-label="Open analysis runs">
-    <h3>Recent runs (7d)</h3>
+    <h3 data-i18n="Recent runs (7d)">Recent runs (7d)</h3>
     <div class="big" id="stat-runs">…</div>
-    <span class="muted">Open Analysis →</span>
+    <span class="muted" data-i18n="Open Analysis →">Open Analysis →</span>
   </a>
   <a class="stat-card stat-link" href="/findings?status=open" aria-label="Open findings list">
-    <h3>Open findings</h3>
+    <h3 data-i18n="Open findings">Open findings</h3>
     <div class="big" id="stat-findings">…</div>
-    <span class="muted">Open Findings →</span>
+    <span class="muted" data-i18n="Open Findings →">Open Findings →</span>
   </a>
   <div class="stat-card">
-    <h3>Readiness</h3>
+    <h3 data-i18n="Readiness">Readiness</h3>
     <div class="big" id="stat-ready">…</div>
     <span class="muted" id="stat-ready-detail"></span>
   </div>
@@ -57,24 +57,24 @@
 
 <section class="summary-grid">
   <a class="stat-card stat-link" href="/diffs?filter=blocked" aria-label="Diff submissions awaiting break-glass approval">
-    <h3>Break-glass active</h3>
+    <h3 data-i18n="Break-glass active">Break-glass active</h3>
     <div class="big" id="stat-bg-active">…</div>
-    <span class="muted">unconsumed grants (15-min TTL) →</span>
+    <span class="muted" data-i18n="unconsumed grants (15-min TTL) →">unconsumed grants (15-min TTL) →</span>
   </a>
   <a class="stat-card stat-link" href="/analysis?status=failed&since=24h" aria-label="Recent failed analysis runs">
-    <h3>Failed runs (24h)</h3>
+    <h3 data-i18n="Failed runs (24h)">Failed runs (24h)</h3>
     <div class="big" id="stat-runs-failed">…</div>
-    <span class="muted">Investigate →</span>
+    <span class="muted" data-i18n="Investigate →">Investigate →</span>
   </a>
   <a class="stat-card stat-link" href="/settings#project-dbs" aria-label="Project DB bindings">
-    <h3>Disabled DBs</h3>
+    <h3 data-i18n="Disabled DBs">Disabled DBs</h3>
     <div class="big" id="stat-dbs-disabled">…</div>
-    <span class="muted">probe sweep verdict →</span>
+    <span class="muted" data-i18n="probe sweep verdict →">probe sweep verdict →</span>
   </a>
   <a class="stat-card stat-link" href="/audit?action=webhook.received" aria-label="Webhook ingest audit log">
-    <h3>Webhook events (24h)</h3>
+    <h3 data-i18n="Webhook events (24h)">Webhook events (24h)</h3>
     <div class="big" id="stat-webhooks">…</div>
-    <span class="muted">GitLab pushes ingested →</span>
+    <span class="muted" data-i18n="GitLab pushes ingested →">GitLab pushes ingested →</span>
   </a>
 </section>
 
@@ -299,16 +299,21 @@ async function loadSummary() {
     latest.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
     const box = document.getElementById("runs-box");
     if (!latest.length) {
-      box.innerHTML = '<p class="muted">No analysis runs yet. Start one from the Analysis tab.</p>';
+      box.innerHTML = `<p class="muted" data-i18n="No analysis runs yet. Start one from the Analysis tab.">${MnemosUI.t("No analysis runs yet. Start one from the Analysis tab.")}</p>`;
     } else {
-      let html = '<table class="data"><thead><tr><th>Project</th><th>Status</th><th>SHA</th><th>Started</th><th></th></tr></thead><tbody>';
+      let html = '<table class="data"><thead><tr>'
+        + `<th data-i18n="Project">${MnemosUI.t("Project")}</th>`
+        + `<th data-i18n="Status">${MnemosUI.t("Status")}</th>`
+        + `<th data-i18n="SHA">${MnemosUI.t("SHA")}</th>`
+        + `<th data-i18n="Started">${MnemosUI.t("Started")}</th>`
+        + '<th></th></tr></thead><tbody>';
       for (const r of latest.slice(0, 10)) {
         html += `<tr>
-          <td>${r._project}</td>
-          <td><span class="badge ${r.status}">${r.status}</span></td>
-          <td><code>${(r.git_sha || "").slice(0, 10)}</code></td>
+          <td>${escapeHtml(r._project)}</td>
+          <td><span class="badge ${escapeHtml(r.status)}">${escapeHtml(r.status)}</span></td>
+          <td><code>${escapeHtml((r.git_sha || "").slice(0, 10))}</code></td>
           <td>${r.started_at || r.created_at ? `<time data-ts="${r.started_at || r.created_at}">${r.started_at || r.created_at}</time>` : ""}</td>
-          <td><a href="/analysis">Monitor</a></td>
+          <td><a href="/analysis" data-i18n="Monitor">${MnemosUI.t("Monitor")}</a></td>
         </tr>`;
       }
       html += "</tbody></table>";
@@ -330,12 +335,12 @@ async function loadReady() {
     if (r.ok) {
       el.textContent = "✓";
       el.className = "big ok";
-      det.textContent = "DB · Redis · worker OK";
+      det.textContent = MnemosUI.t("DB · Redis · worker OK");
     } else {
       el.textContent = "!";
       el.className = "big fail";
       const bad = Object.entries(body.checks || {}).filter(([, v]) => !v.ok).map(([k]) => k);
-      det.textContent = "degraded: " + bad.join(", ");
+      det.textContent = MnemosUI.t("degraded:") + " " + bad.join(", ");
     }
   } catch {
     document.getElementById("stat-ready").textContent = "?";

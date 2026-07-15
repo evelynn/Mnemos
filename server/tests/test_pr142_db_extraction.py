@@ -85,10 +85,12 @@ def test_to_envelopes_db_mode_emits_data_entities_and_fk_edges():
     # DataEntity is what the live_schema/data_access verbs emit, so the
     # standard ingest accepts it.
     assert "data_entity" in _VERB_ACCEPT["live_schema"]
-    cust = next(e for e in ents if e["data"]["id"] == "data:public.customers")
+    cust = next(e for e in ents if e["data"]["name"] == "customers")
+    assert cust["data"]["id"].startswith("agent-data:sql:")
+    assert cust["data"]["id"] != "data:public.customers"
     assert cust["data"]["is_sensitive"] is True
     assert cust["data"]["columns"] and cust["data"]["certainty"] == "inferred"
     # only the FK whose endpoints both exist survives
     assert len(edges) == 1
     assert edges[0]["data"]["kind"] == "REFERENCES"
-    assert edges[0]["data"]["target_id"] == "data:public.customers"
+    assert edges[0]["data"]["target_id"] == cust["data"]["id"]

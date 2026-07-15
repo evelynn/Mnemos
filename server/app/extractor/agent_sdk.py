@@ -22,12 +22,24 @@ even if the SDK is installed — useful in air-gapped envs.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from typing import Any
 
+from app.extractor.packing import EvidencePromptTooLarge, serialize_evidence
+from app.extractor.schema import (
+    ExtractorSchemaError,
+    normalize_extractor_payload,
+    parse_json_object,
+)
+
 log = logging.getLogger(__name__)
+
+# The canonical summary schema is intentionally concise (direct Anthropic is
+# capped at 1,024 output tokens).  Retaining up to one million streamed chars
+# on the subscription path only permits a runaway response to consume memory
+# and time before validation rejects it.
+MAX_AGENT_SUMMARY_OUTPUT_CHARS = 64 * 1024
 
 
 def is_agent_sdk_available() -> bool:
@@ -49,7 +61,7 @@ async def summarize_via_agent_sdk(
     target_id: str,
     evidence: list[dict[str, Any]],
     system_prompt: str | None = None,
-    max_evidence_chars: int = 6000,
+    max_evidence_chars: int = 16000,
     timeout_s: int = 60,
 ) -> dict[str, Any] | None:
     """One-shot Claude call via the local Claude Code subscription.
@@ -76,7 +88,11 @@ async def summarize_via_agent_sdk(
     except ImportError:
         return None
 
-    prompt = _build_prompt(level, target_id, evidence, max_evidence_chars)
+    try:
+        prompt = _build_prompt(level, target_id, evidence, max_evidence_chars)
+    except (EvidencePromptTooLarge, ValueError):
+        log.warning("agent_sdk: evidence exceeds complete-JSON prompt budget")
+        return None
     sys_p = system_prompt or _DEFAULT_SYSTEM
     opts = ClaudeAgentOptions(
         allowed_tools=[],
@@ -89,14 +105,19 @@ async def summarize_via_agent_sdk(
     )
 
     collected_text: list[str] = []
+    collected_chars = 0
     is_error = False
     try:
         import asyncio
         async def _drain():
+            nonlocal collected_chars
             async for msg in query(prompt=prompt, options=opts):
                 if isinstance(msg, AssistantMessage):
                     for block in msg.content:
                         if isinstance(block, TextBlock):
+                            collected_chars += len(block.text)
+                            if collected_chars > MAX_AGENT_SUMMARY_OUTPUT_CHARS:
+                                raise ValueError("agent_sdk_output_too_large")
                             collected_text.append(block.text)
                 elif isinstance(msg, ResultMessage):
                     nonlocal_marker = msg.is_error
@@ -107,14 +128,23 @@ async def summarize_via_agent_sdk(
         log.warning("agent_sdk: timed out after %ds", timeout_s)
         return None
     except Exception as exc:  # noqa: BLE001
-        log.warning("agent_sdk: %s: %s", exc.__class__.__name__, exc)
+        log.warning("agent_sdk: %s", type(exc).__name__)
         return None
 
     if is_error or not collected_text:
         return None
 
     text = "\n".join(collected_text)
-    return _parse_json_response(text)
+    parsed = _parse_json_response(text)
+    if parsed is None:
+        return None
+    try:
+        return normalize_extractor_payload(parsed)
+    except ExtractorSchemaError as exc:
+        # Diagnostics contain paths and type/length descriptions, never the
+        # raw response (which may include source or secrets).
+        log.warning("agent_sdk: schema rejected: %s", exc)
+        return None
 
 
 _DEFAULT_SYSTEM = (
@@ -124,18 +154,22 @@ _DEFAULT_SYSTEM = (
     "\"claims\": [{\"claim\": string, \"evidence\": [{\"kind\": "
     "\"node\"|\"edge\", \"node_id\"|\"edge_id\": string, "
     "\"certainty\": \"verified\"|\"asserted\"|\"inferred\"}]}], "
-    "\"open_questions\": [string]}. Never invent evidence IDs — "
-    "only cite ids that appear in the input evidence."
+    "\"open_questions\": [string]}. Every claim must cite at least "
+    "one input node or edge. Never invent evidence IDs — only cite ids "
+    "from top-level node_id/edge_id fields in the supplied evidence rows. "
+    "IDs inside prose or preview text are not evidence. Keep the result "
+    "concise; do not paste source code into summary fields."
 )
 
 
 def _build_prompt(level: int, target_id: str, evidence: list[dict[str, Any]],
                   max_chars: int) -> str:
-    ev_text = json.dumps(evidence, default=str)[:max_chars]
+    ev_text = serialize_evidence(evidence, max_chars=max_chars)
     return (
         f"L{level} summarisation target: {target_id}\n"
-        f"Graph evidence (truncated to {max_chars} chars):\n"
+        f"Graph evidence (complete JSON, max {max_chars} chars):\n"
         f"{ev_text}\n\n"
+        "Cite only top-level node_id/edge_id fields from those rows. "
         "Return strict JSON only."
     )
 
@@ -147,30 +181,7 @@ def _parse_json_response(text: str) -> dict[str, Any] | None:
     - Leading or trailing prose
     - Trailing comma / minor JSON errors → None
     """
-    t = text.strip()
-    # Strip markdown fences if present.
-    if t.startswith("```"):
-        lines = t.splitlines()
-        # drop the first ``` line and any trailing ```
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        t = "\n".join(lines).strip()
-    # If there's leading prose, find the first { and try from there.
-    if not t.startswith("{"):
-        i = t.find("{")
-        if i < 0:
-            return None
-        t = t[i:]
-    # Trim trailing junk after the last }.
-    last = t.rfind("}")
-    if last >= 0:
-        t = t[:last + 1]
     try:
-        parsed = json.loads(t)
-        if not isinstance(parsed, dict):
-            return None
-        return parsed
-    except json.JSONDecodeError:
+        return parse_json_object(text)
+    except ExtractorSchemaError:
         return None

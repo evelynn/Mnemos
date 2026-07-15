@@ -36,8 +36,23 @@ def test_inrepo_script_gated_by_flag(monkeypatch):
     monkeypatch.setenv("MNEMOS_INREPO_ANALYZERS", "1")
     p = inrepo_script("ggoss-py")
     assert p is not None and p.name == "ggoss_py.py" and p.exists()
-    # only the pure-Python analyzer has an in-repo entrypoint
-    assert inrepo_script("ggoss-ts") is None
+    # ggoss-ts also has an in-repo entrypoint (PR-181), gated on ``node``
+    # being installed since it runs under node, not Python.
+    import shutil
+
+    ts = inrepo_script("ggoss-ts")
+    # PR-197 — ts inrepo now also requires its ``typescript`` npm dependency
+    # (node_modules built), not just ``node`` on PATH.
+    from pathlib import Path as _P
+    _ts_pkg = (
+        _P(__file__).resolve().parents[2]
+        / "analyzers" / "ggoss-ts" / "node_modules" / "typescript"
+    ).exists()
+    if shutil.which("node") and _ts_pkg:
+        assert ts is not None and ts.name == "index.mjs" and ts.exists()
+    else:
+        assert ts is None
+    # analyzers with no in-repo source stay on the Claude fallback path.
     assert inrepo_script("ggoss-csharp") is None
 
 
@@ -52,7 +67,8 @@ def test_analyzer_available_uses_inrepo_when_flagged(_flag_on):
     # python must not fire in the basic config.
     assert reg.analyzer_available("python") is True
     # languages with no in-repo entrypoint stay on the Claude fallback path
-    assert reg.analyzer_available("cpp") is False
+    # (cpp→PR-191, ruby→PR-195 now have analyzers; scala remains uncovered)
+    assert reg.analyzer_available("scala") is False
     importlib.reload(reg)  # restore module state for other tests
 
 

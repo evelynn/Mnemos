@@ -82,6 +82,32 @@ _ANALYZERS: dict[str, dict[str, Any]] = {
         "verb": "inventory",
         "kinds": {"class", "method"},
     },
+    # PR-191/192/194 — stdlib in-repo analyzers. Same symbols+calls surface
+    # as py/ts so cross-language accuracy stays comparable.
+    "cpp": {
+        "binary": "ggoss-cpp",
+        "verb": "symbols",
+        "kinds": {"function", "struct", "enum", "union", "class", "macro"},
+    },
+    "java": {
+        "binary": "ggoss-java",
+        "verb": "symbols",
+        "kinds": {"class", "interface", "enum", "record",
+                  "annotation_type", "method"},
+    },
+    "kotlin": {
+        "binary": "ggoss-kotlin",
+        "verb": "symbols",
+        "kinds": {"class", "interface", "object", "enum",
+                  "annotation_class", "function"},
+    },
+    # PR-195 — tree-sitter analyzer, measured per-language (Go here). The
+    # binary is language-generic; the fixture picks the language by extension.
+    "go": {
+        "binary": "ggoss-treesitter",
+        "verb": "symbols",
+        "kinds": {"function", "method", "type", "struct", "enum", "interface"},
+    },
 }
 
 # Pass/fail floor. An accuracy regression below these in CI is a
@@ -256,12 +282,21 @@ def run_analyzer(
     # `dotnet publish` to /tmp/ggoss-csharp-out). The Dockerfile does
     # the same; this lets fixture measurement skip the docker layer.
     fallback_cs_dll = Path("/tmp/ggoss-csharp-out/ggoss-csharp.dll")
+    # PR-191/192/194 — the stdlib in-repo analyzers run as
+    # ``python analyzers/<binary>/src/<binary_underscored>.py`` (no PATH
+    # binary, no docker build needed).
+    inrepo_script = (
+        _ROOT.parent.parent / "analyzers" / binary / "src"
+        / f"{binary.replace('-', '_')}.py"
+    )
     if shutil.which(binary) is None and binary == "ggoss-ts" and fallback_node.is_file():
         cmd_base = ["node", str(fallback_node)]
     elif shutil.which(binary) is None and binary == "ggoss-py" and fallback_py.is_file():
         cmd_base = [sys.executable, str(fallback_py)]
     elif shutil.which(binary) is None and binary == "ggoss-csharp" and fallback_cs_dll.is_file():
         cmd_base = ["dotnet", str(fallback_cs_dll)]
+    elif shutil.which(binary) is None and inrepo_script.is_file():
+        cmd_base = [sys.executable, str(inrepo_script)]
     elif shutil.which(binary) is None:
         raise FileNotFoundError(
             f"analyzer binary {binary!r} not on PATH "

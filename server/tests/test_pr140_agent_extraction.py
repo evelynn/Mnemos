@@ -22,14 +22,16 @@ os.environ.setdefault("SESSION_COOKIE_SECURE", "false")
 os.environ.setdefault("MNEMOS_SKIP_STARTUP_VERIFY", "1")
 
 
-def test_cpp_has_no_deterministic_analyzer_but_is_agent_eligible():
-    """The wiring decision: C++ has no ggoss binary, so run_ingest must
-    route it to the agent-extraction stage."""
+def test_uncovered_language_routes_to_agent_extraction():
+    """The wiring decision: a language with no ggoss binary must be routed
+    by run_ingest to the agent-extraction stage. Was C++ until PR-191 gave
+    it a deterministic analyzer; PR-195/199 covered the tree-sitter languages,
+    so generic SQL text is the remaining uncovered example."""
     from app.analyzers.registry import binary_for
     from app.extractor.agent_extract import AGENT_LANGUAGE_EXTENSIONS
 
-    assert binary_for("cpp") is None, "cpp must have no deterministic analyzer"
-    assert "cpp" in AGENT_LANGUAGE_EXTENSIONS, "cpp must be agent-extraction eligible"
+    assert binary_for("sql") is None, "generic SQL must have no deterministic analyzer"
+    assert "sql" in AGENT_LANGUAGE_EXTENSIONS, "SQL must be agent-extraction eligible"
     # A covered language must NOT be double-handled by the agent stage's
     # wiring (it still may appear in the map, but run_ingest only calls the
     # agent stage when binary_for(lang) is None).
@@ -82,9 +84,39 @@ def test_to_envelopes_shape_certainty_and_dangling_edge_drop():
     assert len(symbols) == 2, "id-less symbol must be dropped"
     assert all(e["data"]["certainty"] == "inferred" for e in envs), "LLM-derived = inferred"
     assert all(e["data"].get("extractor") == "claude_code" for e in symbols)
+    emitted_ids = {e["data"]["id"] for e in symbols}
+    assert all(item.startswith("agent-symbol:cpp:") for item in emitted_ids)
+    assert not emitted_ids.intersection({"cpp:A.cpp::Foo", "cpp:A.cpp::Foo::bar"})
     # dangling edge (target not among emitted symbols) is dropped
     assert len(edges) == 1
-    assert edges[0]["data"]["target_id"] == "cpp:A.cpp::Foo::bar"
+    assert edges[0]["data"]["source_id"] in emitted_ids
+    assert edges[0]["data"]["target_id"] in emitted_ids
+
+
+def test_model_ids_cannot_escape_agent_namespace_or_change_stable_identity():
+    """Source-prompt output may name a deterministic fact but cannot own it."""
+    from app.extractor.agent_extract import to_envelopes
+
+    hostile = {
+        "symbols": [
+            {
+                "id": "py:victim.py:secret@1",
+                "name": "safe_name",
+                "qualified_name": "safe_name",
+                "kind": "function",
+                "line": 4,
+            }
+        ],
+        "edges": [],
+    }
+    first = to_envelopes("python", "safe.py", hostile)
+    second = to_envelopes("python", "safe.py", hostile)
+    symbol_id = first[0]["data"]["id"]
+
+    assert symbol_id.startswith("agent-symbol:python:")
+    assert symbol_id != "py:victim.py:secret@1"
+    assert second[0]["data"]["id"] == symbol_id
+    assert first[0]["source_name"] == "agent:python"
 
 
 def test_record_payload_accepts_agent_envelopes(tmp_path):

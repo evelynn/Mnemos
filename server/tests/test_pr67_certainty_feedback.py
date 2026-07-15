@@ -100,7 +100,10 @@ def test_component_map_surfaces_confirmation_and_edge_id():
     specific edge)."""
     body = _read(_APP / "api" / "analysis.py")
     idx = body.find("async def graph_component_map(")
-    slab = body[idx:idx + 2600]
+    # Scope to the function body (up to the next endpoint) so an edit
+    # earlier in the function can't push these past a fixed-size window.
+    nxt = body.find("async def ", idx + 1)
+    slab = body[idx:nxt if nxt != -1 else len(body)]
     assert '"confirmed": _confirmation_action(' in slab
     assert '"id": str(e.id)' in slab
 

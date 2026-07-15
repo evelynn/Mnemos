@@ -153,11 +153,11 @@ def test_receiver_calls_buffer_observations():
     assert "Week-6 merge v2" not in body
 
 
-def test_receiver_resolves_org_from_header():
+def test_receiver_resolves_org_from_token_and_only_confirms_header():
     body = (_ROOT / "app" / "runtime_receiver" / "router.py").read_text("utf-8")
-    # Org context arrives via the documented custom header — OTLP
-    # itself doesn't carry tenant info.
-    assert "X-Mnemos-Organization-Id" in body or "x_mnemos_organization_id" in body
+    assert "MNEMOS_OTLP_ORG_TOKENS" in body
+    assert "otlp_organization_mismatch" in body
+    assert "return bound_org" in body
 
 
 def test_receiver_handles_buffer_errors_gracefully():
@@ -170,11 +170,11 @@ def test_receiver_handles_buffer_errors_gracefully():
 def test_jobs_calls_reconcile_after_findings_rebuild():
     body = (_ROOT / "app" / "orchestrator" / "jobs.py").read_text("utf-8")
     assert "reconcile_observations" in body
-    # Reconcile runs *after* rebuild_findings — otherwise the
-    # freshly-built edge set isn't visible.
+    # Reconcile runs *before* rebuild_findings so runtime-confirmed overlay
+    # evidence is visible to the freshly-built finding set.
     rebuild_idx = body.find("rebuild_findings(session, project_id)")
     reconcile_idx = body.find("reconcile_observations(")
-    assert 0 < rebuild_idx < reconcile_idx
+    assert 0 < reconcile_idx < rebuild_idx
 
 
 def test_runtime_observation_model_has_required_columns():
@@ -249,12 +249,65 @@ async def test_reconcile_matches_via_contract_node_id(db_session):
     from sqlalchemy import select
 
     from app.merge.runtime import reconcile_observations
-    from app.models.graph import Edge
+    from app.models.graph import AnalysisRun, Edge, GraphHead
+    from app.models.organization import Organization
+    from app.models.overlays import GraphEdgeRuntimeOverlay
+    from app.models.projects import Project
     from app.models.runtime import RuntimeObservation
+    from app.testing.graph_publication import published_run_fields
 
     org = _uuid.uuid4()
     proj = _uuid.uuid4()
     now = _dt.now(tz=_tz.utc)
+
+    # Reconciliation is a durable overlay write: it requires both the tenant
+    # owner and a ready, receipt-backed graph publication.  Seed that canonical
+    # provenance explicitly so real PostgreSQL exercises the same contract as
+    # production instead of relying on SQLite's historically loose fixtures.
+    run_id = _uuid.uuid4()
+    db_session.add(
+        Organization(
+            id=org,
+            slug=f"otlp-contract-{org.hex}",
+            display_name="OTLP contract fixture",
+        )
+    )
+    db_session.add(
+        Project(
+            id=proj,
+            name="otlp-contract-fixture",
+            gitlab_project_id=proj.int % 2_000_000_000,
+            gitlab_url="https://example.invalid/orders.git",
+            default_branch="main",
+            languages=["Python"],
+            organization_id=org,
+        )
+    )
+    await db_session.flush()
+
+    db_session.add(
+        AnalysisRun(
+            id=run_id,
+            project_id=proj,
+            status="completed",
+            triggered_by="test:otlp-contract-node-id",
+            git_sha="a" * 40,
+            scope="full",
+            started_at=now,
+            completed_at=now,
+            **published_run_fields(generation=1, published_at=now),
+        )
+    )
+    await db_session.flush()
+    db_session.add(
+        GraphHead(
+            project_id=proj,
+            current_run_id=run_id,
+            generation=1,
+            state="ready",
+            published_at=now,
+        )
+    )
 
     # EXPOSES edge whose route lives ONLY on the target contract node id
     # (empty edge.data — exactly what the static analyzers emit).
@@ -262,13 +315,13 @@ async def test_reconcile_matches_via_contract_node_id(db_session):
         id=_uuid.uuid4(), project_id=proj, valid_from=now,
         source_id="sym:orders-api:CreateOrder",
         target_id="contract:POST /orders", kind="EXPOSES",
-        certainty="verified", data={}, created_by="seed",
+        certainty="verified", data={}, created_by=["seed"],
     )
     decoy = Edge(
         id=_uuid.uuid4(), project_id=proj, valid_from=now,
         source_id="sym:orders-api:GetOrder",
         target_id="contract:GET /orders/{id}", kind="EXPOSES",
-        certainty="verified", data={}, created_by="seed",
+        certainty="verified", data={}, created_by=["seed"],
     )
     obs = RuntimeObservation(
         organization_id=org, project_id=None, service="orders-api",
@@ -282,6 +335,7 @@ async def test_reconcile_matches_via_contract_node_id(db_session):
     )
     assert res["matched"] == 1
     assert res["unmatched"] == 0
+    assert res["new_hits"] == 3
 
     refreshed = (
         await db_session.execute(select(Edge).where(Edge.id == hit.id))
@@ -290,11 +344,36 @@ async def test_reconcile_matches_via_contract_node_id(db_session):
     assert refreshed.data.get("hit_count") == 3
     assert refreshed.data.get("last_seen_at")
 
+    runtime_overlay = (
+        await db_session.execute(
+            select(GraphEdgeRuntimeOverlay).where(
+                GraphEdgeRuntimeOverlay.project_id == proj,
+                GraphEdgeRuntimeOverlay.source_id == hit.source_id,
+                GraphEdgeRuntimeOverlay.target_id == hit.target_id,
+                GraphEdgeRuntimeOverlay.kind == hit.kind,
+            )
+        )
+    ).scalar_one()
+    assert runtime_overlay.hit_count == 3
+    head = await db_session.get(GraphHead, proj)
+    assert head is not None and head.overlay_generation == 1
+
     # The decoy route (/orders/{id}) must NOT be marked exercised.
     decoy_refreshed = (
         await db_session.execute(select(Edge).where(Edge.id == decoy.id))
     ).scalar_one()
     assert "exercised" not in (decoy_refreshed.data or {})
+    decoy_overlay = (
+        await db_session.execute(
+            select(GraphEdgeRuntimeOverlay).where(
+                GraphEdgeRuntimeOverlay.project_id == proj,
+                GraphEdgeRuntimeOverlay.source_id == decoy.source_id,
+                GraphEdgeRuntimeOverlay.target_id == decoy.target_id,
+                GraphEdgeRuntimeOverlay.kind == decoy.kind,
+            )
+        )
+    ).scalar_one_or_none()
+    assert decoy_overlay is None
 
     # The observation is pinned to the project once reconciled.
     obs_refreshed = (

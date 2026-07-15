@@ -22,10 +22,15 @@ def _read() -> str:
     return _QUERIES.read_text(encoding="utf-8")
 
 
+def _async_function(body: str, name: str) -> str:
+    start = body.index(f"async def {name}(")
+    end = body.find("\nasync def ", start + 1)
+    return body[start:] if end < 0 else body[start:end]
+
+
 def test_runtime_path_frequency_is_real():
     body = _read()
-    idx = body.find("async def find_runtime_path(")
-    slab = body[idx:idx + 3000]
+    slab = _async_function(body, "find_runtime_path")
     assert "hit_count" in slab
     # The "frequency: 1" stub is gone.
     assert "min(hit_counts)" in slab
@@ -34,7 +39,6 @@ def test_runtime_path_frequency_is_real():
 
 def test_module_summary_certainty_breakdown():
     body = _read()
-    idx = body.find("async def get_module_summary(")
-    slab = body[idx:idx + 1800]
+    slab = _async_function(body, "get_module_summary")
     assert '"certainty_breakdown"' in slab
     assert '"verified"' in slab and '"asserted"' in slab and '"inferred"' in slab

@@ -6,14 +6,15 @@ from pydantic import BaseModel, Field, HttpUrl, field_validator
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.analyzers.registry import ANALYZER_LANGUAGES
+from app.analyzers.registry import SOURCE_ANALYZER_LANGUAGES
 from app.extractor.agent_extract import AGENT_LANGUAGE_EXTENSIONS
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
 from app.auth.org_scope import require_project_org
-from app.auth.rbac import require_admin
+from app.auth.rbac import require_admin, require_operator
 from app.db import get_session
+from app.graph_publication import bootstrap_graph_head
 from app.models.auth import User
 from app.models.projects import Project
 
@@ -23,7 +24,7 @@ router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
 # OR it is eligible for Claude-Code agent extraction (PR-140). Hardcoding
 # {csharp, typescript} previously made it impossible to even create a
 # project for a C++ / Go / Python / Oracle codebase.
-SUPPORTED_LANGUAGES = ANALYZER_LANGUAGES | frozenset(AGENT_LANGUAGE_EXTENSIONS)
+SUPPORTED_LANGUAGES = SOURCE_ANALYZER_LANGUAGES | frozenset(AGENT_LANGUAGE_EXTENSIONS)
 
 
 def _validate_languages(value: list[str] | None) -> list[str] | None:
@@ -51,7 +52,7 @@ class ProjectCreate(BaseModel):
 class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1)
     default_branch: str | None = Field(default=None, min_length=1)
-    languages: list[str] | None = None
+    languages: list[str] | None = Field(default=None, min_length=1)
 
     _check_langs = field_validator("languages")(_validate_languages)
 
@@ -84,25 +85,34 @@ def _to_out(p: Project) -> ProjectOut:
 async def list_projects(
     user: CurrentUser, db: AsyncSession = Depends(get_session)
 ) -> list[ProjectOut]:
-    # Scope the list to the caller's organisation. Pre-migration rows
-    # (organization_id NULL) remain visible so single-tenant deployments
-    # keep working without any manual migration step.
-    stmt = select(Project).order_by(Project.created_at.desc())
-    if user.organization_id is not None:
-        stmt = stmt.where(
-            (Project.organization_id == user.organization_id)
-            | (Project.organization_id.is_(None))
-        )
+    # NULL ownership is fail-closed: org deletion can create org-less users
+    # and projects, so treating either as global would collapse tenancy.
+    if user.organization_id is None:
+        return []
+    stmt = (
+        select(Project)
+        .where(Project.organization_id == user.organization_id)
+        .order_by(Project.created_at.desc())
+    )
     result = await db.execute(stmt)
     return [_to_out(p) for p in result.scalars().all()]
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_operator)],
+)
 async def create_project(
     body: ProjectCreate,
     user: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> ProjectOut:
+    if user.organization_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="organization_required",
+        )
     project = Project(
         name=body.name,
         gitlab_project_id=body.gitlab_project_id,
@@ -114,6 +124,8 @@ async def create_project(
         organization_id=user.organization_id,
     )
     db.add(project)
+    await db.flush()
+    await bootstrap_graph_head(db, project_id=project.id)
     await db.commit()
     await db.refresh(project)
     await audit_record(
@@ -140,7 +152,13 @@ async def get_project(
     return _to_out(project)
 
 
-@router.patch("/{project_id}", dependencies=[Depends(require_project_org())])
+@router.patch(
+    "/{project_id}",
+    dependencies=[
+        Depends(require_project_org()),
+        Depends(require_operator),
+    ],
+)
 async def update_project(
     project_id: uuid.UUID,
     body: ProjectUpdate,

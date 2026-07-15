@@ -4,36 +4,37 @@
 <header class="page-head"><h1 data-i18n="GDPR tools">GDPR tools</h1></header>
 <section class="hint">
   <p class="muted">
-    Supervisory-authority-ready right-to-access and right-to-erasure. Every
+    <span data-i18n="Supervisory-authority-ready right-to-access and right-to-erasure. Every action emits a distinct audit entry so the forensic chain survives even after the subject user row is removed.">Supervisory-authority-ready right-to-access and right-to-erasure. Every
     action emits a distinct audit entry (<code>gdpr.export</code> /
     <code>gdpr.erase</code>) so the forensic chain survives even after
-    the subject user row is removed.
+    the subject user row is removed.</span>
   </p>
 </section>
 
 <section>
-  <h2>Export user data</h2>
+  <h2 data-i18n="Export user data">Export user data</h2>
   <form onsubmit="return doExport(event)">
-    <label>User ID<input type="text" name="user_id" required placeholder="uuid" /></label>
-    <button type="submit" class="primary">Export as JSON</button>
+    <label><span data-i18n="User ID">User ID</span><input type="text" name="user_id" required placeholder="uuid" data-i18n-placeholder="uuid" /></label>
+    <button type="submit" class="primary" data-i18n="Export as JSON">Export as JSON</button>
   </form>
   <details>
-    <summary>Response</summary>
+    <summary data-i18n="Response">Response</summary>
+    <p class="muted"><small data-i18n="Raw export data (JSON)">Raw export data (JSON)</small></p>
     <pre id="export-result" class="muted" style="max-height: 24rem; overflow: auto;"></pre>
   </details>
 </section>
 
 <section>
-  <h2>Erase user</h2>
+  <h2 data-i18n="Erase user">Erase user</h2>
   <p class="muted">
-    Deletes the user + API keys, rewrites audit entries so the actor
+    <span data-i18n="Deletes the user + API keys, rewrites audit entries so the actor field becomes redacted:&lt;uuid&gt;. You cannot delete yourself — an admin locking their own session mid-flight would be catastrophic.">Deletes the user + API keys, rewrites audit entries so the actor
     field becomes <code>redacted:&lt;uuid&gt;</code>. You cannot delete
     yourself — an admin locking their own session mid-flight would be
-    catastrophic.
+    catastrophic.</span>
   </p>
   <form onsubmit="return doErase(event)">
-    <label>User ID<input type="text" name="user_id" required placeholder="uuid" /></label>
-    <button type="submit" class="danger">Erase</button>
+    <label><span data-i18n="User ID">User ID</span><input type="text" name="user_id" required placeholder="uuid" data-i18n-placeholder="uuid" /></label>
+    <button type="submit" class="danger" data-i18n="Erase">Erase</button>
   </form>
   <pre id="erase-result" class="muted"></pre>
 </section>
@@ -42,7 +43,7 @@
 async function doExport(ev) {
   ev.preventDefault();
   const uid = new FormData(ev.target).get("user_id").trim();
-  const r = await fetch(`/api/v1/gdpr/users/${uid}/export`);
+  const r = await fetch(`/api/v1/gdpr/users/${escapeHtml(uid)}/export`);
   const out = document.getElementById("export-result");
   if (!r.ok) {
     out.textContent = "";
@@ -63,7 +64,7 @@ async function doExport(ev) {
 async function doErase(ev) {
   ev.preventDefault();
   const uid = new FormData(ev.target).get("user_id").trim();
-  if (!confirm(`Erase user ${uid}? This cannot be undone.`)) return false;
+  if (!confirm(MnemosUI.t("Erase user $1? This cannot be undone.", {1: uid}))) return false;
   const r = await fetch(`/api/v1/gdpr/users/${uid}`, {method: "DELETE"});
   if (!r.ok) {
     await MnemosUI.showError(MnemosUI.t("Erase failed"), r);

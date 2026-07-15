@@ -46,6 +46,19 @@ from app.models import plans as _plans  # noqa: E402,F401
 from app.models import projects as _projects  # noqa: E402,F401
 from app.models.base import Base  # noqa: E402
 
+_OTLP_ORG_ID = _uuid.UUID("11111111-2222-4333-8444-555555555555")
+_OTLP_TOKEN = "test-bearer-token-with-at-least-32-characters"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_otlp_env(monkeypatch):
+    for name in (
+        "MNEMOS_OTLP_ORG_TOKENS",
+        "MNEMOS_OTLP_TOKEN",
+        "MNEMOS_OTLP_ORGANIZATION_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
 
 @pytest_asyncio.fixture
 async def session() -> AsyncIterator[AsyncSession]:
@@ -54,6 +67,14 @@ async def session() -> AsyncIterator[AsyncSession]:
         await c.run_sync(Base.metadata.create_all)
     Sess = sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
     async with Sess() as s:
+        s.add(
+            _org.Organization(
+                id=_OTLP_ORG_ID,
+                slug="otlp-test-org",
+                display_name="OTLP Test Org",
+            )
+        )
+        await s.commit()
         yield s
     await eng.dispose()
 
@@ -105,7 +126,9 @@ def test_bearer_check_rejects_when_token_unset(monkeypatch):
     isn't configured. An open default would let any client poison
     runtime_observations."""
     from app.runtime_receiver.router import _check_otlp_bearer
+    monkeypatch.delenv("MNEMOS_OTLP_ORG_TOKENS", raising=False)
     monkeypatch.delenv("MNEMOS_OTLP_TOKEN", raising=False)
+    monkeypatch.delenv("MNEMOS_OTLP_ORGANIZATION_ID", raising=False)
     with pytest.raises(HTTPException) as ei:
         _check_otlp_bearer("Bearer anything")
     assert ei.value.status_code in (401, 403, 503)
@@ -113,7 +136,8 @@ def test_bearer_check_rejects_when_token_unset(monkeypatch):
 
 def test_bearer_check_rejects_wrong_token(monkeypatch):
     from app.runtime_receiver.router import _check_otlp_bearer
-    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", "right-token")
+    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", _OTLP_TOKEN)
+    monkeypatch.setenv("MNEMOS_OTLP_ORGANIZATION_ID", str(_OTLP_ORG_ID))
     with pytest.raises(HTTPException) as ei:
         _check_otlp_bearer("Bearer wrong-token")
     assert ei.value.status_code in (401, 403)
@@ -121,14 +145,16 @@ def test_bearer_check_rejects_wrong_token(monkeypatch):
 
 def test_bearer_check_accepts_correct_token(monkeypatch):
     from app.runtime_receiver.router import _check_otlp_bearer
-    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", "right-token")
+    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", _OTLP_TOKEN)
+    monkeypatch.setenv("MNEMOS_OTLP_ORGANIZATION_ID", str(_OTLP_ORG_ID))
     # Must not raise.
-    _check_otlp_bearer("Bearer right-token")
+    assert _check_otlp_bearer(f"Bearer {_OTLP_TOKEN}") == _OTLP_ORG_ID
 
 
 def test_bearer_check_rejects_missing_header(monkeypatch):
     from app.runtime_receiver.router import _check_otlp_bearer
-    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", "right-token")
+    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", _OTLP_TOKEN)
+    monkeypatch.setenv("MNEMOS_OTLP_ORGANIZATION_ID", str(_OTLP_ORG_ID))
     with pytest.raises(HTTPException):
         _check_otlp_bearer(None)
 
@@ -206,7 +232,8 @@ async def test_receive_traces_returns_accepted_count(session, monkeypatch):
     AND that accepted count matches input span count."""
     from app.runtime_receiver.router import receive_traces
 
-    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", "test-bearer")
+    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", _OTLP_TOKEN)
+    monkeypatch.setenv("MNEMOS_OTLP_ORGANIZATION_ID", str(_OTLP_ORG_ID))
     payload = _otlp_payload(spans=[_span(), _span(name="GET /x"), _span(name="GET /y")])
 
     class FakeReq:
@@ -216,12 +243,12 @@ async def test_receive_traces_returns_accepted_count(session, monkeypatch):
     resp = await receive_traces(
         request=FakeReq(),
         db=session,
-        authorization="Bearer test-bearer",
+        authorization=f"Bearer {_OTLP_TOKEN}",
         x_mnemos_organization_id=None,
     )
     body = json.loads(resp.body)
     assert body["accepted"] == 3
-    # No org header → not buffered, but still accepted.
+    # No org header is needed: the token itself owns the organization.
     assert "buffered" in body
 
 
@@ -229,7 +256,8 @@ async def test_receive_traces_returns_accepted_count(session, monkeypatch):
 async def test_receive_traces_handles_empty_resource_spans(session, monkeypatch):
     from app.runtime_receiver.router import receive_traces
 
-    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", "test-bearer")
+    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", _OTLP_TOKEN)
+    monkeypatch.setenv("MNEMOS_OTLP_ORGANIZATION_ID", str(_OTLP_ORG_ID))
 
     class FakeReq:
         async def json(self):
@@ -238,7 +266,7 @@ async def test_receive_traces_handles_empty_resource_spans(session, monkeypatch)
     resp = await receive_traces(
         request=FakeReq(),
         db=session,
-        authorization="Bearer test-bearer",
+        authorization=f"Bearer {_OTLP_TOKEN}",
         x_mnemos_organization_id=None,
     )
     body = json.loads(resp.body)
@@ -249,7 +277,8 @@ async def test_receive_traces_handles_empty_resource_spans(session, monkeypatch)
 async def test_receive_traces_rejects_missing_token(session, monkeypatch):
     from app.runtime_receiver.router import receive_traces
 
-    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", "test-bearer")
+    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", _OTLP_TOKEN)
+    monkeypatch.setenv("MNEMOS_OTLP_ORGANIZATION_ID", str(_OTLP_ORG_ID))
 
     class FakeReq:
         async def json(self):
@@ -269,7 +298,8 @@ async def test_receive_traces_audits_each_post(session, monkeypatch):
     operators can reconcile span counts."""
     from app.runtime_receiver.router import receive_traces
 
-    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", "test-bearer")
+    monkeypatch.setenv("MNEMOS_OTLP_TOKEN", _OTLP_TOKEN)
+    monkeypatch.setenv("MNEMOS_OTLP_ORGANIZATION_ID", str(_OTLP_ORG_ID))
 
     class FakeReq:
         async def json(self):
@@ -289,7 +319,7 @@ async def test_receive_traces_audits_each_post(session, monkeypatch):
     with patch.object(receiver_mod, "audit_record", fake_record):
         await receive_traces(
             request=FakeReq(), db=session,
-            authorization="Bearer test-bearer",
+            authorization=f"Bearer {_OTLP_TOKEN}",
             x_mnemos_organization_id=None,
         )
 
@@ -297,3 +327,4 @@ async def test_receive_traces_audits_each_post(session, monkeypatch):
     assert any(a["action"] == "otlp.traces" for a in captured)
     last = captured[-1]
     assert last["details"]["spans"] == 1
+    assert last["details"]["organization_id"] == str(_OTLP_ORG_ID)

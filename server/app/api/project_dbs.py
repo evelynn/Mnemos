@@ -21,6 +21,7 @@ from app.db import get_session
 from app.models.auth import Secret, User
 from app.models.projects import ProjectDB
 from app.safety.crypto import decrypt
+from app.secret_scope import SecretScopeNotFound, resolve_project_secret
 
 router = APIRouter(
     prefix="/api/v1/projects/{project_id}/dbs",
@@ -89,7 +90,34 @@ def _to_out(row: ProjectDB) -> ProjectDBOut:
     )
 
 
-async def _resolve_conn_ref(db: AsyncSession, secret_id: uuid.UUID | None) -> str | None:
+async def _resolve_secret_in_project_org(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    secret_id: uuid.UUID,
+) -> Secret:
+    """Resolve a credential only when it belongs to the project's exact org.
+
+    Secret UUIDs are bearer-like references: accepting a UUID from another
+    tenant would let an admin make Mnemos decrypt and use that tenant's
+    database credential.  Missing projects/secrets, NULL legacy ownership,
+    and cross-org pairs deliberately collapse to the same 404 response.
+    """
+
+    try:
+        return await resolve_project_secret(
+            db,
+            project_id=project_id,
+            secret_id=secret_id,
+        )
+    except SecretScopeNotFound as exc:
+        raise HTTPException(status_code=404, detail="secret_not_found") from exc
+
+
+async def _resolve_conn_ref(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    secret_id: uuid.UUID | None,
+) -> str | None:
     """Decrypt the linked Secret without ever holding the plaintext on the row.
 
     Returns ``None`` if no secret is wired up or decryption fails — the
@@ -98,11 +126,7 @@ async def _resolve_conn_ref(db: AsyncSession, secret_id: uuid.UUID | None) -> st
     """
     if secret_id is None:
         return None
-    secret = (
-        await db.execute(select(Secret).where(Secret.id == secret_id))
-    ).scalar_one_or_none()
-    if secret is None:
-        return None
+    secret = await _resolve_secret_in_project_org(db, project_id, secret_id)
     try:
         return decrypt(secret.ciphertext, secret.iv)
     except Exception:
@@ -110,10 +134,13 @@ async def _resolve_conn_ref(db: AsyncSession, secret_id: uuid.UUID | None) -> st
 
 
 async def _probe_or_412(
-    db: AsyncSession, kind: str, secret_id: uuid.UUID | None
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    kind: str,
+    secret_id: uuid.UUID | None,
 ) -> ProbeResult:
     """Run a read-only probe and translate any unsafe result into HTTP 412."""
-    conn = await _resolve_conn_ref(db, secret_id)
+    conn = await _resolve_conn_ref(db, project_id, secret_id)
     if conn is None:
         raise HTTPException(
             status_code=412,
@@ -157,7 +184,7 @@ async def create_project_db(
     # to the project DB) and refuses with 412 if write access cannot
     # be ruled out. A 24-hour cache window for the result is enforced
     # by the orchestrator, not here.
-    probe = await _probe_or_412(db, body.kind, body.secret_id)
+    probe = await _probe_or_412(db, project_id, body.kind, body.secret_id)
     row = ProjectDB(
         project_id=project_id,
         kind=body.kind,
@@ -215,7 +242,7 @@ async def reprobe_project_db(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="not_found")
-    conn = await _resolve_conn_ref(db, row.secret_id)
+    conn = await _resolve_conn_ref(db, project_id, row.secret_id)
     if conn is None:
         raise HTTPException(
             status_code=412,
@@ -276,6 +303,11 @@ async def update_project_db(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="not_found")
+    if body.secret_id is not None:
+        # Validate before assigning/persisting the bearer-like Secret UUID.
+        # This also prevents a legacy contaminated ProjectDB row from being
+        # re-bound to another tenant's credential.
+        await _resolve_secret_in_project_org(db, project_id, body.secret_id)
     changes: dict = {}
     for field_name in (
         "display_name",

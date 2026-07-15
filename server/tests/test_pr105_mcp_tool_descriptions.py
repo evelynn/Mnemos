@@ -37,6 +37,8 @@ def _body() -> str:
 # this test fails loudly so the PR author has to think about
 # whether the new tool gets a "Use when:" too.
 _TOOLS = [
+    "get_project_index",
+    "get_task_context_pack",
     "search_symbols",
     "get_symbol",
     "find_callers",

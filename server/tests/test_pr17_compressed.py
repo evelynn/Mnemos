@@ -80,7 +80,16 @@ def test_analysis_has_sse_status_badge():
 
 def test_analysis_has_onerror_handler():
     body = _read(_TPL / "analysis.html")
-    assert "_sse.onerror" in body
+    assert "source.onerror" in body
+
+
+def test_analysis_retry_lifecycle_is_generation_scoped():
+    body = _read(_TPL / "analysis.html")
+    assert "let _retryTimer" in body
+    assert "let _monitorGeneration" in body
+    assert "clearTimeout(_retryTimer)" in body
+    assert "generation !== _monitorGeneration" in body
+    assert "_activeRunId !== id" in body
     assert "_SSE_BACKOFF_MS" in body
 
 

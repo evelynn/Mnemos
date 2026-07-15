@@ -31,8 +31,8 @@ services:
 
   platform:
     build:
-      context: ./server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: server/Dockerfile
     container_name: mnemos-platform
     depends_on:
       postgres:
@@ -45,11 +45,22 @@ services:
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
       FERNET_KEY: ${FERNET_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SOURCE_MIRROR_ROOT: /var/lib/mnemos/repos
+      SOURCE_WORKTREE_ROOT: /var/lib/mnemos/worktrees
+      SOURCE_ALLOWED_ROOT: /work
+      SOURCE_PROJECT_ROOTS: ${SOURCE_PROJECT_ROOTS:-}
+      MNEMOS_OTLP_ORG_TOKENS: ${MNEMOS_OTLP_ORG_TOKENS:-}
+      MNEMOS_OTLP_TOKEN: ${MNEMOS_OTLP_TOKEN:-}
+      MNEMOS_OTLP_ORGANIZATION_ID: ${MNEMOS_OTLP_ORGANIZATION_ID:-}
+      MNEMOS_INREPO_ANALYZERS: "1"
+      MNEMOS_STALE_RUN_AFTER_SEC: ${MNEMOS_STALE_RUN_AFTER_SEC:-86400}
+      MNEMOS_SEEN_MEMORY_LIMIT: ${MNEMOS_SEEN_MEMORY_LIMIT:-100000}
     ports:
       - "${PLATFORM_PORT:-8080}:8080"
     volumes:
       - platform_data:/var/lib/mnemos
       - repos_data:/var/lib/mnemos/repos
+      - ${MNEMOS_SOURCE_ROOT:-.}:/work:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v1/health')"]
       interval: 10s
@@ -59,8 +70,8 @@ services:
 
   worker:
     build:
-      context: ./server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: server/Dockerfile
     container_name: mnemos-worker
     depends_on:
       postgres:
@@ -73,17 +84,22 @@ services:
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
       FERNET_KEY: ${FERNET_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SOURCE_MIRROR_ROOT: /var/lib/mnemos/repos
+      SOURCE_WORKTREE_ROOT: /var/lib/mnemos/worktrees
+      SOURCE_ALLOWED_ROOT: /work
+      SOURCE_PROJECT_ROOTS: ${SOURCE_PROJECT_ROOTS:-}
+      MNEMOS_INREPO_ANALYZERS: "1"
+      MNEMOS_STALE_RUN_AFTER_SEC: ${MNEMOS_STALE_RUN_AFTER_SEC:-86400}
+      MNEMOS_SEEN_MEMORY_LIMIT: ${MNEMOS_SEEN_MEMORY_LIMIT:-100000}
     command: ["python", "-m", "app.worker"]
     volumes:
       - platform_data:/var/lib/mnemos
       - repos_data:/var/lib/mnemos/repos
+      - ${MNEMOS_SOURCE_ROOT:-.}:/work:ro
 
-  # Analyzer build targets — ``docker compose --profile analyzers build``
-  # populates the five images the platform invokes via ``docker run``.
-  # Skipping the profile leaves the analyzer binaries absent on PATH;
-  # PR-98's runner now degrades gracefully (per-stage skip + audit) in
-  # that case instead of crashing, and /health/ready reports which
-  # binaries are missing (PR-99).
+  # Standalone analyzer images remain optional contract-test artifacts.  The
+  # normal platform/worker image above already contains the runnable in-repo
+  # analyzers; these profile services are not an execution path for the worker.
   analyzer-csharp:
     profiles: ["analyzers"]
     build:
@@ -108,6 +124,54 @@ services:
       context: ./analyzers/ggoss-py
       dockerfile: Dockerfile
     image: mnemos/ggoss-py:latest
+    entrypoint: ["true"]
+
+  # PR-191 — C/C++ analyzer. Pure stdlib (regex + brace scanner),
+  # zero third-party deps — same minimal shape as ggoss-py.
+  analyzer-cpp:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-cpp
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-cpp:latest
+    entrypoint: ["true"]
+
+  # PR-192 — Java analyzer. Pure stdlib (regex + brace scanner),
+  # zero third-party deps — same minimal shape as ggoss-py.
+  analyzer-java:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-java
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-java:latest
+    entrypoint: ["true"]
+
+  # PR-193 — Web (HTML/CSS) analyzer. Pure stdlib (regex), zero deps.
+  analyzer-web:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-web
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-web:latest
+    entrypoint: ["true"]
+
+  # PR-194 — Kotlin analyzer. Pure stdlib (regex + brace scanner), zero deps.
+  analyzer-kotlin:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-kotlin
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-kotlin:latest
+    entrypoint: ["true"]
+
+  # PR-195 — tree-sitter multi-language analyzer (Go/Rust/Ruby PoC).
+  # Has a dependency (tree-sitter-language-pack) — the opt-in breadth path.
+  analyzer-treesitter:
+    profiles: ["analyzers"]
+    build:
+      context: ./analyzers/ggoss-treesitter
+      dockerfile: Dockerfile
+    image: mnemos/ggoss-treesitter:latest
     entrypoint: ["true"]
 
   analyzer-sql-mssql:

@@ -1,3 +1,5 @@
+import logging
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
@@ -15,6 +17,7 @@ from app.models.auth import User
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 _settings = get_settings()
+log = logging.getLogger(__name__)
 
 
 class LoginRequest(BaseModel):
@@ -34,6 +37,7 @@ class LoginResponse(BaseModel):
     the three fields the GUI uses to render the sidebar avatar
     immediately; the full profile is one ``/api/v1/auth/me`` call
     away."""
+
     id: str
     username: str
     role: str
@@ -60,19 +64,32 @@ async def login(
             detail="account_temporarily_locked",
         )
 
+    # Password reset locks the same User row before changing the password and
+    # revoking sessions.  Keep this lock through Redis session creation so the
+    # two credential operations have one ordering:
+    #
+    # * reset wins -> this SELECT resumes with the new hash and rejects the old
+    #   password;
+    # * login wins -> reset waits, then revokes the session created below.
     user = (
-        await db.execute(select(User).where(User.username == body.username))
+        await db.execute(
+            select(User)
+            .where(User.username == body.username)
+            .with_for_update(of=User)
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if user is None or not verify_password(body.password, user.password_hash):
+        actor = f"user:{user.id}" if user else "anonymous"
+        # Release a matched user's row before external lockout/audit work.
+        await db.rollback()
         await brute_force.record_failure(body.username)
         await audit_record(
-            actor=f"user:{user.id}" if user else "anonymous",
+            actor=actor,
             action="auth.login_failed",
             target=body.username,
         )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_credentials"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_credentials")
     # PR-38: a soft-deleted account (disabled_at set) is treated as
     # if it never existed. The audit log records the attempt with
     # the same "login_failed" action so an admin reviewing the log
@@ -80,28 +97,49 @@ async def login(
     # response is identical to a wrong password to avoid leaking
     # which accounts are disabled vs deleted.
     if user.disabled_at is not None:
+        actor = f"user:{user.id}"
+        await db.rollback()
         await audit_record(
-            actor=f"user:{user.id}",
+            actor=actor,
             action="auth.login_blocked_disabled",
             target=body.username,
         )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_credentials"
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_credentials")
+
+    token: str | None = None
+    try:
+        # Flush all SQL work, including the audit row, before creating an
+        # external Redis credential.  The User lock remains held until the
+        # commit after create_session.
+        user.last_login_at = datetime.now(tz=timezone.utc)
+        await db.flush()
+        await audit_record(
+            actor=f"user:{user.id}",
+            action="auth.login",
+            session=db,
         )
 
-    # Bookkeeping for the admin "active sessions" view + audit trail.
-    from datetime import datetime, timezone as _tz
+        # Clear the brute-force counter — a successful login means the
+        # earlier failures were almost certainly the same operator
+        # mistyping, not an attack.
+        await brute_force.clear(body.username)
+        token = await create_session(user.id)
+        await db.commit()
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:  # noqa: BLE001
+            log.exception("auth.login_rollback_failed")
+        if token is not None:
+            try:
+                await delete_session(token)
+            except Exception:  # noqa: BLE001
+                # Do not hide the original SQL/session failure.  The normal
+                # create/delete path uses the same Redis backend, so this is a
+                # last-resort operational alert for an ambiguous credential.
+                log.exception("auth.login_session_cleanup_failed")
+        raise
 
-    user.last_login_at = datetime.now(tz=_tz.utc)
-    await db.commit()
-
-    # Clear the brute-force counter — a successful login means the
-    # earlier failures were almost certainly the same operator
-    # mistyping, not an attack.
-    await brute_force.clear(body.username)
-
-    token = await create_session(user.id)
-    await audit_record(actor=f"user:{user.id}", action="auth.login")
     response.set_cookie(
         key=_settings.session_cookie_name,
         value=token,
@@ -117,9 +155,7 @@ async def login(
 @router.post("/logout")
 async def logout(
     response: Response,
-    session_token: Annotated[
-        str | None, Cookie(alias=_settings.session_cookie_name)
-    ] = None,
+    session_token: Annotated[str | None, Cookie(alias=_settings.session_cookie_name)] = None,
 ) -> dict[str, str]:
     if session_token:
         user_id = await read_session(session_token)

@@ -27,6 +27,7 @@ def _init_mirror(tmp_path: Path, project_id: uuid.UUID) -> Path:
     # the surrounding environment having keys configured.
     subprocess.run(["git", "-C", str(src), "config", "commit.gpgsign", "false"], check=True)
     (src / "README.md").write_text("hello\n")
+    (src / "delete-me.txt").write_text("remove me\n")
     subprocess.run(["git", "-C", str(src), "add", "."], check=True)
     subprocess.run(["git", "-C", str(src), "commit", "-q", "-m", "init"], check=True)
 
@@ -54,6 +55,13 @@ def test_resolve_in_worktree_rejects_path_escape(patched_roots):
     pid = uuid.uuid4()
     with pytest.raises(ValueError):
         wt.resolve_in_worktree(pid, "../etc/passwd")
+
+
+def test_resolve_in_worktree_accepts_platform_native_child(patched_roots):
+    pid = uuid.uuid4()
+    expected = (wt.worktree_path(pid) / "src" / "main.py").resolve()
+
+    assert wt.resolve_in_worktree(pid, "src/main.py") == expected
 
 
 def test_analyzer_mount_args_marks_readonly(patched_roots):
@@ -122,9 +130,148 @@ async def test_create_worktree_falls_back_when_no_mirror(patched_roots):
 
 
 @pytest.mark.asyncio
+async def test_revision_bound_worktree_refuses_missing_mirror(patched_roots):
+    """A source-authorised Plan must never fall back to an empty directory."""
+
+    with pytest.raises(wt.WorktreeRevisionUnavailable, match="mirror"):
+        await wt.create_worktree(
+            uuid.uuid4(),
+            uuid.uuid4(),
+            base_sha="a" * 40,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _has_git(), reason="git CLI not available")
+async def test_revision_bound_worktree_verifies_new_and_existing_head(
+    patched_roots,
+    tmp_path,
+):
+    project_id = uuid.uuid4()
+    plan_id = uuid.uuid4()
+    src = tmp_path / "revision-src"
+    src.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(src)], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(src), "config", "user.name", "t"], check=True)
+    subprocess.run(
+        ["git", "-C", str(src), "config", "commit.gpgsign", "false"],
+        check=True,
+    )
+    tracked = src / "tracked.txt"
+    tracked.write_text("one\n")
+    subprocess.run(["git", "-C", str(src), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(src), "commit", "-q", "-m", "one"], check=True)
+    first_sha = subprocess.check_output(
+        ["git", "-C", str(src), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    tracked.write_text("two\n")
+    subprocess.run(["git", "-C", str(src), "commit", "-qam", "two"], check=True)
+    second_sha = subprocess.check_output(
+        ["git", "-C", str(src), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    mirror = wt._REPO_ROOT / str(project_id)
+    subprocess.run(
+        ["git", "clone", "--bare", "-q", str(src), str(mirror)],
+        check=True,
+    )
+
+    dst = await wt.create_worktree(plan_id, project_id, base_sha=first_sha)
+    resolved = subprocess.check_output(
+        ["git", "-C", str(dst), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    assert resolved == first_sha
+    assert (dst / "tracked.txt").read_text() == "one\n"
+
+    # Idempotency is conditional on the existing worktree retaining the same
+    # authorised commit; a different requested/current revision is rejected.
+    assert await wt.create_worktree(
+        plan_id,
+        project_id,
+        base_sha=first_sha,
+    ) == dst
+    with pytest.raises(wt.WorktreeRevisionMismatch, match="existing worktree"):
+        await wt.create_worktree(
+            plan_id,
+            project_id,
+            base_sha=second_sha,
+        )
+
+    await wt.destroy_worktree(plan_id, project_id)
+
+
+@pytest.mark.asyncio
 async def test_compute_diff_empty_on_clean_tree(patched_roots):
     """A worktree with no edits returns an empty diff."""
     project_id = uuid.uuid4()
     plan_id = uuid.uuid4()
     await wt.create_worktree(plan_id, project_id)
     assert (await wt.compute_diff(plan_id)) == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _has_git(), reason="git CLI not available")
+async def test_compute_diff_captures_exact_git_add_all_payload(
+    patched_roots,
+    tmp_path,
+):
+    """Gate B sees staged, unstaged, untracked, deleted, and binary content."""
+
+    project_id = uuid.uuid4()
+    plan_id = uuid.uuid4()
+    mirror = _init_mirror(tmp_path, project_id)
+    base_sha = subprocess.check_output(
+        ["git", "-C", str(mirror), "rev-parse", "HEAD"],
+        text=True,
+    ).strip()
+    dst = await wt.create_worktree(plan_id, project_id, base_sha=base_sha)
+
+    readme = dst / "README.md"
+    readme.write_text("staged intermediate\n")
+    subprocess.run(["git", "-C", str(dst), "add", "README.md"], check=True)
+    readme.write_text("final worktree content\n")
+    (dst / "new-file.txt").write_text("untracked payload\n")
+    (dst / "new-binary.bin").write_bytes(b"\x00\x01\x02binary\xff")
+    (dst / "delete-me.txt").unlink()
+
+    real_index_before = subprocess.check_output(
+        ["git", "-C", str(dst), "diff", "--cached", "--no-color"],
+    )
+    diff = await wt.compute_diff(plan_id)
+    real_index_after = subprocess.check_output(
+        ["git", "-C", str(dst), "diff", "--cached", "--no-color"],
+    )
+
+    assert real_index_after == real_index_before
+    assert "final worktree content" in diff
+    assert "staged intermediate" not in diff
+    assert "new file mode" in diff
+    assert "new-file.txt" in diff
+    assert "untracked payload" in diff
+    assert "new-binary.bin" in diff
+    assert "GIT binary patch" in diff
+    assert "deleted file mode" in diff
+    assert "delete-me.txt" in diff
+
+    subprocess.run(["git", "-C", str(dst), "add", "-A"], check=True)
+    assert await wt.canonical_staged_diff(dst) == diff
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(dst),
+            "-c",
+            "user.email=mnemos@local",
+            "-c",
+            "user.name=Mnemos",
+            "commit",
+            "-q",
+            "-m",
+            "candidate",
+        ],
+        check=True,
+    )
+    assert await wt.canonical_committed_diff(dst) == diff

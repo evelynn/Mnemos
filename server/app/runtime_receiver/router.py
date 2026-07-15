@@ -10,67 +10,178 @@ in PR-25).
 
 from __future__ import annotations
 
+import hashlib
 import hmac
+import json
 import os
 import uuid
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.db import get_session
 from app.merge.runtime import assemble_trace_tree, buffer_observations
+from app.models.organization import Organization
 from app.runtime_receiver.scrub import scrub_span
 
 router = APIRouter(prefix="/otlp/v1", tags=["otlp"])
 
 
-async def _resolve_org_and_project(
-    db: AsyncSession, organization_id_hdr: str | None
-) -> tuple[uuid.UUID | None, uuid.UUID | None]:
-    """Resolve the tenant from the ``X-Mnemos-Organization-Id`` header.
-
-    OTLP doesn't natively carry tenant context, so we accept it via a
-    custom header for now. Project id is intentionally not derived
-    here — a single org can run many projects against the same OTel
-    collector, and the merge stage figures out which project a given
-    (service, operation) pair belongs to at reconcile time.
-
-    Returns ``(None, None)`` when the header is absent or malformed
-    so the caller can fall back to the audit-only path. Pre-runtime-
-    receiver deployments still work; the buffer is just empty.
-    """
-    if not organization_id_hdr:
-        return None, None
-    try:
-        return uuid.UUID(organization_id_hdr), None
-    except (TypeError, ValueError):
-        return None, None
+def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate_key")
+        result[key] = value
+    return result
 
 
-def _check_otlp_bearer(authorization: str | None) -> None:
-    """Reject any OTLP trace that doesn't carry the deployment's shared
-    bearer. Fail-closed: if ``MNEMOS_OTLP_TOKEN`` isn't set in the
-    environment, no trace is accepted — the prior open default let any
-    process on the OTLP port poison ``runtime_observations`` and lift
-    edges to ``exercised=true`` for another tenant (§14.3)."""
-    expected = os.environ.get("MNEMOS_OTLP_TOKEN") or ""
-    if not expected:
+def _configured_otlp_identities() -> dict[uuid.UUID, bytes]:
+    """Load an unambiguous organization → token-digest configuration."""
+
+    raw_map = (os.environ.get("MNEMOS_OTLP_ORG_TOKENS") or "").strip()
+    legacy_token = os.environ.get("MNEMOS_OTLP_TOKEN") or ""
+    legacy_org = (os.environ.get("MNEMOS_OTLP_ORGANIZATION_ID") or "").strip()
+    if raw_map and (legacy_token or legacy_org):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="otlp_token_not_configured",
+            detail="otlp_token_configuration_invalid",
         )
+    entries: dict[uuid.UUID, str]
+    if raw_map:
+        try:
+            parsed = json.loads(raw_map, object_pairs_hook=_strict_object)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="otlp_token_configuration_invalid",
+            ) from exc
+        if not isinstance(parsed, dict) or not parsed:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="otlp_token_configuration_invalid",
+            )
+        entries = {}
+        for raw_org, token in parsed.items():
+            if not isinstance(raw_org, str) or not isinstance(token, str):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="otlp_token_configuration_invalid",
+                )
+            try:
+                org_id = uuid.UUID(raw_org)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="otlp_token_configuration_invalid",
+                ) from exc
+            if org_id in entries:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="otlp_token_configuration_invalid",
+                )
+            entries[org_id] = token
+    else:
+        if bool(legacy_token) != bool(legacy_org):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="otlp_token_configuration_invalid",
+            )
+        if not legacy_token:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="otlp_token_not_configured",
+            )
+        try:
+            org_id = uuid.UUID(legacy_org)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="otlp_token_configuration_invalid",
+            ) from exc
+        entries = {org_id: legacy_token}
+
+    digests: dict[uuid.UUID, bytes] = {}
+    seen_tokens: set[str] = set()
+    for org_id, token in entries.items():
+        if len(token) < 32 or token != token.strip() or len(token) > 4096:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="otlp_token_configuration_invalid",
+            )
+        if token in seen_tokens:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="otlp_token_configuration_ambiguous",
+            )
+        seen_tokens.add(token)
+        digests[org_id] = hashlib.sha256(token.encode("utf-8")).digest()
+    return digests
+
+
+def _check_otlp_bearer(
+    authorization: str | None,
+    organization_id_hdr: str | None = None,
+) -> uuid.UUID:
+    """Authenticate the bearer and derive its tenant; headers cannot choose it."""
+
+    expected = _configured_otlp_identities()
     prefix = "Bearer "
     presented = (
         authorization[len(prefix):]
         if authorization and authorization.startswith(prefix)
         else ""
     )
-    if not presented or not hmac.compare_digest(presented, expected):
+    if not presented or len(presented) > 4096:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid_otlp_token",
+        )
+    presented_digest = hashlib.sha256(presented.encode("utf-8")).digest()
+    matches = [
+        org_id
+        for org_id, digest in expected.items()
+        if hmac.compare_digest(presented_digest, digest)
+    ]
+    if len(matches) != 1:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid_otlp_token",
+        )
+    bound_org = matches[0]
+    if organization_id_hdr is not None:
+        try:
+            header_org = uuid.UUID(organization_id_hdr)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="otlp_organization_mismatch",
+            ) from exc
+        if header_org != bound_org:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="otlp_organization_mismatch",
+            )
+    return bound_org
+
+
+async def _require_live_organization(
+    db: AsyncSession,
+    organization_id: uuid.UUID,
+) -> None:
+    found = (
+        await db.execute(
+            select(Organization.id).where(Organization.id == organization_id)
+        )
+    ).scalar_one_or_none()
+    if found is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="otlp_organization_unavailable",
         )
 
 
@@ -81,7 +192,8 @@ async def receive_traces(
     authorization: str | None = Header(default=None),
     x_mnemos_organization_id: str | None = Header(default=None),
 ) -> JSONResponse:
-    _check_otlp_bearer(authorization)
+    org_id = _check_otlp_bearer(authorization, x_mnemos_organization_id)
+    await _require_live_organization(db, org_id)
     body = await request.json()
     spans_seen = 0
     for resource_span in body.get("resourceSpans", []) or []:
@@ -92,24 +204,24 @@ async def receive_traces(
 
     # Tier 2: assemble the trace tree and buffer the
     # (service, operation, kind) triples for the next merge run.
-    # Tenant resolution is required — anonymous spans aren't routable
-    # to a project, so we audit them but don't write to the table.
-    org_id, _ = await _resolve_org_and_project(db, x_mnemos_organization_id)
     buffered = 0
-    if org_id is not None:
-        records = assemble_trace_tree(body.get("resourceSpans", []) or [])
-        try:
-            buffered = await buffer_observations(db, org_id, records)
-            await db.commit()
-        except Exception:
-            # Spans aren't fail-stop traffic — never let a buffer
-            # error break the receiver. The merge stage replays
-            # whatever is in the table next time around.
-            await db.rollback()
+    records = assemble_trace_tree(body.get("resourceSpans", []) or [])
+    try:
+        buffered = await buffer_observations(db, org_id, records)
+        await db.commit()
+    except Exception:
+        # Spans aren't fail-stop traffic — never let a buffer
+        # error break the receiver. The merge stage replays
+        # whatever is in the table next time around.
+        await db.rollback()
 
     await audit_record(
         actor="otel_receiver",
         action="otlp.traces",
-        details={"spans": spans_seen, "buffered": buffered},
+        details={
+            "organization_id": str(org_id),
+            "spans": spans_seen,
+            "buffered": buffered,
+        },
     )
     return JSONResponse({"accepted": spans_seen, "buffered": buffered})

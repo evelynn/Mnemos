@@ -109,8 +109,8 @@ async def test_data_access_records_flow_through_to_upserts():
         },
     ]
     totals = {"symbols": 0, "contracts": 0, "edges": 0}
-    with patch("app.orchestrator.jobs.upsert_node", new=fake_upsert_node), \
-         patch("app.orchestrator.jobs.upsert_edge", new=fake_upsert_edge):
+    with patch("app.merge.writer.upsert_node", new=fake_upsert_node), \
+         patch("app.merge.writer.upsert_edge", new=fake_upsert_edge):
         for rec in records:
             await _record_payload(
                 session=AsyncMock(),

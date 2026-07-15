@@ -2,7 +2,18 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -28,6 +39,26 @@ class Plan(Base):
     # Team B critique #2 against the original ``base_sha``/``head_sha``
     # scalar pair.
     worktree_meta: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # Immutable source-analysis provenance for the worktree and Gate A
+    # decision. Legacy rows remain nullable at rest, but every mutation
+    # boundary rejects an unbound Plan; silently guessing from HEAD would
+    # authorise edits against code other than the graph the operator reviewed.
+    source_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
+    source_git_sha: Mapped[Optional[str]] = mapped_column(
+        String(length=64),
+        nullable=True,
+    )
+    source_graph_generation: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
+    source_overlay_generation: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -41,6 +72,34 @@ class Plan(Base):
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_run_id", "project_id"],
+            ["analysis_runs.id", "analysis_runs.project_id"],
+            name="fk_plans_source_run_project",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "(source_run_id IS NULL AND source_git_sha IS NULL AND "
+            "source_graph_generation IS NULL AND "
+            "source_overlay_generation IS NULL) OR "
+            "(source_run_id IS NOT NULL AND source_git_sha IS NOT NULL AND "
+            "source_graph_generation IS NOT NULL AND "
+            "source_overlay_generation IS NOT NULL AND "
+            "length(source_git_sha) BETWEEN 40 AND 64 AND "
+            "source_graph_generation > 0 AND "
+            "source_overlay_generation >= 0)",
+            name="ck_plans_source_revision_shape",
+        ),
+        Index(
+            "ix_plans_project_source_revision",
+            "project_id",
+            "source_run_id",
+            "source_graph_generation",
+            "source_overlay_generation",
+        ),
     )
 
 
@@ -80,6 +139,42 @@ class DiffSubmission(Base):
         nullable=True,
     )
 
+    # Exact canonical graph revision against which Gate-B computed the
+    # persisted verdict. Legacy rows remain NULL and are deliberately
+    # unapprovable until a fresh review binds all four fields.
+    review_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analysis_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    review_source_generation: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    review_overlay_generation: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    review_git_sha: Mapped[Optional[str]] = mapped_column(
+        String(length=64), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "(review_run_id IS NULL AND review_source_generation IS NULL "
+            "AND review_overlay_generation IS NULL AND review_git_sha IS NULL) "
+            "OR (review_run_id IS NOT NULL AND review_source_generation IS NOT NULL "
+            "AND review_overlay_generation IS NOT NULL AND review_git_sha IS NOT NULL "
+            "AND review_source_generation > 0 AND review_overlay_generation >= 0 "
+            "AND length(review_git_sha) BETWEEN 40 AND 64)",
+            name="ck_diff_submissions_review_revision",
+        ),
+        Index(
+            "ix_diff_submissions_review_revision",
+            "review_run_id",
+            "review_source_generation",
+            "review_overlay_generation",
+        ),
+    )
+
 
 class DiffBreakGlassGrant(Base):
     """One-time, time-limited authorisation to approve a `blocked` diff.
@@ -106,6 +201,22 @@ class DiffBreakGlassGrant(Base):
     issued_by: Mapped[str] = mapped_column(String, nullable=False)
     rationale: Mapped[str] = mapped_column(Text, nullable=False)
     rerun_review_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # The grant authorizes only the exact canonical revision reviewed by the
+    # issuer. Approval consumes it with these fields in the atomic predicate.
+    review_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analysis_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    review_source_generation: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    review_overlay_generation: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    review_git_sha: Mapped[Optional[str]] = mapped_column(
+        String(length=64), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -120,4 +231,13 @@ class DiffBreakGlassGrant(Base):
     __table_args__ = (
         Index("idx_break_glass_submission_active",
               "submission_id", "consumed_at", "expires_at"),
+        CheckConstraint(
+            "(review_run_id IS NULL AND review_source_generation IS NULL "
+            "AND review_overlay_generation IS NULL AND review_git_sha IS NULL) "
+            "OR (review_run_id IS NOT NULL AND review_source_generation IS NOT NULL "
+            "AND review_overlay_generation IS NOT NULL AND review_git_sha IS NOT NULL "
+            "AND review_source_generation > 0 AND review_overlay_generation >= 0 "
+            "AND length(review_git_sha) BETWEEN 40 AND 64)",
+            name="ck_diff_break_glass_review_revision",
+        ),
     )

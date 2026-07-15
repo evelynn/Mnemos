@@ -11,8 +11,8 @@ This module is the single place that:
 1. Converts tokens → dollars (single source of truth for the rate;
    ``api/findings.py`` and ``api/analysis.py`` import from here so
    the dashboard, the ROI panel, and the budget guard all agree).
-2. Sums per-project spend over a window (DB-backed via the existing
-   ``Summary.tokens_used`` column).
+2. Sums per-project spend over a window from the physical ``LLMCall`` ledger
+   (including map/reduce partials and rejected responses).
 3. Implements ``BudgetGuard.check_budget(project_id)`` — raises
    ``BudgetExceeded`` when the project's running spend in the
    configured window crosses the per-project cap. Callers
@@ -42,8 +42,9 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -89,6 +90,106 @@ class BudgetExceeded(Exception):
     stub path so the pipeline keeps moving."""
 
 
+class RunBudgetExceeded(Exception):
+    """One optional narration run crossed a non-monetary hard limit."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+@dataclass
+class LLMRunBudget:
+    """Hard, provider-independent bounds for one opt-in narration run.
+
+    Dollar accounting cannot protect subscription calls whose provider does
+    not return usage.  This budget therefore reserves calls and estimated
+    prompt tokens *before* invoking any backend and also owns one absolute
+    wall deadline shared by L1, L2 and L3.  None of these guards can be
+    disabled; operators may raise the finite ceilings through environment
+    variables when a deliberately larger narration pass is required.
+    """
+
+    max_calls: int = 64
+    max_input_tokens: int = 120_000
+    wall_time_sec: int = 600
+    started_monotonic: float = field(default_factory=time.monotonic)
+    calls_started: int = 0
+    input_tokens_reserved: int = 0
+    exhausted_reason: str | None = None
+
+    @classmethod
+    def from_env(cls) -> "LLMRunBudget":
+        return cls(
+            max_calls=_bounded_env_int(
+                "MNEMOS_LLM_MAX_CALLS_PER_RUN", 64, minimum=1, maximum=10_000
+            ),
+            max_input_tokens=_bounded_env_int(
+                "MNEMOS_LLM_MAX_INPUT_TOKENS_PER_RUN",
+                120_000,
+                minimum=1_000,
+                maximum=50_000_000,
+            ),
+            wall_time_sec=_bounded_env_int(
+                "MNEMOS_LLM_WALL_TIME_SEC", 600, minimum=30, maximum=7_200
+            ),
+        )
+
+    @property
+    def exhausted(self) -> bool:
+        return self.exhausted_reason is not None
+
+    def remaining_seconds(self) -> float:
+        return max(
+            0.0,
+            self.wall_time_sec - (time.monotonic() - self.started_monotonic),
+        )
+
+    def stop(self, reason: str) -> None:
+        if self.exhausted_reason is None:
+            self.exhausted_reason = reason
+
+    def reserve(self, estimated_input_tokens: int) -> float:
+        """Reserve one logical/physical provider attempt or fail closed."""
+
+        if self.exhausted_reason is not None:
+            raise RunBudgetExceeded(self.exhausted_reason)
+        if self.remaining_seconds() <= 0:
+            self.stop("run_deadline_exceeded")
+            raise RunBudgetExceeded("run_deadline_exceeded")
+        if self.calls_started >= self.max_calls:
+            self.stop("run_call_limit_exceeded")
+            raise RunBudgetExceeded("run_call_limit_exceeded")
+        estimate = max(1, int(estimated_input_tokens))
+        if self.input_tokens_reserved + estimate > self.max_input_tokens:
+            self.stop("run_input_token_limit_exceeded")
+            raise RunBudgetExceeded("run_input_token_limit_exceeded")
+        self.calls_started += 1
+        self.input_tokens_reserved += estimate
+        return self.remaining_seconds()
+
+    def stats(self) -> dict[str, int | float | str | None]:
+        return {
+            "max_calls": self.max_calls,
+            "calls_started": self.calls_started,
+            "max_input_tokens": self.max_input_tokens,
+            "estimated_input_tokens": self.input_tokens_reserved,
+            "wall_time_sec": self.wall_time_sec,
+            "elapsed_sec": round(
+                max(0.0, time.monotonic() - self.started_monotonic), 3
+            ),
+            "exhausted_reason": self.exhausted_reason,
+        }
+
+
 @dataclass
 class BudgetStatus:
     project_id: uuid.UUID
@@ -127,20 +228,21 @@ async def project_spend(
     *,
     since: datetime | None = None,
 ) -> float:
-    """Sum ``Summary.tokens_used`` for the project's summaries within
-    the rolling window, then convert to USD. Quick (single SELECT
-    over an indexed column) — safe to call on every extractor invocation.
+    """Sum physical-call tokens for the project within the rolling window.
+
+    The ledger is indexed by ``(project_id, generated_at)`` and records calls
+    that never became a Summary, avoiding the old partial-call undercount.
     """
-    from app.models.findings import Summary  # local: model import cycle
+    from app.models.findings import LLMCall  # local: model import cycle
 
     if since is None:
         since = datetime.now(tz=timezone.utc) - timedelta(
             seconds=_budget_window_sec()
         )
     stmt = (
-        select(func.coalesce(func.sum(Summary.tokens_used), 0))
-        .where(Summary.project_id == project_id)
-        .where(Summary.generated_at >= since)
+        select(func.coalesce(func.sum(LLMCall.tokens_used), 0))
+        .where(LLMCall.project_id == project_id)
+        .where(LLMCall.generated_at >= since)
     )
     total_tokens = int((await session.execute(stmt)).scalar_one())
     return tokens_to_usd(total_tokens)
@@ -155,7 +257,9 @@ async def check_budget(
     """
     cap = _budget_cap_usd()
     win = _budget_window_sec()
-    spent = await project_spend(session, project_id)
+    # Disabled means disabled: avoid a growing SUM over summary history on
+    # every optional LLM call when no monetary guard was configured.
+    spent = await project_spend(session, project_id) if cap > 0 else 0.0
     return BudgetStatus(
         project_id=project_id,
         window_sec=win,

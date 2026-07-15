@@ -1,17 +1,16 @@
 """Org-scope ACL helpers.
 
-Single-tenant deployments keep every user (and every project) in the
-``default`` organisation, so ``same_org()`` trivially returns True until
-the operator explicitly carves the system into multiple organisations.
+Single-tenant deployments keep every user and project in the concrete
+``default`` organisation. Access still requires that exact id; ``NULL`` is
+never a wildcard because organisation deletion can produce org-less rows.
 
 Retrofit status (Phase C-1 foundation):
 - Organization model + FK columns: ✅
 - ``resolve_project_org()`` + ``require_project_org()`` helpers: ✅
-- Endpoint retrofit (every project/secret/finding route adds
-  ``require_project_org`` dep): **TODO** (Phase C-1b).
-  Until retrofit completes, a compromised ``operator`` in org A can
-  still read project UUIDs in org B. The foundation here lets the
-  retrofit be mechanical — add one dep per route.
+- Project-addressed endpoint retrofit: ✅ router dependencies or an inline
+  resolver cover project/run/finding/Plan/Diff UUID routes.
+- Exact non-NULL comparison: ✅ missing, foreign, and legacy NULL ownership
+  fail closed without disclosing which case occurred.
 """
 
 from __future__ import annotations
@@ -30,12 +29,15 @@ if TYPE_CHECKING:
 def same_org(user: "User", project_org_id: uuid.UUID | None) -> bool:
     """Return True when the user shares the project's organisation.
 
-    Returns True when either side is None (single-tenant legacy row) so
-    existing deployments keep working.
+    Both sides must carry the same concrete organisation id. ``NULL`` is not
+    a legacy wildcard: organisation deletion can produce org-less users and
+    projects, so accepting it would silently grant global project access.
     """
-    if project_org_id is None or user.organization_id is None:
-        return True
-    return user.organization_id == project_org_id
+    return (
+        project_org_id is not None
+        and user.organization_id is not None
+        and user.organization_id == project_org_id
+    )
 
 
 async def resolve_project_org(

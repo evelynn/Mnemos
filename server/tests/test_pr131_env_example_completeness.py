@@ -76,7 +76,8 @@ def test_env_example_warns_against_dev_only_vars_in_prod():
     assert "production" in surrounding.lower() or "DEV" in surrounding
 
 
-def test_env_example_kept_under_3000_bytes():
-    """간결성. 운영자가 한 번에 읽고 결정 가능한 크기."""
+def test_env_example_kept_under_one_config_page():
+    """간결성: 보안상 필수인 tenant-binding 설명까지 8 KiB 이내."""
     ex = (_REPO / ".env.example").read_text(encoding="utf-8")
-    assert len(ex) < 6000, f".env.example {len(ex)} bytes — too verbose"
+    size = len(ex.encode("utf-8"))
+    assert size < 8192, f".env.example {size} bytes — too verbose"

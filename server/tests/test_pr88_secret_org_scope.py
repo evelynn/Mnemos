@@ -8,9 +8,8 @@ any org could list every tenant's ciphertext metadata (§2.8).
 The fix:
 * ``Secret.organization_id`` added (alembic 0021), nullable so the
   migration is online and legacy rows aren't lost;
-* ``GET /secrets`` now requires admin AND filters by the caller's
-  ``organization_id`` (legacy NULL rows stay visible to any admin
-  until they're assigned);
+* ``GET /secrets`` now requires admin AND filters by the caller's exact
+  ``organization_id`` (legacy NULL rows fail closed until assigned);
 * ``create_secret`` stamps the new row with the caller's org.
 """
 

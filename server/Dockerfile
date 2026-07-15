@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim-trixie
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -10,14 +10,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     git \
     curl \
+    nodejs \
+    npm \
+ && node -e "const major=Number(process.versions.node.split('.')[0]); if (major < 20) process.exit(1)" \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY pyproject.toml ./
-RUN pip install --upgrade pip && pip install -e .
+COPY server/ /app
+COPY docs/ /docs/
+RUN pip install --upgrade pip \
+ && pip install ".[analyzers-treesitter]"
 
-COPY . /app
+# The worker invokes trusted analyzers as bounded local subprocesses.  The
+# former Compose profile only built disconnected images, leaving every binary
+# absent from the worker and allowing a successful empty graph.  Ship the
+# runnable source contracts in the image and install the sole Node dependency.
+COPY analyzers/ /analyzers/
+RUN cd /analyzers/ggoss-ts \
+ && npm ci --omit=dev
+
+ENV MNEMOS_INREPO_ANALYZERS=1
 
 RUN mkdir -p /var/lib/mnemos
 

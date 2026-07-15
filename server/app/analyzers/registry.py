@@ -9,15 +9,60 @@ from app.analyzers.runner import AnalyzerRunner, inrepo_script
 _BINARIES = {
     "csharp": "ggoss-csharp",
     "typescript": "ggoss-ts",
+    # ggoss-ts walks .js/.jsx/.mjs/.cjs alongside .ts — a JS-only project
+    # gets deterministic extraction instead of the agent fallback. When a
+    # project lists BOTH typescript and javascript the orchestrator skips
+    # the duplicate stage (same binary, same tree) with a recorded reason.
+    "javascript": "ggoss-ts",
     "python": "ggoss-py",
+    # PR-191 — deterministic C/C++ extraction (functions/structs/enums/
+    # macros + CALLS); vendored/ trees excluded by the analyzer itself.
+    "cpp": "ggoss-cpp",
+    # PR-192 — deterministic Java extraction (types/methods + Spring/JAX-RS
+    # HTTP contracts normalized to the same http.<M>.<path> node a TS fetch
+    # client resolves to, so Java-server ↔ TS-client cross-service linking
+    # works); closes the web+Java eval's empty-graph gap.
+    "java": "ggoss-java",
+    # PR-193 — web templates. ggoss-web extracts HTML form/link routes as HTTP
+    # contracts (same normalized node a Java handler EXPOSES) so a template ↔
+    # Spring-handler cross-service link forms; makes HTML/CSS targetable at all
+    # (the web+Java eval's P2 gap). One binary walks html+css.
+    "html": "ggoss-web",
+    "css": "ggoss-web",
+    "scss": "ggoss-web",
+    # PR-194 — Kotlin (JVM web; modern Spring Boot). Separate analyzer, same
+    # Spring annotations → same http.<M>.<path> node (cross-service linking).
+    "kotlin": "ggoss-kotlin",
+    # PR-195 — tree-sitter multi-language analyzer (absorption review T2:
+    # cbm's language-extensibility mechanism, native). ONE analyzer backed by
+    # tree-sitter-language-pack; adding a language = a config entry. Registered
+    # here for languages with no stdlib analyzer; needs the tree-sitter package
+    # (analyzer_available gates on it), else these fall back to agent extraction.
+    "go": "ggoss-treesitter",
+    "rust": "ggoss-treesitter",
+    "ruby": "ggoss-treesitter",
+    # PR-199 — more tree-sitter languages (config-only additions to the same
+    # analyzer). Adding a language = a ``_LANG`` entry + one line here.
+    "php": "ggoss-treesitter",
+    "scala": "ggoss-treesitter",
+    "swift": "ggoss-treesitter",
     "mssql": "ggoss-sql-mssql",
     "oracle": "ggoss-sql-oracle",
     "dotnet_binary": "ggoss-binary-dotnet",
 }
 
 
-# Languages with a deterministic ggoss analyzer. Languages outside this
-# set fall back to Claude-Code agent extraction (PR-140) when eligible.
+# ``mssql`` and ``oracle`` are live-database connector kinds, not source
+# languages.  Their CLIs intentionally implement ``live_schema``/sampling
+# verbs and cannot satisfy the four source-index verbs.  Keeping the two
+# capabilities explicit prevents a Project language from being routed to a
+# connector binary and then failing (or, worse, completing with no graph).
+DB_ANALYZER_KINDS = frozenset({"mssql", "oracle"})
+SOURCE_ANALYZER_LANGUAGES = frozenset(_BINARIES).difference(DB_ANALYZER_KINDS)
+
+# Backwards-compatible union used by health/probe code that reports every
+# shipped binary.  Project creation and source orchestration must use
+# ``SOURCE_ANALYZER_LANGUAGES`` instead.
 ANALYZER_LANGUAGES = frozenset(_BINARIES)
 
 
@@ -40,6 +85,19 @@ def analyzer_available(language: str) -> bool:
     binary = binary_for(language)
     if binary is None:
         return False
+    # PR-195 — the tree-sitter analyzer needs a non-stdlib package. When it
+    # isn't importable, report unavailable so go/rust/ruby fall back to agent
+    # extraction instead of silently extracting nothing.
+    if binary == "ggoss-treesitter" and not _treesitter_importable():
+        return False
     # Available if installed on PATH (docker/prod) or runnable from the
     # in-repo source (docker-free basic config, PR-153).
     return shutil.which(binary) is not None or inrepo_script(binary) is not None
+
+
+def _treesitter_importable() -> bool:
+    try:
+        import tree_sitter_language_pack  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        return False

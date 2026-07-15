@@ -16,6 +16,7 @@ import ts from "typescript";
 
 const SOURCE_NAME = "ggoss-ts";
 const SOURCE_VERSION = "1.0.0";
+let _analysisRoot = process.cwd();
 
 function envelope(recordType, data) {
   return JSON.stringify({
@@ -59,7 +60,12 @@ function openOutput(outPath) {
 const _SOURCE_EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 
 // Generated-output directories — never source, always skipped.
-const _SKIP_DIRS = new Set(["node_modules", "dist", "build", "coverage"]);
+const _SKIP_DIRS = new Set(["node_modules", "dist", "build", "coverage", "out"]);
+
+// Minified / bundled output (e.g. a vendored ``a2ui.bundle.js``) — generated,
+// not source. A single bundle can be tens of thousands of unreadable nodes
+// that swamp the graph, so it is skipped by filename (PR-183 S2).
+const _SKIP_FILE_RE = /\.(min|bundle)\.[cm]?[jt]sx?$/;
 
 // Test / fixture directory names. Normally analysed like any other
 // code, but excluded on the crash-retry path: a compiler-style repo
@@ -73,17 +79,22 @@ const _TEST_DIRS = new Set([
 function walkFiles(dir, exts, opts = {}, collected = []) {
   let entries;
   try {
+    if (fs.lstatSync(dir).isSymbolicLink()) return collected;
     entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch (err) {
     reportError(dir, err.message);
     return collected;
   }
   for (const e of entries) {
+    if (e.isSymbolicLink()) continue;
     if (e.name.startsWith(".") || _SKIP_DIRS.has(e.name)) continue;
     if (opts.skipTests && _TEST_DIRS.has(e.name)) continue;
     const full = path.join(dir, e.name);
     if (e.isDirectory()) walkFiles(full, exts, opts, collected);
-    else if (exts.some((ext) => e.name.endsWith(ext))) collected.push(full);
+    else if (
+      exts.some((ext) => e.name.endsWith(ext)) && !_SKIP_FILE_RE.test(e.name)
+    )
+      collected.push(full);
   }
   return collected;
 }
@@ -124,10 +135,15 @@ function componentId(target) {
     const pkg = JSON.parse(
       fs.readFileSync(path.join(target, "package.json"), "utf-8"),
     );
-    return `svc.${pkg.name ?? path.basename(target)}`;
+    return `svc.${pkg.name ?? process.env.MNEMOS_PROJECT_ID ?? path.basename(target)}`;
   } catch {
-    return `svc.${path.basename(target)}`;
+    return `svc.${process.env.MNEMOS_PROJECT_ID ?? path.basename(target)}`;
   }
+}
+
+function sourceRelative(fileName) {
+  const rel = path.relative(_analysisRoot, path.resolve(fileName));
+  return rel.split(path.sep).join("/");
 }
 
 const _PROGRAM_OPTS = {
@@ -145,14 +161,10 @@ const _PROGRAM_OPTS = {
   skipLibCheck: true,
 };
 
-function buildProgram(target) {
-  // An analyzer must see *all* the code, not the subset a project's
-  // build tsconfig happens to scope. Real repos make that distinction
-  // bite: astro's root tsconfig is solution-style (project references,
-  // ~0 files), and next.js' root tsconfig ``include``s only its test
-  // suite — trusting either analyses the wrong thing. So the file set
-  // always comes from a directory walk; a tsconfig contributes only
-  // its compilerOptions (jsx / paths / target).
+function buildOptions(target) {
+  // _PROGRAM_OPTS wins for the flags analysis depends on (noEmit, allowJs,
+  // skipLibCheck); a project tsconfig contributes the rest (jsx / paths /
+  // target). A malformed tsconfig is not fatal — the defaults analyse fine.
   let options = { ..._PROGRAM_OPTS };
   const tsconfigPath = path.join(target, "tsconfig.json");
   if (fs.existsSync(tsconfigPath)) {
@@ -161,14 +173,23 @@ function buildProgram(target) {
       const parsed = ts.parseJsonConfigFileContent(
         raw.config || {}, ts.sys, target,
       );
-      // _PROGRAM_OPTS wins for the flags analysis depends on (noEmit,
-      // allowJs, skipLibCheck); the tsconfig keeps jsx / paths / target.
       options = { ...parsed.options, ..._PROGRAM_OPTS };
     } catch {
-      // A malformed tsconfig is not fatal — the defaults analyse fine.
+      // defaults analyse fine
     }
   }
+  return options;
+}
 
+function buildProgram(target) {
+  // An analyzer must see *all* the code, not the subset a project's
+  // build tsconfig happens to scope. Real repos make that distinction
+  // bite: astro's root tsconfig is solution-style (project references,
+  // ~0 files), and next.js' root tsconfig ``include``s only its test
+  // suite — trusting either analyses the wrong thing. So the file set
+  // always comes from a directory walk; a tsconfig contributes only
+  // its compilerOptions (jsx / paths / target).
+  const options = buildOptions(target);
   const files = walkFiles(target, _SOURCE_EXTS);
   try {
     return ts.createProgram({ rootNames: files, options });
@@ -189,7 +210,7 @@ function buildProgram(target) {
 
 function symbolIdFor(sf, node, name) {
   const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
-  return `ts:${path.basename(sf.fileName)}:${name}@${line + 1}:${character + 1}`;
+  return `ts:${sourceRelative(sf.fileName)}:${name}@${line + 1}:${character + 1}`;
 }
 
 function visibilityOf(node) {
@@ -210,7 +231,7 @@ function emitSymbol(out, sf, node, kind, name, compId) {
     component_id: compId,
     signature: node.getText(sf).slice(0, 400),
     location: {
-      file: sf.fileName,
+      file: sourceRelative(sf.fileName),
       line: start.line + 1,
       col: start.character + 1,
     },
@@ -360,13 +381,49 @@ function emitCallEdges(out, sf, caller, callSite, calleeId, calleeName, callerNa
   writeLine(out, envelope("edge", data));
 }
 
-function cmdCalls(target, outPath) {
-  const program = buildProgram(target);
+// A single TS program over a very large repo (10k+ files) makes the
+// type-checker's call resolution (getSymbolAtLocation per call site)
+// exhaust memory and the OS kills the process before it emits anything
+// (openclaw, 16k ts files → 0 CALLS). Above this file count cmdCalls builds
+// one program per directory-grouped chunk so each fits in memory; below it a
+// single program keeps full cross-file resolution. Mirrors pack_by_budget.
+const _CALLS_CHUNK_THRESHOLD = 4000;
+const _CALLS_CHUNK_SIZE = 2500;
+const _normKey = (p) => p.replace(/\\/g, "/").toLowerCase();
+
+function chunkFilesByDir(files, size) {
+  // Group by directory so calls within a module resolve inside one chunk,
+  // then pack groups (sorted, siblings adjacent) into chunks of <= size
+  // files. An oversized directory is split, but its files stay contiguous
+  // so most intra-directory calls still resolve.
+  const byDir = new Map();
+  for (const f of files) {
+    const d = path.dirname(f);
+    if (!byDir.has(d)) byDir.set(d, []);
+    byDir.get(d).push(f);
+  }
+  const chunks = [];
+  let cur = [];
+  for (const dir of [...byDir.keys()].sort()) {
+    for (const f of byDir.get(dir)) {
+      cur.push(f);
+      if (cur.length >= size) { chunks.push(cur); cur = []; }
+    }
+  }
+  if (cur.length) chunks.push(cur);
+  return chunks;
+}
+
+function emitCallsForProgram(program, out, onlyFiles) {
+  // ``onlyFiles`` (a Set of normalised paths) restricts emission to a
+  // chunk's own root files: TS pulls imported files from other chunks into
+  // this program too, and walking them would double-emit. null = emit for
+  // every source file (the single-program path).
   const checker = program.getTypeChecker();
-  const out = openOutput(outPath);
 
   for (const sf of program.getSourceFiles()) {
     if (sf.isDeclarationFile || sf.fileName.includes("node_modules")) continue;
+    if (onlyFiles && !onlyFiles.has(_normKey(sf.fileName))) continue;
     // Each entry: { node, nameForId } — name is what emitCallEdges
     // uses to build the caller symbol id. For FunctionDeclaration /
     // MethodDeclaration, ``node.name.text`` exists; for ArrowFunction
@@ -436,6 +493,43 @@ function cmdCalls(target, outPath) {
       reportError(sf.fileName, err.message);
     }
   }
+}
+
+function cmdCalls(target, outPath) {
+  const out = openOutput(outPath);
+  const files = walkFiles(target, _SOURCE_EXTS);
+  if (files.length <= _CALLS_CHUNK_THRESHOLD) {
+    // Small/medium repo: one program, full cross-file call resolution.
+    emitCallsForProgram(buildProgram(target), out, null);
+  } else {
+    const chunks = chunkFilesByDir(files, _CALLS_CHUNK_SIZE);
+    reportError(
+      target,
+      `calls: ${files.length} files > ${_CALLS_CHUNK_THRESHOLD}; chunking ` +
+        `into ${chunks.length} programs (cross-chunk calls → extern)`,
+      true,
+    );
+    const options = buildOptions(target);
+    for (const chunk of chunks) {
+      let program;
+      try {
+        program = ts.createProgram({ rootNames: chunk, options });
+      } catch (err) {
+        reportError(target, `calls chunk build failed: ${err.message}`, true);
+        continue;
+      }
+      emitCallsForProgram(program, out, new Set(chunk.map(_normKey)));
+      // Release this chunk's program before building the next — a TS program
+      // over thousands of files holds GBs, and two resident at once OOMs node
+      // (the silent OS kill that left openclaw with only chunk 1). ``--expose-gc``
+      // (set by the runner) makes the reclaim synchronous so peak memory stays
+      // at one chunk, not the whole repo.
+      program = undefined;
+      if (typeof global !== "undefined" && typeof global.gc === "function") {
+        global.gc();
+      }
+    }
+  }
   if (outPath) out.end();
 }
 
@@ -447,6 +541,60 @@ const _HTTP_VERBS = new Set([
 const _HTTP_DECORATORS = new Set([
   "Get", "Post", "Put", "Delete", "Patch", "Options", "Head", "All",
 ]);
+
+// Next.js App Router: a file ``app/**/route.{ts,tsx,js,mjs}`` that exports a
+// function named after an HTTP method (``export async function POST``) serves
+// that method at the URL derived from its directory. Previously ggoss-ts saw
+// the client ``fetch('/api/..')`` (CALLS) but never the server handler
+// (EXPOSES), so the contract had no exposer and duplicate-endpoint detection /
+// OTLP runtime reconcile could not work for Next.js apps.
+const _NEXTJS_METHODS = new Set([
+  "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS",
+]);
+
+function _nextjsRoutePath(fileName) {
+  const norm = fileName.replace(/\\/g, "/");
+  if (/\/app\/route\.(?:ts|tsx|js|mjs)$/.test(norm)) return "/";
+  const m = norm.match(/\/app\/(.+)\/route\.(?:ts|tsx|js|mjs)$/);
+  if (!m) return null;
+  const segs = m[1]
+    .split("/")
+    .filter(Boolean)
+    // Route groups ``(group)`` and parallel/intercepting routes carry no URL.
+    .filter((s) => !(s.startsWith("(") && s.endsWith(")")) && !s.startsWith("@"))
+    // Dynamic segments ``[id]`` / ``[...slug]`` → ``{id}`` / ``{slug}``.
+    .map((s) => s.replace(/^\[\.{3}(.+)\]$/, "{$1}").replace(/^\[(.+)\]$/, "{$1}"));
+  return "/" + segs.join("/");
+}
+
+function _exportedHttpHandler(node) {
+  const exported = (node.modifiers || []).some(
+    (m) => m.kind === ts.SyntaxKind.ExportKeyword,
+  );
+  if (!exported) return null;
+  // export [async] function GET(...) {}
+  if (
+    node.kind === ts.SyntaxKind.FunctionDeclaration &&
+    node.name &&
+    _NEXTJS_METHODS.has(node.name.text)
+  ) {
+    return node.name.text;
+  }
+  // export const GET = (...) => {}
+  if (node.kind === ts.SyntaxKind.VariableStatement) {
+    for (const d of node.declarationList.declarations) {
+      if (
+        d.name &&
+        d.name.kind === ts.SyntaxKind.Identifier &&
+        _NEXTJS_METHODS.has(d.name.text) &&
+        d.initializer
+      ) {
+        return d.name.text;
+      }
+    }
+  }
+  return null;
+}
 
 function _decorators(node) {
   if (typeof ts.getDecorators === "function") {
@@ -522,6 +670,21 @@ function cmdContracts(target, outPath) {
 
   for (const sf of program.getSourceFiles()) {
     if (sf.isDeclarationFile || sf.fileName.includes("node_modules")) continue;
+
+    // Next.js App Router route handlers — detected per-file from the path +
+    // exported HTTP-method functions, not via the AST verb/decorator visit.
+    const nextRoute = _nextjsRoutePath(sf.fileName);
+    if (nextRoute !== null) {
+      for (const stmt of sf.statements) {
+        const method = _exportedHttpHandler(stmt);
+        if (method) {
+          emitHttpContract(
+            out, sf, stmt, method, nextRoute, "EXPOSES", "ts_nextjs_route",
+          );
+        }
+      }
+    }
+
     // ``prefix`` carries a NestJS @Controller('x') route prefix down
     // into the class's methods.
     const visit = (node, prefix) => {
@@ -748,7 +911,7 @@ function emitDataAccess(out, sf, fnNode, rawEntity, access, site, seen) {
   }
   const callerId = fnNode
     ? symbolIdFor(sf, fnNode, fnNode.name?.text ?? "<anonymous>")
-    : `ts:${path.basename(sf.fileName)}:<module>`;
+    : `ts:${sourceRelative(sf.fileName)}:<module>`;
   writeLine(
     out,
     envelope("edge", {
@@ -890,6 +1053,7 @@ async function main() {
   }
 
   const { target, outPath } = parseCommon(rest);
+  if (target) _analysisRoot = path.resolve(target);
 
   try {
     switch (verb) {

@@ -94,6 +94,9 @@ def install_polyglot() -> None:
         mod = type(dbapi_conn).__module__.lower()
         if "sqlite" not in mod:
             return
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
         dbapi_conn.create_function(
             "gen_random_uuid", 0, lambda: str(_uuid.uuid4()),
         )

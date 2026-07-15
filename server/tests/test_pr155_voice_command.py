@@ -459,7 +459,7 @@ def test_status_requires_auth():
 def test_ask_template_has_mic_and_wires_voice():
     html = (_TPL / "ask.html").read_text(encoding="utf-8")
     assert 'id="aq-mic"' in html
-    assert 'class="mic-btn"' in html
+    assert "mic-btn" in html  # styled as the composer mic (PR-186: cbtn mic-btn)
     assert "mountVoiceInput" in html
     # The mic targets the question box and passes the project picker.
     assert '"#aq-q"' in html

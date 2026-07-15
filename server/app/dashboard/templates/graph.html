@@ -231,6 +231,24 @@ async function loadGraph(ev) {
       return false;
     }
     payload = await r.json();
+    // A single-repo analysis usually has no Component-level nodes (the
+    // default kind), so the canvas would render blank and look broken.
+    // Fall back to the full graph and tell the operator, rather than
+    // leaving them staring at an empty canvas.
+    if ((payload.nodes || []).length === 0 && kind) {
+      const rAll = await fetch(
+        `/api/v1/projects/${pid}/graph/component_map?limit=${encodeURIComponent(limit)}`);
+      if (rAll.ok) {
+        const allPayload = await rAll.json();
+        if ((allPayload.nodes || []).length) {
+          payload = allPayload;
+          document.getElementById("gkind").value = "";  // reflect what's shown
+          MnemosUI.showToast(
+            MnemosUI.t("No nodes of that kind — showing the full graph instead."),
+            "info");
+        }
+      }
+    }
   } finally {
     wrap.classList.remove("skeleton");
   }
@@ -616,6 +634,6 @@ async function submitFactConfirmation(ev) {
 // PR-137 — upgrade #gpid (which loadGraph reads via getElementById)
 // into a project picker. Auto-submit is off because loadGraph already
 // fires on the ?project= deep-link above; we just want the dropdown.
-MnemosUI.mountProjectPicker("#gpid", { autoSubmit: false });
+MnemosUI.mountProjectPicker("#gpid", { autoSubmit: true });
 </script>
 {% endblock %}

@@ -86,8 +86,8 @@ async def test_ts_analyzer_output_accepted_by_orchestrator_ingest():
     accept = {"symbol", "data_entity", "contract", "edge"}
     project_id = uuid.uuid4()
 
-    with patch("app.orchestrator.jobs.upsert_node", fake_upsert_node), \
-            patch("app.orchestrator.jobs.upsert_edge", fake_upsert_edge):
+    with patch("app.merge.writer.upsert_node", fake_upsert_node), \
+            patch("app.merge.writer.upsert_edge", fake_upsert_edge):
         for env in envs:
             await _record_payload(
                 session=MagicMock(),
@@ -127,8 +127,8 @@ async def test_py_analyzer_output_accepted_by_orchestrator_ingest():
     accept = {"symbol", "edge"}
     project_id = uuid.uuid4()
 
-    with patch("app.orchestrator.jobs.upsert_node", fake_upsert_node), \
-            patch("app.orchestrator.jobs.upsert_edge", fake_upsert_edge):
+    with patch("app.merge.writer.upsert_node", fake_upsert_node), \
+            patch("app.merge.writer.upsert_edge", fake_upsert_edge):
         for env in envs:
             await _record_payload(
                 session=MagicMock(),
@@ -206,8 +206,8 @@ async def test_unknown_record_type_silently_skipped():
     async def fake_upsert(session, **kw):
         called.append(kw)
 
-    with patch("app.orchestrator.jobs.upsert_node", fake_upsert), \
-            patch("app.orchestrator.jobs.upsert_edge", fake_upsert):
+    with patch("app.merge.writer.upsert_node", fake_upsert), \
+            patch("app.merge.writer.upsert_edge", fake_upsert):
         await _record_payload(
             session=MagicMock(),
             project_id=uuid.uuid4(),

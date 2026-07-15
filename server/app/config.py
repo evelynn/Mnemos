@@ -31,6 +31,21 @@ class Settings(BaseSettings):
         default="postgresql+asyncpg://mnemos:mnemos@localhost:5432/mnemos"
     )
     redis_url: str = Field(default="redis://localhost:6379/0")
+    # Optional operator-managed Git mirror root for webhook analysis.  A
+    # webhook never falls back to the worker's current directory: the exact
+    # pushed SHA must already exist in ``<root>/<project_id>[.git]`` and is
+    # materialised as a detached, read-only-by-convention worktree.
+    source_mirror_root: str = Field(default="")
+    source_worktree_root: str = Field(default="")
+    # Optional root containing operator-selected manual source directories.
+    # When set, workers reject manual paths outside it and completed Git runs
+    # can re-open the exact commit without persisting a host-absolute path.
+    source_allowed_root: str = Field(default="")
+    # Required project-to-directory binding for manual analysis. JSON object
+    # keys are project UUIDs and values are relative directories below
+    # ``source_allowed_root``. A shared allowed root alone is not an
+    # authorization boundary between tenants.
+    source_project_roots: str = Field(default="")
     secret_key: str = Field(default="change-me-in-production")
     fernet_key: str = Field(default="")
     log_level: str = Field(default="INFO")

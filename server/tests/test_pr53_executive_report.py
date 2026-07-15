@@ -41,14 +41,15 @@ def test_summaries_excludes_superseded():
     current (non-superseded) summaries are returned."""
     body = _read(_APP / "api" / "analysis.py")
     summ_idx = body.find("async def list_summaries(")
-    slab = body[summ_idx:summ_idx + 1200]
+    next_fn = body.find("\nasync def ", summ_idx + 1)
+    slab = body[summ_idx:next_fn]
     assert "superseded_by.is_(None)" in slab
 
 
 def test_summaries_org_isolated():
     body = _read(_APP / "api" / "analysis.py")
-    summ_idx = body.find("summaries")
-    block = body[max(0, summ_idx - 200):summ_idx + 100]
+    summ_idx = body.find("async def list_summaries(")
+    block = body[max(0, summ_idx - 300):summ_idx + 100]
     assert "require_project_org" in block
 
 
@@ -63,12 +64,14 @@ def test_llm_cost_endpoint_defined():
     assert "async def project_llm_cost(" in body
 
 
-def test_llm_cost_sums_summary_tokens():
+def test_llm_cost_sums_physical_call_tokens():
     body = _read(_APP / "api" / "analysis.py")
     cost_idx = body.find("async def project_llm_cost(")
-    slab = body[cost_idx:cost_idx + 1400]
+    next_fn = body.find("\nasync def ", cost_idx + 1)
+    slab = body[cost_idx:next_fn]
     assert "tokens_used" in slab
     assert "total_tokens" in slab
+    assert "LLMCall" in slab
     # Estimated USD from a configurable per-Mtok rate.
     assert "estimated_usd" in slab
     assert "MNEMOS_LLM_USD_PER_MTOK" in slab

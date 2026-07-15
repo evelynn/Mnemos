@@ -145,12 +145,9 @@ async def test_real_path_triggered_when_api_key_set():
 @pytest.mark.asyncio
 async def test_real_path_falls_back_on_invalid_json(monkeypatch):
     """If the model returns non-JSON (Claude sometimes leaks
-    markdown), summarize() must NOT crash. PR-125 widened the
-    fallback chain: anthropic-invalid-JSON → try agent_sdk → stub.
-    With agent_sdk disabled, the chain ends at stub."""
-    # PR-125 — disable the agent_sdk fallback so this test isolates
-    # the anthropic→stub edge (otherwise a working Claude Code env
-    # would produce a real summary instead).
+    markdown), summarize() must NOT crash or charge a second backend.
+    A response was already billed, so invalid JSON goes directly to a
+    labelled stub and its usage is retained in the call ledger."""
     monkeypatch.setenv("MNEMOS_DISABLE_AGENT_SDK", "1")
 
     class FakeContent:
@@ -232,14 +229,14 @@ def test_extractor_result_dataclass_is_jsonable():
     assert back["model_used"] == "x"
 
 
-def test_prompt_truncates_evidence_at_6000_chars():
-    """Long evidence must not blow past the context window. The
-    prompt builder enforces a hard cap."""
+def test_prompt_rejects_evidence_over_16000_chars_without_slicing():
+    """Oversized evidence fails before malformed JSON reaches a provider."""
+    from app.extractor.packing import EvidencePromptTooLarge
+
     ext = Extractor()
     huge = [{"k": "x" * 500} for _ in range(50)]  # ~25 KB if uncapped
-    prompt = ext._prompt(level=2, target_id="t", evidence=huge)
-    # Strict upper bound — header + JSON-truncated body + footer.
-    assert len(prompt) <= 6500
+    with pytest.raises(EvidencePromptTooLarge):
+        ext._prompt(level=2, target_id="t", evidence=huge)
 
 
 def test_no_api_key_no_sdk_attempt():

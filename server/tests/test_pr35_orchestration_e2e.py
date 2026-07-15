@@ -30,7 +30,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.analyzers.runner import AnalyzerRunner
+from app.analyzers.runner import AnalyzerProcessError, AnalyzerRunner
 from app.orchestrator.jobs import _VERB_ACCEPT, _record_payload
 
 
@@ -99,8 +99,8 @@ async def test_d1_analyzer_records_flow_through_to_upsert_calls(tmp_path):
     project_id = uuid.uuid4()
     runner = AnalyzerRunner(str(fake))
 
-    with patch("app.orchestrator.jobs.upsert_node", new=fake_upsert_node), \
-         patch("app.orchestrator.jobs.upsert_edge", new=fake_upsert_edge):
+    with patch("app.merge.writer.upsert_node", new=fake_upsert_node), \
+         patch("app.merge.writer.upsert_edge", new=fake_upsert_edge):
         totals = {"symbols": 0, "contracts": 0, "edges": 0}
         # symbols verb accepts symbol + data_entity.
         async for rec in runner.run("symbols", str(tmp_path)):
@@ -140,6 +140,7 @@ async def test_d1_contract_records_resolve_http_id(tmp_path):
         import json, sys
         print(json.dumps({
             "record_type": "contract",
+            "source_name": "ggoss-fake",
             "data": {
                 "id": "ignored",  # platform recomputes from method+path
                 "kind": "http_endpoint",
@@ -157,7 +158,7 @@ async def test_d1_contract_records_resolve_http_id(tmp_path):
     project_id = uuid.uuid4()
     runner = AnalyzerRunner(str(fake))
 
-    with patch("app.orchestrator.jobs.upsert_node", new=fake_upsert_node):
+    with patch("app.merge.writer.upsert_node", new=fake_upsert_node):
         async for rec in runner.run("contracts", str(tmp_path)):
             if rec.stream != "stdout":
                 continue
@@ -192,6 +193,7 @@ async def test_d1_edge_records_with_http_target_get_resolved(tmp_path):
         import json
         print(json.dumps({
             "record_type": "edge",
+            "source_name": "ggoss-fake",
             "data": {
                 "source_id": "billing.charge",
                 "target_id": "http.POST./api/v1/payments",
@@ -209,7 +211,7 @@ async def test_d1_edge_records_with_http_target_get_resolved(tmp_path):
     project_id = uuid.uuid4()
     runner = AnalyzerRunner(str(fake))
 
-    with patch("app.orchestrator.jobs.upsert_edge", new=fake_upsert_edge):
+    with patch("app.merge.writer.upsert_edge", new=fake_upsert_edge):
         async for rec in runner.run("contracts", str(tmp_path)):
             if rec.stream != "stdout":
                 continue
@@ -245,12 +247,14 @@ async def test_d1_malformed_records_are_silently_ignored(tmp_path):
         """
         import json
         # First record is malformed (no id).
-        print(json.dumps({"record_type": "symbol", "data": {}}))
+        print(json.dumps({"record_type": "symbol", "source_name": "ggoss-fake", "data": {}}))
         # Second record is fine.
         print(json.dumps({"record_type": "symbol",
+                          "source_name": "ggoss-fake",
                           "data": {"id": "Survives"}}))
         # Third is also malformed.
-        print(json.dumps({"record_type": "edge", "data": {"kind": "CALLS"}}))
+        print(json.dumps({"record_type": "edge", "source_name": "ggoss-fake",
+                          "data": {"kind": "CALLS"}}))
         """,
     )
 
@@ -262,7 +266,7 @@ async def test_d1_malformed_records_are_silently_ignored(tmp_path):
     project_id = uuid.uuid4()
     runner = AnalyzerRunner(str(fake))
 
-    with patch("app.orchestrator.jobs.upsert_node", new=fake_upsert_node):
+    with patch("app.merge.writer.upsert_node", new=fake_upsert_node):
         totals = {"symbols": 0, "contracts": 0, "edges": 0}
         async for rec in runner.run("symbols", str(tmp_path)):
             if rec.stream != "stdout":
@@ -371,8 +375,13 @@ async def test_d2_one_language_crash_does_not_take_down_the_others(tmp_path):
 
     async def _run(binary: Path) -> tuple[int, list[dict]]:
         runner = AnalyzerRunner(str(binary))
-        recs = await runner.run_collect("symbols", str(tmp_path))
-        return 0, [r.payload for r in recs if r.stream == "stdout"]
+        try:
+            recs = await runner.run_collect("symbols", str(tmp_path))
+            return 0, [r.payload for r in recs if r.stream == "stdout"]
+        except AnalyzerProcessError as exc:
+            return exc.exit_code, [
+                r.payload for r in exc.partial_records if r.stream == "stdout"
+            ]
 
     good_result, bad_result = await asyncio.gather(
         _run(good_lang), _run(bad_lang)
@@ -380,9 +389,11 @@ async def test_d2_one_language_crash_does_not_take_down_the_others(tmp_path):
 
     # Good run delivered everything.
     assert len(good_result[1]) == 10
+    assert good_result[0] == 0
     # Bad run delivered the records that arrived before the crash,
     # not zero — partial work is preserved.
     assert len(bad_result[1]) == 1
+    assert bad_result[0] == 7
     assert bad_result[1][0]["data"]["id"] == "bad.S0"
 
 
@@ -405,6 +416,7 @@ async def test_d2_concurrent_records_merge_into_one_graph(tmp_path):
         import json
         # Server side: exposes the endpoint.
         print(json.dumps({"record_type": "contract",
+                          "source_name": "ggoss-csharp",
                           "data": {"id": "x",
                                    "kind": "http_endpoint",
                                    "spec": {"method": "POST",
@@ -418,6 +430,7 @@ async def test_d2_concurrent_records_merge_into_one_graph(tmp_path):
         import json
         # Client side: same endpoint, different analyzer.
         print(json.dumps({"record_type": "contract",
+                          "source_name": "ggoss-ts",
                           "data": {"id": "y",
                                    "kind": "http_endpoint",
                                    "spec": {"method": "POST",
@@ -432,7 +445,7 @@ async def test_d2_concurrent_records_merge_into_one_graph(tmp_path):
 
     project_id = uuid.uuid4()
 
-    with patch("app.orchestrator.jobs.upsert_node", new=fake_upsert_node):
+    with patch("app.merge.writer.upsert_node", new=fake_upsert_node):
         for binary in (csharp, ts):
             runner = AnalyzerRunner(str(binary))
             async for rec in runner.run("contracts", str(tmp_path)):
@@ -463,12 +476,19 @@ async def test_d2_concurrent_records_merge_into_one_graph(tmp_path):
 def test_d2_registry_has_one_binary_per_phase1_language():
     """Regression guard. If ``_BINARIES`` ever drops a language the
     multi-language scenario silently degrades. PR-115 added Python
-    (ggoss-py — pure-stdlib Python AST analyzer) so the set is
-    six: 5 source-tree languages + the dotnet binary decompiler."""
+    (ggoss-py — pure-stdlib Python AST analyzer); PR-191 added cpp
+    (ggoss-cpp) and javascript (ggoss-ts walks .js); PR-192 added java
+    (ggoss-java); PR-193 added html/css/scss
+    (ggoss-web); PR-194 added kotlin (ggoss-kotlin);
+    PR-195 added go/rust/ruby (ggoss-treesitter, config-driven); PR-199 added
+    php/scala/swift (same analyzer, config-only). 18 source-tree languages +
+    the dotnet binary decompiler."""
     from app.analyzers.registry import _BINARIES
 
     expected = {
-        "csharp", "typescript", "python",
+        "csharp", "typescript", "javascript", "python", "cpp", "java", "kotlin",
+        "html", "css", "scss",
+        "go", "rust", "ruby", "php", "scala", "swift",
         "mssql", "oracle",
         "dotnet_binary",
     }

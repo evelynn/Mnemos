@@ -5,29 +5,34 @@
 
 <section class="hint">
   <p class="muted">
-    Large systems cannot be fed to an LLM in one shot. Mnemos walks a fixed pipeline
-    (L0 facts → L1 function → L2 file → L3 module summaries) and each stage writes
-    progress into the database. The pipeline below updates in real time via SSE —
-    see <code>docs/analysis-strategy.md</code> for the full design.
+    Mnemos first builds a deterministic source-reference graph with zero LLM tokens.
+    AI narration is optional: it summarizes bounded graph evidence after indexing,
+    but never replaces file/line references, certainty, or coverage gaps.
   </p>
 </section>
 
 <div id="onboard-banner" class="onboarding-step-cta" hidden>
-  <strong>Step 2 of 3:</strong> Trigger the first analysis run. The
-  project ID is pre-filled below — just press <em>Start analysis</em>.
+  <strong data-i18n="Step 2 of 3:">Step 2 of 3:</strong> <span data-i18n="Trigger the first analysis run. The project ID is pre-filled below — just press Start analysis.">Trigger the first analysis run. The
+  project ID is pre-filled below — just press <em>Start analysis</em>.</span>
 </div>
 
 <section>
-  <h2>Trigger run</h2>
+  <h2 data-i18n="Trigger run">Trigger run</h2>
   <form id="trigger" onsubmit="return triggerRun(event)">
     <label><span data-i18n="Project ID">Project ID</span><input type="text" name="project_id" required placeholder="uuid" /></label>
     <label><span data-i18n="Source path">Source path</span><input type="text" name="source_path" required value="/work" /></label>
     <label><span data-i18n="Git SHA">Git SHA</span><input type="text" name="git_sha" value="HEAD" /></label>
+    <label><span>Git ref (required for detached SHA)</span><input type="text" name="ref" placeholder="refs/heads/main" /></label>
     <label><span data-i18n="Scope">Scope</span>
       <select name="scope">
-        <option value="full" selected>full (L0 extract + findings + L1–L3)</option>
-        <option value="continuation">continuation (skip L0; summaries only)</option>
+        <option value="incremental" selected>incremental index (first run selects all; later runs select changes)</option>
+        <option value="full">full repair / all-producer reconciliation</option>
+        <option value="continuation">continuation (AI narration required)</option>
       </select>
+    </label>
+    <label><input type="checkbox" name="summarize" /> Generate optional AI narration after indexing</label>
+    <label><span>AI extraction file limit for unsupported languages (0 = disabled)</span>
+      <input type="number" name="agent_extract_limit" value="0" min="0" max="500" />
     </label>
     <button type="submit" class="primary" data-i18n="Start analysis">Start analysis</button>
   </form>
@@ -57,15 +62,15 @@
 </section>
 
 <section>
-  <h2>Pipeline monitor <span id="sse-status" class="sse-status" hidden></span></h2>
+  <h2><span data-i18n="Pipeline monitor">Pipeline monitor</span> <span id="sse-status" class="sse-status" hidden></span></h2>
   <label><span data-i18n="Run ID">Run ID</span><input type="text" id="run-id" placeholder="uuid" /></label>
-  <button onclick="monitor()" class="primary">Monitor</button>
-  <button onclick="stopMonitor()">Stop</button>
+  <button onclick="monitor()" class="primary" data-i18n="Monitor">Monitor</button>
+  <button onclick="stopMonitor()" data-i18n="Stop">Stop</button>
 
   <div id="pipeline"></div>
 
   <details>
-    <summary>Raw event stream</summary>
+    <summary data-i18n="Raw event stream">Raw event stream</summary>
     <pre id="events"></pre>
   </details>
 </section>
@@ -77,6 +82,7 @@
 .badge { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 999px; border: 1px solid transparent; }
 .badge.pending    { background: #eef1f4; color: #555; }
 .badge.running    { background: #dbe9ff; color: #0a3b8c; border-color: #9fc0ff; }
+.badge.published  { background: #e8e1ff; color: #44258a; border-color: #b4a0eb; }
 .badge.completed  { background: #dff4e0; color: #145a1f; border-color: #78c68a; }
 .badge.partial    { background: #fff1c2; color: #6a4b00; border-color: #d8ba57; }
 .badge.failed     { background: #ffdede; color: #7a1818; border-color: #d08989; }
@@ -91,13 +97,25 @@ async function triggerRun(ev) {
   ev.preventDefault();
   const fd = new FormData(ev.target);
   const pid = fd.get("project_id");
+  const scope = fd.get("scope") || "incremental";
+  const summarize = fd.get("summarize") === "on";
+  if (scope === "continuation" && !summarize) {
+    MnemosUI.showToast(
+      MnemosUI.t("Continuation only runs optional AI narration; enable AI narration first."),
+      "warning",
+    );
+    return false;
+  }
   const resp = await fetch(`/api/v1/projects/${pid}/analyze`, {
     method: "POST",
     headers: {"content-type": "application/json"},
     body: JSON.stringify({
       git_sha: fd.get("git_sha"),
-      scope: fd.get("scope") || "full",
+      ref: fd.get("ref") || null,
+      scope,
       source_path: fd.get("source_path"),
+      summarize,
+      agent_extract_limit: Number(fd.get("agent_extract_limit") || 0),
     }),
   });
   const body = await resp.text();
@@ -128,6 +146,7 @@ async function loadRuns(ev) {
   ev.preventDefault();
   const pid = document.getElementById("rpid").value.trim();
   const r = await fetch(`/api/v1/projects/${pid}/analysis_runs`);
+  if (!r.ok) { await MnemosUI.showError(MnemosUI.t("Could not load runs"), r); return false; }
   let rows = await r.json();
   // P2-7 drill-down — apply client-side ``?status=`` / ``?since=24h``
   // filters when the dashboard sent us here with a specific question.
@@ -150,7 +169,14 @@ async function loadRuns(ev) {
     MnemosUI.applyI18n(out);
     return false;
   }
-  let html = '<table class="data"><thead><tr><th>ID</th><th>Status</th><th>Triggered by</th><th>Git SHA</th><th>Started</th><th>Stats</th><th></th></tr></thead><tbody>';
+  let html = '<table class="data"><thead><tr>'
+    + `<th data-i18n="ID">ID</th>`
+    + `<th data-i18n="Status">Status</th>`
+    + `<th data-i18n="Triggered by">Triggered by</th>`
+    + `<th data-i18n="Git SHA">Git SHA</th>`
+    + `<th data-i18n="Started">Started</th>`
+    + `<th data-i18n="Stats">Stats</th>`
+    + '<th></th></tr></thead><tbody>';
   for (const r of rows) {
     const stats = r.stats ? JSON.stringify(r.stats) : "";
     // Tell webhook-driven runs apart from manual ones at a glance —
@@ -171,17 +197,21 @@ async function loadRuns(ev) {
       <td><code>${escapeHtml((r.git_sha || "").slice(0, 12))}</code></td>
       <td>${r.started_at ? `<time data-ts="${r.started_at}">${r.started_at}</time>` : ""}</td>
       <td><pre class="code">${escapeHtml(stats)}</pre></td>
-      <td><button onclick="monitorId('${r.id}')">Monitor</button></td>
+      <td><button onclick="monitorId('${r.id}')" data-i18n="Monitor">${MnemosUI.t("Monitor")}</button></td>
     </tr>`;
   }
   html += "</tbody></table>";
   out.innerHTML = html;
   MnemosUI.hydrateRelativeTimes(out);
+  MnemosUI.applyI18n(out);
   return false;
 }
 
 let _sse;
 let _poll;
+let _retryTimer;
+let _monitorGeneration = 0;
+let _activeRunId = null;
 let _stages = new Map();
 
 function monitorId(id) {
@@ -190,9 +220,12 @@ function monitorId(id) {
 }
 
 function stopMonitor() {
+  _monitorGeneration += 1;
+  _activeRunId = null;
   if (_sse) _sse.close();
   if (_poll) clearInterval(_poll);
-  _sse = null; _poll = null;
+  if (_retryTimer) clearTimeout(_retryTimer);
+  _sse = null; _poll = null; _retryTimer = null;
   // P2-8: a manual Stop clears the cross-tab strip too.
   if (window.MnemosUI && window.MnemosUI.publishSseState) {
     window.MnemosUI.publishSseState("idle");
@@ -206,16 +239,20 @@ async function monitor() {
   stopMonitor();
   const id = document.getElementById("run-id").value.trim();
   if (!id) return;
+  _activeRunId = id;
+  _sseRetryCount = 0;
+  const generation = _monitorGeneration;
   _stages = new Map();
   document.getElementById("events").textContent = "";
-  document.getElementById("pipeline").innerHTML = '<p class="muted">Waiting for stage events…</p>';
+  document.getElementById("pipeline").innerHTML = `<p class="muted">${MnemosUI.t("Waiting for stage events…")}</p>`;
 
-  await refreshStages(id);
-  await openStream(id);
+  await refreshStages(id, generation);
+  if (generation === _monitorGeneration && _activeRunId === id) {
+    await openStream(id, generation);
+  }
 }
 
-// Re-connection state for the EventSource — kept module-scoped so a
-// second monitor() call shares the same backoff budget.
+// Re-connection state for the active EventSource generation.
 let _sseRetryCount = 0;
 const _SSE_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 
@@ -237,17 +274,37 @@ function _markSseStatus(state) {
   }
 }
 
-async function openStream(id) {
+async function openStream(id, generation) {
+  if (generation !== _monitorGeneration || _activeRunId !== id) return;
+  if (_retryTimer) {
+    clearTimeout(_retryTimer);
+    _retryTimer = null;
+  }
   // Close any prior stream so a re-open doesn't leak the previous
   // EventSource (4th-round audit + Team B 5th-round #6).
   if (_sse) {
     try { _sse.close(); } catch (_) {}
     _sse = null;
   }
-  _markSseStatus("live");
-  _sse = new EventSource(`/api/v1/analysis_runs/${id}/events`);
+  if (_poll) {
+    clearInterval(_poll);
+    _poll = null;
+  }
+  const source = new EventSource(`/api/v1/analysis_runs/${id}/events`);
+  _sse = source;
+  source.onopen = () => {
+    if (generation !== _monitorGeneration || _activeRunId !== id) {
+      try { source.close(); } catch (_) {}
+      return;
+    }
+    _markSseStatus("live");
+  };
 
-  _sse.addEventListener("progress", async (e) => {
+  source.addEventListener("progress", async (e) => {
+    if (generation !== _monitorGeneration || _activeRunId !== id) {
+      try { source.close(); } catch (_) {}
+      return;
+    }
     _sseRetryCount = 0;  // any successful event resets backoff
     const el = document.getElementById("events");
     el.textContent += e.data + "\n";
@@ -255,27 +312,69 @@ async function openStream(id) {
     try {
       const ev = JSON.parse(e.data);
       if (ev.event && ev.event.startsWith("stage_")) {
-        await refreshStages(id);
+        await refreshStages(id, generation);
+        if (generation !== _monitorGeneration || _activeRunId !== id) return;
       }
+      const terminal = ["run_failed", "run_completed", "run_partial", "run_cancelled"].includes(ev.event);
       if (ev.event === "run_failed") {
         // PR-41 — also drop a notification so an operator who walked
         // away from the analysis tab sees the failure on whatever
         // page they come back to.
         MnemosUI.notify(
           MnemosUI.t("Analysis run failed"),
-          { body: ev.error || "(no detail)", level: "error" },
+          { body: ev.error_log || ev.error || "(no detail)", level: "error" },
         );
       } else if (ev.event === "run_completed") {
         MnemosUI.notify(
           MnemosUI.t("Analysis run completed."),
           { level: "success" },
         );
+      } else if (ev.event === "run_partial") {
+        MnemosUI.notify(
+          MnemosUI.t("Source graph published; derived analysis is partial."),
+          { body: ev.error || "", level: "warning" },
+        );
+      } else if (ev.event === "run_published") {
+        MnemosUI.notify(
+          MnemosUI.t("Source graph published; finishing derived analysis."),
+          { level: "info" },
+        );
+      } else if (ev.event === "run_cancel_requested") {
+        MnemosUI.notify(
+          MnemosUI.t("Stopping post-processing; the published graph will remain available."),
+          { level: "warning" },
+        );
+      } else if (ev.event === "run_cancelled") {
+        MnemosUI.notify(
+          MnemosUI.t("Analysis run cancelled."),
+          { level: "warning" },
+        );
+      }
+      if (terminal) {
+        await refreshStages(id, generation);
+        if (generation !== _monitorGeneration || _activeRunId !== id) return;
+        try { source.close(); } catch (_) {}
+        if (_sse === source) _sse = null;
+        if (_poll) clearInterval(_poll);
+        _poll = null;
+        if (_retryTimer) clearTimeout(_retryTimer);
+        _retryTimer = null;
+        _activeRunId = null;
+        _monitorGeneration += 1;
       }
     } catch {}
   });
 
-  _sse.onerror = () => {
+  source.onerror = () => {
+    if (generation !== _monitorGeneration || _activeRunId !== id) {
+      try { source.close(); } catch (_) {}
+      return;
+    }
     _markSseStatus("disconnected");
+    // EventSource has its own implicit retry loop. Close it before our
+    // bounded backoff schedules a replacement, or both loops reconnect.
+    try { source.close(); } catch (_) {}
+    if (_sse === source) _sse = null;
     // Don't churn a connection while the tab is hidden — the browser
     // throttles us anyway and we'd just rack up failed attempts.
     if (document.visibilityState === "hidden") {
@@ -294,8 +393,6 @@ async function openStream(id) {
         ),
         "error",
       );
-      try { _sse.close(); } catch (_) {}
-      _sse = null;
       return;
     }
     // Exponential backoff + 50% jitter — prevents a thundering herd of
@@ -303,19 +400,30 @@ async function openStream(id) {
     // worker restart.
     const base = _SSE_BACKOFF_MS[_sseRetryCount++];
     const delay = base * (0.5 + Math.random());
-    setTimeout(() => {
-      if (document.visibilityState === "visible") openStream(id);
+    if (_retryTimer) clearTimeout(_retryTimer);
+    _retryTimer = setTimeout(() => {
+      _retryTimer = null;
+      if (
+        generation === _monitorGeneration
+        && _activeRunId === id
+        && document.visibilityState === "visible"
+      ) openStream(id, generation);
     }, delay);
   };
 
-  _poll = setInterval(() => refreshStages(id), 3000);
+  _poll = setInterval(() => {
+    if (generation === _monitorGeneration && _activeRunId === id) {
+      refreshStages(id, generation);
+    }
+  }, 3000);
 }
 
 // Re-open the stream when the operator switches back to a hidden tab.
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && _sse && _sse.readyState === 2) {
-    const id = document.getElementById("run-id")?.value?.trim();
-    if (id) openStream(id);
+  if (document.visibilityState === "visible" && _activeRunId) {
+    if (_sse && _sse.readyState !== 2) return;
+    if (_retryTimer) return;
+    openStream(_activeRunId, _monitorGeneration);
   }
 });
 
@@ -326,13 +434,20 @@ window.addEventListener("beforeunload", () => {
     _sse = null;
   }
   if (_poll) { clearInterval(_poll); _poll = null; }
+  if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
+  _activeRunId = null;
+  _monitorGeneration += 1;
 });
 
-async function refreshStages(id) {
+async function refreshStages(id, generation = null) {
   try {
     const r = await fetch(`/api/v1/analysis_runs/${id}/stages`);
     if (!r.ok) return;
     const stages = await r.json();
+    if (
+      generation !== null
+      && (generation !== _monitorGeneration || _activeRunId !== id)
+    ) return;
     renderPipeline(stages);
   } catch {}
 }
@@ -340,7 +455,7 @@ async function refreshStages(id) {
 function renderPipeline(stages) {
   const pipeline = document.getElementById("pipeline");
   if (!stages.length) {
-    pipeline.innerHTML = '<p class="muted">No stages recorded yet.</p>';
+    pipeline.innerHTML = `<p class="muted">${MnemosUI.t("No stages recorded yet.")}</p>`;
     return;
   }
   const html = ['<div class="pipeline-grid">'];
@@ -350,7 +465,7 @@ function renderPipeline(stages) {
       : (s.status === "completed" ? 100 : 0);
     const progress = s.items_total > 0
       ? `${s.items_done} / ${s.items_total}`
-      : (s.status === "completed" ? "done" : "–");
+      : (s.status === "completed" ? MnemosUI.t("done") : "–");
     const stats = s.stats ? `<pre>${JSON.stringify(s.stats)}</pre>` : "";
     const err = s.error_log ? `<pre class="error">${s.error_log}</pre>` : "";
     html.push(`<div class="stage-card">
@@ -404,7 +519,7 @@ async function loadLatency(ev) {
   const box = document.getElementById("latency-box");
   box.innerHTML = '<div class="skeleton skeleton-card"></div>';
   const r = await fetch(`/api/v1/projects/${pid}/pipeline_latency?runs=10`);
-  if (!r.ok) { await MnemosUI.showError("Latency load failed", r); return false; }
+  if (!r.ok) { await MnemosUI.showError(MnemosUI.t("Latency load failed"), r); return false; }
   const d = await r.json();
   if (!d.stages.length) {
     box.innerHTML = '<p class="muted" data-i18n="No completed runs to measure yet.">No completed runs to measure yet.</p>';
@@ -443,6 +558,6 @@ async function loadLatency(ev) {
 
 // PR-137 — project picker. The page already handles ``?project=`` in
 // the onboarding section above; picker just kills the UUID copy-paste.
-MnemosUI.mountProjectPicker("#rpid", { autoSubmit: false });
+MnemosUI.mountProjectPicker("#rpid", { autoSubmit: true });
 </script>
 {% endblock %}

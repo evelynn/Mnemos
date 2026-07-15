@@ -24,18 +24,33 @@ async function load(ev) {
   if (action) qs.set("action", action);
   qs.set("limit", limit);
   const r = await fetch(`/api/v1/audit?${qs}`);
+  // Guard: an error must not render as "No events." — a falsely empty
+  // audit log is dangerous on a compliance surface.
+  if (!r.ok) { await MnemosUI.showError(MnemosUI.t("Could not load audit events"), r); return false; }
   const rows = await r.json();
   const out = document.getElementById("out");
   if (!Array.isArray(rows) || rows.length === 0) {
-    out.innerHTML = '<p class="muted">No events.</p>';
+    out.innerHTML = '<p class="muted" data-i18n="No events.">No events.</p>';
+    MnemosUI.applyI18n(out);
     return false;
   }
-  let html = '<table class="data"><thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th></tr></thead><tbody>';
+  // Render details as readable key:value pairs (a reviewer shouldn't
+  // parse raw JSON), and escape every cell — actor/action/target are
+  // not trusted strings.
+  const fmtDetails = (d) => {
+    if (d == null) return "";
+    if (typeof d !== "object") return escapeHtml(String(d));
+    return Object.entries(d).map(([k, v]) =>
+      `<span class="kv"><b>${escapeHtml(k)}</b>: ${escapeHtml(typeof v === "object" ? JSON.stringify(v) : String(v))}</span>`
+    ).join(" · ");
+  };
+  const H = (k) => escapeHtml(MnemosUI.t(k));
+  let html = `<table class="data"><thead><tr><th>${H("When")}</th><th>${H("Actor")}</th><th>${H("Action")}</th><th>${H("Target")}</th><th>${H("Details")}</th></tr></thead><tbody>`;
   for (const e of rows) {
     const ts = e.occurred_at
-      ? `<time data-ts="${e.occurred_at}">${e.occurred_at}</time>`
+      ? `<time data-ts="${escapeHtml(e.occurred_at)}">${escapeHtml(e.occurred_at)}</time>`
       : "";
-    html += `<tr><td>${ts}</td><td>${e.actor}</td><td>${e.action}</td><td><code>${e.target ?? ""}</code></td><td><pre>${escapeHtml(JSON.stringify(e.details))}</pre></td></tr>`;
+    html += `<tr><td>${ts}</td><td>${escapeHtml(e.actor ?? "")}</td><td>${escapeHtml(e.action ?? "")}</td><td><code>${escapeHtml(e.target ?? "")}</code></td><td>${fmtDetails(e.details)}</td></tr>`;
   }
   html += "</tbody></table>";
   out.innerHTML = html;

@@ -66,6 +66,7 @@ def _run_analyzer(node: str, verb: str) -> list[dict]:
         [node, str(_ANALYZER), verb, str(_TS_WEB)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     assert proc.returncode == 0, f"{verb} failed: {proc.stderr}"
     return [json.loads(ln) for ln in proc.stdout.splitlines() if ln.strip()]

@@ -20,13 +20,15 @@ from pathlib import Path
 
 import pytest
 
-from app.analyzers.runner import AnalyzerRunner, RunRecord
+from app.analyzers.runner import AnalyzerProcessError, AnalyzerRunner, RunRecord
 
 
 def _write_fake_analyzer(tmp_path: Path, script: str) -> Path:
     """Drop a #!/usr/bin/env python3 script in ``tmp_path`` and chmod +x."""
     binary = tmp_path / "ggoss-fake"
-    binary.write_text("#!/usr/bin/env python3\n" + textwrap.dedent(script))
+    binary.write_text(
+        "#!/usr/bin/env python3\n" + textwrap.dedent(script), encoding="utf-8"
+    )
     binary.chmod(binary.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return binary
 
@@ -95,7 +97,7 @@ async def test_analyzer_stderr_lines_carry_parse_error_flag_when_unparseable(
 
 @pytest.mark.asyncio
 async def test_analyzer_non_zero_exit_still_yields_records_before_failure(
-    tmp_path, caplog
+    tmp_path,
 ):
     """An analyzer that prints partial output and then crashes must
     still deliver whatever it already wrote — the merge pass keys off
@@ -113,7 +115,10 @@ async def test_analyzer_non_zero_exit_still_yields_records_before_failure(
         """,
     )
     runner = AnalyzerRunner(str(fake))
-    records = await runner.run_collect("symbols", str(tmp_path))
+    with pytest.raises(AnalyzerProcessError) as raised:
+        await runner.run_collect("symbols", str(tmp_path))
+    assert raised.value.exit_code == 7
+    records = raised.value.partial_records
     stdout_recs = [r for r in records if r.stream == "stdout"]
     assert any(r.payload["id"] == "Partial" for r in stdout_recs)
 

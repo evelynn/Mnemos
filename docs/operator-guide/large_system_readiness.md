@@ -1,14 +1,10 @@
 # Large-system analysis readiness
 
-A snapshot of what the platform can actually do on a real-world
-deployment, last updated PR-37. Spec §1.5 — "register a real C# +
-TS + MSSQL/Oracle system via GUI → first full analysis in ≤ 8
-hours" — is the bar; this doc tells an operator how close we are.
-
-**Readiness estimate**: ~88-90% (PR-66). The remaining gaps need a
-staging environment (live Oracle/MSSQL DB, real GitLab dev server,
-ANTHROPIC_API_KEY). The 12 e2e scenarios D1..D5 the audit pass
-identified are all closed by PR-32..PR-36.
+A snapshot of evidence and gaps for the source-analysis workflow, updated
+2026-07-15. The old Phase-1 target (C# + TS + MSSQL/Oracle in ≤8 hours) is not
+a measured capacity result. This document separates fixture/mock evidence from
+real-repository and production-environment evidence; it no longer assigns a
+readiness percentage.
 
 ## Analyzer accuracy benchmark (PR-66)
 
@@ -51,22 +47,19 @@ way OpenTelemetry's own conformance suite works.
 
 ## Headline
 
-* **End-to-end analysis pipeline**: works for the four Phase-1
-  languages. C# + TypeScript + MSSQL + Oracle binaries all build
-  in CI, the platform spawns them through ``AnalyzerRunner.run``,
-  ``_record_payload`` decodes the JSONL records and rewrites the
-  ones that need HTTP-contract-id resolution before the merge
-  writer is called. **D1 (full subprocess → upsert chain) +
-  D2 (four-language concurrent fan-out)** verified end-to-end in
-  PR-35. **D3 (sensitive_tables policy + per-DB mask + 10K
-  clamp) + D4 (break-glass workflow invariants) + D5 (cron
-  advisory-lock leader election)** verified in PR-36.
-* **L0 extract → graph upsert → L1-L3 summarise**: every leg has
-  production code and unit/integration tests. Stub LLM fallback
-  means a deployment without an Anthropic key still completes a
-  run (degraded summaries).
-* **GitLab webhook → ARQ enqueue**: production-tested. HMAC token
-  check, dedup, per-branch serialisation.
+* **End-to-end analysis pipeline**: JSONL subprocess → validation → run-scoped
+  staging → sealed producer coverage → atomic graph-head publication has local
+  fixture/mock integration evidence. The standard Compose worker
+  now carries the in-repo Python/TS/JS/C/C++/Java/Kotlin/Web/tree-sitter path.
+  C#, live DB, and .NET-binary analyzers are not part of that worker image, so
+  historical image-build tests do not prove those languages in the normal run.
+* **L0 extract → graph/MCP index** is the default complete product and uses
+  zero LLM tokens. L1-L3 narration and uncovered-language AI extraction are
+  independent explicit options; a missing AI backend does not degrade L0.
+* **GitLab webhook → ARQ enqueue** is fail-closed: HMAC + dedup, fixed worker
+  queue, and an operator-managed mirror containing the exact pushed SHA.
+  Without `SOURCE_MIRROR_ROOT`, the response says
+  `source_mirror_not_configured` and creates no queued ghost.
 * **PII masking**: 11 patterns × 11 column-name keywords + Korean
   validators (RRN / foreigner ID / driver's licence / Luhn).
   Verified on the 10 000-row payload that hits the
@@ -85,24 +78,22 @@ way OpenTelemetry's own conformance suite works.
   exception (auth / network / project-not-found). Live-server tests
   still belong in Phase 3 — that needs a real GitLab dev instance
   in CI.
-* **Scale**. The ``perf_indexes`` migration (0011) added the right
+* **Scale**. The ``perf_indexes`` migrations added the hot-path
   indexes for million-node graphs. **PR-34 added synthetic scale
   tests** that bound the hot paths: ``AnalyzerRunner`` drains 10 000
   JSON records in <30 s, ``mask_rows`` handles 50 000 rows × 5
   columns in <10 s and scales linearly with row count (a quadratic
   regex regression would blow the budget), the masker redacts a
   dense PII document with 55 patterns in one pass, and 20
-  parallel subprocess spawns complete in <15 s. A real 50 K-file
-  mono-repo run is still future work — the synthetic bounds give
-  CI a regression guard until that's available.
-* ~~**Crashed-worker auto-recovery**.~~ **Closed in PR-33.** A new
-  ``run_reset_stale_runs`` cron (every 15 minutes, advisory-locked)
-  flips any ``analysis_runs.status='running'`` row whose
-  ``started_at`` is older than 6 hours to ``status='failed'`` with
-  an explanatory ``error_log`` entry. The 6h cutoff is the longest
-  realistic full pipeline (12 stages × 30-min budget), so a wedged
-  run becomes visible to the GUI within 15 minutes without
-  truncating a genuinely long-running analysis.
+  parallel subprocess spawns complete in <15 s. An external real-repo run
+  has also produced 11,391 symbols and 57,491 CALLS with 25/25 MCP checks;
+  a controlled unseen-repo break-even/soak study is still future work.
+* **Crashed-worker recovery.** Before source publication, a stale ``running``
+  run is terminalised and its staging cannot affect the current graph. After
+  publication, the immutable receipt/head pair keeps the source generation
+  readable while recovery may resume only the derived post-processing work.
+  This is covered locally; a real process kill against PostgreSQL remains an
+  explicit evidence gap.
 
 ## Five operator scenarios — current state
 
@@ -114,10 +105,12 @@ GUI: register a project
   → ProjectDB binding (admin role + db_probe)   ✓
 GitLab push event
   → webhook HMAC verified                       ✓
-  → ARQ job enqueued                            ✓
+  → exact SHA present in configured mirror      required
+  → fixed-queue ARQ job enqueued                 ✓
   → analysis_run row created                    ✓
   → AnalyzerRunner spawns the binary            ✓
-  → JSONL records → Node/Edge upsert            ✓
+  → JSONL records → run-scoped stage rows       ✓ (local contract tests)
+  → coverage seal + atomic GraphHead receipt    ✓ (local contract tests)
   → findings rebuild                            ✓
   → diff submission                             ✓
   → ultrareview pipeline                        ✓
@@ -127,18 +120,20 @@ GitLab push event
 ### Scenario 2 — large mono-repo (50 K files, 3 languages)
 
 ```
-Worker memory: tmpfs /scratch = 512 MB         ⚠ unverified
+Analyzer stdout/stderr queue = 256 records       ✓
+JSONL record cap = 1 MiB                         ✓
+Analyzer wall timeout + terminate/kill           ✓
+Seen identities: 100K RAM then temp-disk spill   ✓
+Deletion sweep reads current rows in pages       ✓
 Per-stage time budget: 1800 s (jobs.py)         ✓
-Stage skip when analyzer absent                 ✓ (test_e1_*)
+Unavailable producer recorded; empty success denied ✓ (focused contract tests)
 Row-cap clamp at 10 000 on data queries         ✓ (test_e2_*)
 Masker stays correct at 10K rows                ✓ (PR-32)
 ```
 
-The platform won't crash on a 50 K-file payload — the stage
-budget bounds the worst-case time, the JSONL streaming bounds
-memory growth — but the *first* large run is still a calibration
-exercise. Operators are expected to tune the per-language stage
-budget after seeing real numbers.
+The runner now has hard memory/output/time boundaries, but a 50 K-file
+multi-language soak is not yet evidence-backed. Treat the first run as a
+calibration exercise and do not claim a capacity number before measuring it.
 
 ### Scenario 3 — sensitive database
 
@@ -156,17 +151,20 @@ Masking applied + masking_applied=true flag      ✓
 
 ```
 Analyzer subprocess crashes (non-zero exit)
-  - partial JSONL records preserved              ✓ (PR-32)
+  - partial JSONL records isolated in staging    ✓
   - stage finishes with error_log set            ✓
+  - old published graph remains readable         ✓ (local concurrency tests)
 Worker crashes mid-run
   - heartbeat key goes stale                     ✓
   - /health/ready surfaces 503                   ✓
-  - reset_stale_runs cron flips to 'failed'      ✓ (PR-33, every 15 min)
+  - pre-publish stale run cannot move GraphHead  ✓
+  - post-publish receipt remains readable        ✓ (local lifecycle tests)
 ARQ Redis connection drop
   - asyncpg reconnect                            ✓ (pool)
-  - ARQ retry policy                             ✓ (default 5x)
+  - source staging is not exposed on retry       ✓
 Postgres connection drop
   - request-level 503                            ✓ (uniform handler)
+  - transaction rollback preserves old head      ✓ by contract; real fault injection pending
 ```
 
 ### Scenario 5 — multi-operator concurrency
@@ -177,7 +175,8 @@ viewer cannot submit_diff                        ✓ (PR-18)
 operator cannot grant break-glass                ✓
 admin cannot self-approve own grant              ✓
 break-glass TTL = 15 min                         ✓ (PR-32 pin)
-per-branch queue serialisation                   ✓
+single graph mutation per worker                 ✓
+database head CAS + run/project provenance       ✓ (local; real PostgreSQL CI pending)
 cross-tab onboarding state sync                  ✓ (PR-28)
 cross-tab SSE strip                              ✓ (PR-23)
 ```
@@ -185,17 +184,18 @@ cross-tab SSE strip                              ✓ (PR-23)
 ## What new operators should expect on day 1
 
 1. Register the project through the GUI (Projects tab).
-2. Add the ProjectDB binding(s) — the platform will refuse a
-   read-write credential at probe time.
-3. Trigger the first analysis run with **scope: full** and a tight
-   per-stage budget (default 1800 s; halve it for the first run
-   if the platform is single-host).
+2. Optionally add ProjectDB bindings only when source-impact analysis needs
+   schema evidence; source indexing does not require a database connection.
+3. Trigger the default **scope: incremental**. With no completed baseline it
+   selects every relevant producer and builds the deterministic index with zero
+   LLM tokens; later runs skip unchanged families. Reserve **full** for explicit
+   repair/reconciliation, and enable narration only for an evaluation/use case.
 4. Watch the Pipeline monitor tab. SSE retries up to 6 times
    with exponential backoff + jitter before giving up.
 5. When findings render, review them; click "Submit diff" to take
    a fix through ultrareview; an admin approves with a break-glass
    token if the diff is blocked.
 
-The first end-to-end run usually takes 1-2 hours per 10 KLOC of
-new source. After that, incremental webhook-driven runs typically
-complete in under 5 minutes.
+Do not estimate runtime from KLOC alone. Record analyzer-family file counts,
+bytes, stage time, and graph rows. A same-content incremental run hashes the
+source then spawns no analyzer; a changed family re-walks that family today.

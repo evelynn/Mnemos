@@ -49,15 +49,18 @@ def test_finds_accept_transitive_and_max_depth():
 def test_edge_carries_exercised_flag():
     body = _read(_APP / "mcp" / "queries.py")
     idx = body.find("def _edge_out(")
-    slab = body[idx:idx + 500]
+    next_fn = body.find("\nasync def ", idx + 1)
+    slab = body[idx:next_fn]
     assert '"exercised"' in slab
-    assert '(e.data or {}).get("exercised"' in slab
+    assert 'view["exercised"]' in slab
+    assert 'view["data"]' in slab
 
 
 def test_response_carries_truncated_and_depth_reached():
     body = _read(_APP / "mcp" / "queries.py")
     idx = body.find("async def _walk_calls(")
-    slab = body[idx:idx + 2200]
+    next_fn = body.find("\nasync def ", idx + 1)
+    slab = body[idx:next_fn]
     assert '"truncated"' in slab and "truncated" in slab
     assert '"depth_reached"' in slab
 

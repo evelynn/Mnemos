@@ -46,7 +46,9 @@ from app.models import plans as _plans  # noqa: E402,F401
 from app.models import projects as _projects  # noqa: E402,F401
 from app.models.base import Base  # noqa: E402
 from app.models.findings import Finding  # noqa: E402
-from app.models.graph import Edge, Node  # noqa: E402
+from app.models.graph import AnalysisRun, Edge, GraphHead, Node  # noqa: E402
+from app.models.projects import Project  # noqa: E402
+from app.testing.graph_publication import published_run_fields  # noqa: E402
 
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -80,6 +82,41 @@ async def _seed_mnemos_self_analysis(s: AsyncSession, project_id: _uuid.UUID) ->
     sym_envs = _run_analyzer("symbols", _MNEMOS_SERVER_APP)
     edge_envs = _run_analyzer("calls", _MNEMOS_SERVER_APP)
     now = datetime.now(tz=timezone.utc)
+    run_id = _uuid.uuid4()
+    s.add(
+        Project(
+            id=project_id,
+            name="mnemos-dogfood-findings",
+            gitlab_project_id=122,
+            gitlab_url="https://example.invalid/mnemos-dogfood-findings",
+            default_branch="main",
+            languages=["python"],
+        )
+    )
+    s.add(
+        AnalysisRun(
+            id=run_id,
+            project_id=project_id,
+            status="completed",
+            triggered_by="test:dogfood",
+            git_sha="a" * 40,
+            scope="full",
+            started_at=now,
+            completed_at=now,
+            **published_run_fields(generation=1, published_at=now),
+        )
+    )
+    await s.flush()
+    s.add(
+        GraphHead(
+            project_id=project_id,
+            current_run_id=run_id,
+            generation=1,
+            overlay_generation=0,
+            state="ready",
+            published_at=now,
+        )
+    )
     n_count = 0
     for env in sym_envs:
         if env["record_type"] != "symbol":
@@ -92,12 +129,15 @@ async def _seed_mnemos_self_analysis(s: AsyncSession, project_id: _uuid.UUID) ->
             valid_from=now,
         ))
         n_count += 1
-    e_count = 0
+    # The analyzer can emit multiple invocation sites for one logical edge.
+    # The published graph stores one current row per logical tuple, matching
+    # the production staging/materialization contract.
+    logical_edges: dict[tuple[str, str, str], Edge] = {}
     for env in edge_envs:
         if env["record_type"] != "edge":
             continue
         d = env["data"]
-        s.add(Edge(
+        edge = Edge(
             id=_uuid.uuid4(), project_id=project_id,
             source_id=d["source_id"], target_id=d["target_id"],
             kind=d.get("kind", "CALLS"),
@@ -105,8 +145,10 @@ async def _seed_mnemos_self_analysis(s: AsyncSession, project_id: _uuid.UUID) ->
             certainty=d.get("certainty", "asserted"),
             created_by=[env.get("source_name", "ggoss-py")],
             valid_from=now,
-        ))
-        e_count += 1
+        )
+        logical_edges[(edge.source_id, edge.target_id, edge.kind)] = edge
+    s.add_all(logical_edges.values())
+    e_count = len(logical_edges)
     await s.commit()
     return n_count, e_count
 

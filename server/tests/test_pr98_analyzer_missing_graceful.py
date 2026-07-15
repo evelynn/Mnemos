@@ -20,6 +20,7 @@ crashing the run.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -59,10 +60,12 @@ async def test_missing_binary_does_not_crash_caller(tmp_path):
 @pytest.mark.asyncio
 async def test_existing_binary_still_works(tmp_path):
     """Regression — the new try/except mustn't swallow a successful
-    spawn. Use /bin/true: it exits 0 with no output, which the
-    runner should report as a clean zero-record run."""
-    runner = AnalyzerRunner("/bin/true")
-    records = await runner.run_collect("schema", str(tmp_path))
+    spawn. The current Python executable exists on every supported platform;
+    a tiny script gives the runner a clean zero-record process."""
+    script = tmp_path / "clean_exit.py"
+    script.write_text("pass\n", encoding="utf-8")
+    runner = AnalyzerRunner(sys.executable)
+    records = await runner.run_collect(str(script), str(tmp_path))
     # No stderr error record (binary was found and ran).
     err = [r for r in records if r.stream == "stderr"
            and r.payload.get("level") == "error"

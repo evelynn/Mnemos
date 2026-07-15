@@ -28,6 +28,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Re-use the canonical resolver from the diffs router. The previous
@@ -38,9 +39,19 @@ from app.api.diffs import _resolve_submission_in_user_org
 from app.audit.logger import record as audit_record
 from app.auth.rbac import require_admin
 from app.db import get_session
+from app.graph_publication import GraphGenerationChanged, GraphPublicationError
 from app.models.auth import User
-from app.models.plans import DiffBreakGlassGrant
+from app.models.plans import DiffBreakGlassGrant, DiffSubmission
 from app.obs.metrics import break_glass_grants_total
+from app.plan_provenance import (
+    PlanSourceRevisionError,
+    lock_current_plan_for_action,
+)
+from app.review_revision import (
+    bind_review_revision,
+    lock_review_graph_revision,
+    read_review_graph_stamp,
+)
 from app.safety.review import run_pipeline
 from app.safety.tokens import hash_token
 
@@ -113,6 +124,24 @@ async def issue_break_glass_grant(
     submission, plan = await _resolve_submission_in_user_org(db, submission_id, user)
     if plan.worktree_path is None:
         raise HTTPException(status_code=400, detail="plan_or_worktree_missing")
+    if submission.status != "blocked":
+        raise HTTPException(status_code=409, detail="submission_not_blocked")
+
+    reviewed_diff = submission.diff
+    try:
+        review_stamp = await read_review_graph_stamp(
+            db,
+            project_id=plan.project_id,
+        )
+    except GraphPublicationError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "canonical_graph_revision_unavailable",
+                "message": "Break-glass review requires a published graph revision",
+            },
+        ) from exc
 
     # Re-run the ultrareview pipeline before granting. The grant is only
     # valid if the *current* diff state passes — we never hand out a
@@ -121,9 +150,10 @@ async def issue_break_glass_grant(
         db,
         project_id=plan.project_id,
         plan_id=plan.id,
-        diff=submission.diff,
+        diff=reviewed_diff,
     )
     if report.verdict == "blocked":
+        await db.rollback()
         raise HTTPException(
             status_code=409,
             detail={
@@ -133,13 +163,74 @@ async def issue_break_glass_grant(
             },
         )
 
-    # Persist the new ultrareview result on the submission so the audit
-    # trail shows what the admin actually saw at issue time.
+    try:
+        review_revision = await lock_review_graph_revision(
+            db,
+            project_id=plan.project_id,
+            expected_stamp=review_stamp,
+        )
+    except GraphGenerationChanged as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "graph_revision_changed_during_review",
+                "message": "The graph changed during review; rerun break-glass",
+            },
+        ) from exc
+    except GraphPublicationError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "canonical_graph_revision_unavailable",
+                "message": "Break-glass review requires a published graph revision",
+            },
+        ) from exc
+
+    try:
+        plan, _plan_revision = await lock_current_plan_for_action(
+            db,
+            plan_id=plan.id,
+            project_id=plan.project_id,
+        )
+    except PlanSourceRevisionError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "plan_source_revision_stale",
+                "message": "Recreate the plan against the current graph revision",
+            },
+        ) from exc
+
+    submission = (
+        await db.execute(
+            select(DiffSubmission)
+            .where(DiffSubmission.id == submission_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    if submission.status != "blocked" or submission.diff != reviewed_diff:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "submission_changed_during_review",
+                "message": "The diff/status changed; rerun break-glass",
+            },
+        )
+
+    # Persist the rerun findings in DiffOut's canonical list shape. The grant
+    # retains the full report; both rows carry the same exact graph revision.
     rerun_payload: dict[str, Any] = report.as_jsonable()
-    submission.auto_review_findings = rerun_payload
+    submission.auto_review_findings = [
+        finding.as_jsonable() for finding in report.findings
+    ]
+    bind_review_revision(submission, review_revision)
 
     token = secrets.token_urlsafe(32)
-    break_glass_grants_total.labels(action="issued").inc()
     grant = DiffBreakGlassGrant(
         submission_id=submission.id,
         token_hash=_hash_token(token),
@@ -148,9 +239,13 @@ async def issue_break_glass_grant(
         rerun_review_payload=rerun_payload,
         expires_at=datetime.now(tz=timezone.utc) + GRANT_TTL,
     )
+    bind_review_revision(grant, review_revision)
     db.add(grant)
+    # The canonical GraphHead/AnalysisRun locks remain held until this commit,
+    # closing the post-compute publication/overlay race.
     await db.commit()
     await db.refresh(grant)
+    break_glass_grants_total.labels(action="issued").inc()
 
     await audit_record(
         actor=f"user:{user.id}",
@@ -161,6 +256,10 @@ async def issue_break_glass_grant(
             "submission_id": str(submission.id),
             "rerun_verdict": report.verdict,
             "expires_at": grant.expires_at.isoformat(),
+            "review_run_id": str(review_revision.run_id),
+            "review_source_generation": review_revision.source_generation,
+            "review_overlay_generation": review_revision.overlay_generation,
+            "review_git_sha": review_revision.git_sha,
         },
     )
 

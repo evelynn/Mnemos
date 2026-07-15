@@ -26,7 +26,11 @@ from app.mcp.queries import _score_symbol, _tokenize
 
 def test_tokenize_splits_and_lowercases():
     assert _tokenize("Payment Retry!") == ["payment", "retry"]
-    assert _tokenize("find-callers_v2") == ["find", "callers", "v2"]
+    # snake_case keeps the whole identifier AND its parts (PR-186), so an
+    # exact symbol query (``should_compress``) matches that symbol while the
+    # parts still drive cross-convention concept matching.
+    assert _tokenize("find-callers_v2") == ["find", "callers_v2", "callers", "v2"]
+    assert _tokenize("order_create") == ["order_create", "order", "create"]
     assert _tokenize("") == []
     assert _tokenize(None) == []
 
@@ -90,7 +94,7 @@ def test_search_symbols_is_ranked():
         Path(__file__).resolve().parents[1] / "app" / "mcp" / "queries.py"
     ).read_text(encoding="utf-8")
     idx = body.find("async def search_symbols(")
-    slab = body[idx:idx + 5500]
+    slab = body[idx:idx + 8000]
     assert "_tokenize(query)" in slab
     assert "_score_symbol(" in slab
     assert "scored.sort(" in slab
@@ -104,6 +108,7 @@ def test_get_symbol_returns_l1_summary():
         Path(__file__).resolve().parents[1] / "app" / "mcp" / "queries.py"
     ).read_text(encoding="utf-8")
     idx = body.find("async def get_symbol(")
-    slab = body[idx:idx + 2200]
+    next_def = body.find("\nasync def ", idx + 1)
+    slab = body[idx:next_def if next_def != -1 else None]
     assert '"l1_summary"' in slab
     assert "Summary.level == 1" in slab

@@ -10,6 +10,66 @@ namespace Mnemos.Analyzers.CSharp;
 public static class Commands
 {
     private static bool s_msbuildRegistered;
+    private static readonly HashSet<string> s_skipDirectories = new(
+        new[]
+        {
+            "node_modules", "bin", "obj", "build", "dist", "out", "target",
+            "vendor", "third_party", "__pycache__"
+        },
+        StringComparer.OrdinalIgnoreCase);
+
+    private static bool IsReparsePoint(string path)
+    {
+        try
+        {
+            return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Envelope.ReportError(path, ex.Message);
+            return true;
+        }
+    }
+
+    private static IEnumerable<string> EnumerateSourceFiles(string path, string pattern)
+    {
+        var pending = new Stack<string>();
+        var root = Path.GetFullPath(path);
+        if (IsReparsePoint(root)) yield break;
+        pending.Push(root);
+        while (pending.Count > 0)
+        {
+            var current = pending.Pop();
+            IReadOnlyList<string> files;
+            IReadOnlyList<string> directories;
+            try
+            {
+                // Materialise inside the protected block: Directory.Enumerate*
+                // can raise while advancing, not only when creating the
+                // enumerable.
+                files = Directory.EnumerateFiles(current, pattern, SearchOption.TopDirectoryOnly).ToArray();
+                directories = Directory.EnumerateDirectories(current, "*", SearchOption.TopDirectoryOnly).ToArray();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Envelope.ReportError(current, ex.Message);
+                continue;
+            }
+
+            foreach (var file in files.OrderBy(f => f, StringComparer.Ordinal))
+            {
+                if (!IsReparsePoint(file))
+                    yield return file;
+            }
+            foreach (var directory in directories.OrderByDescending(d => d, StringComparer.Ordinal))
+            {
+                var name = Path.GetFileName(directory);
+                if (name.StartsWith('.') || s_skipDirectories.Contains(name)) continue;
+                if (IsReparsePoint(directory)) continue;
+                pending.Push(directory);
+            }
+        }
+    }
 
     private static void EnsureMsBuild()
     {
@@ -44,9 +104,9 @@ public static class Commands
             return Task.FromResult(0);
         }
 
-        var csFiles = Directory.EnumerateFiles(path, "*.cs", SearchOption.AllDirectories).Take(10000).Count();
-        var slnFiles = Directory.EnumerateFiles(path, "*.sln", SearchOption.AllDirectories).Count();
-        var csprojFiles = Directory.EnumerateFiles(path, "*.csproj", SearchOption.AllDirectories).Count();
+        var csFiles = EnumerateSourceFiles(path, "*.cs").Take(10000).Count();
+        var slnFiles = EnumerateSourceFiles(path, "*.sln").Count();
+        var csprojFiles = EnumerateSourceFiles(path, "*.csproj").Count();
 
         var applicable = csFiles > 0 || csprojFiles > 0 || slnFiles > 0;
         var reason = applicable
@@ -65,9 +125,9 @@ public static class Commands
         var (path, _) = ParseCommon(args);
         if (path is null) { Console.Error.WriteLine("inventory requires <path>"); return Task.FromResult(2); }
 
-        var files = Directory.EnumerateFiles(path, "*.cs", SearchOption.AllDirectories).ToList();
-        var projects = Directory.EnumerateFiles(path, "*.csproj", SearchOption.AllDirectories).ToList();
-        var solutions = Directory.EnumerateFiles(path, "*.sln", SearchOption.AllDirectories).ToList();
+        var files = EnumerateSourceFiles(path, "*.cs").ToList();
+        var projects = EnumerateSourceFiles(path, "*.csproj").ToList();
+        var solutions = EnumerateSourceFiles(path, "*.sln").ToList();
 
         Console.WriteLine(JsonSerializer.Serialize(new
         {
@@ -297,8 +357,8 @@ public static class Commands
     {
         var results = new List<Compilation>();
 
-        var solutions = Directory.EnumerateFiles(path, "*.sln", SearchOption.AllDirectories).ToList();
-        var projects = Directory.EnumerateFiles(path, "*.csproj", SearchOption.AllDirectories).ToList();
+        var solutions = EnumerateSourceFiles(path, "*.sln").ToList();
+        var projects = EnumerateSourceFiles(path, "*.csproj").ToList();
 
         if (solutions.Count > 0 || projects.Count > 0)
         {
@@ -340,7 +400,7 @@ public static class Commands
 
         // Fallback: parse raw .cs files without build context.
         var trees = new List<SyntaxTree>();
-        foreach (var file in Directory.EnumerateFiles(path, "*.cs", SearchOption.AllDirectories))
+        foreach (var file in EnumerateSourceFiles(path, "*.cs"))
         {
             try
             {

@@ -21,12 +21,17 @@ def _read() -> str:
 
 
 def test_all_analyzer_services_present():
-    """PR-115 added ggoss-py; the set is now six analyzer services."""
+    """PR-115 py, PR-191 cpp, PR-192 java; eight analyzer services."""
     body = _read()
     for service in (
         "analyzer-csharp:",
         "analyzer-ts:",
         "analyzer-py:",
+        "analyzer-cpp:",
+        "analyzer-java:",
+        "analyzer-web:",
+        "analyzer-kotlin:",
+        "analyzer-treesitter:",
         "analyzer-sql-mssql:",
         "analyzer-sql-oracle:",
         "analyzer-binary-dotnet:",
@@ -40,6 +45,11 @@ def test_all_images_tagged_under_mnemos_prefix():
         "image: mnemos/ggoss-csharp:latest",
         "image: mnemos/ggoss-ts:latest",
         "image: mnemos/ggoss-py:latest",
+        "image: mnemos/ggoss-cpp:latest",
+        "image: mnemos/ggoss-java:latest",
+        "image: mnemos/ggoss-web:latest",
+        "image: mnemos/ggoss-kotlin:latest",
+        "image: mnemos/ggoss-treesitter:latest",
         "image: mnemos/ggoss-sql-mssql:latest",
         "image: mnemos/ggoss-sql-oracle:latest",
         "image: mnemos/ggoss-binary-dotnet:latest",
@@ -52,9 +62,9 @@ def test_all_under_analyzers_profile():
     opts in. PR-98's graceful degradation handles the opt-out path."""
     body = _read()
     # Count the profile lines that scope analyzer services. PR-115
-    # bumped the floor from 5 to 6 (added ggoss-py).
+    # 5→6 (py); →7 (cpp); →8 (java); →9 (web); →10 (kotlin); PR-195 →11 (treesitter).
     profile_lines = [ln for ln in body.splitlines() if 'profiles: ["analyzers"]' in ln]
-    assert len(profile_lines) >= 6
+    assert len(profile_lines) >= 11
 
 
 def test_image_tags_match_registry_binaries():

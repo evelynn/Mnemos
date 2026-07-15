@@ -141,6 +141,14 @@ class _FakeSession:
             # uses _walk_calls which iterates anyway.
             return _FakeResult(self.edges)
         if "from nodes" in s or "nodes " in s:
+            # Column select (project_root_prefix pulls location.file
+            # only) → row tuples, matching SQLAlchemy's Row shape.
+            if s.lstrip().startswith("select (nodes.data"):
+                return _FakeResult([
+                    ((getattr(n, "data", None) or {}).get("location", {})
+                     .get("file"),)
+                    for n in self.nodes
+                ])
             return _FakeResult(self.nodes)
         if "select 1" in s:
             return _FakeResult([1])

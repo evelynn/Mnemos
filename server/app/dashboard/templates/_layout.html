@@ -47,29 +47,57 @@
         </div>
       </div>
     </div>
+    {% set _analysis_tabs = ['analysis', 'data', 'graph', 'findings', 'report'] %}
+    {% set _more_tabs = ['plans', 'diffs', 'audit', 'health', 'settings', 'profile', 'docs', 'users', 'organizations', 'sso', 'gdpr'] %}
     <nav>
-      <a href="/" class="{% if active_tab == 'dashboard' %}active{% endif %}" data-i18n="Dashboard">Dashboard</a>
-      <a href="/projects" class="{% if active_tab == 'projects' %}active{% endif %}" data-i18n="Projects">Projects</a>
-      <a href="/analysis" class="{% if active_tab == 'analysis' %}active{% endif %}" data-i18n="Analysis">Analysis</a>
-      <a href="/data" class="{% if active_tab == 'data' %}active{% endif %}" data-i18n="Data">Data</a>
-      <a href="/graph" class="{% if active_tab == 'graph' %}active{% endif %}" data-i18n="Graph">Graph</a>
-      <a href="/ask" class="{% if active_tab == 'ask' %}active{% endif %}" data-i18n="Ask">Ask</a>
-      <a href="/plans" class="{% if active_tab == 'plans' %}active{% endif %}" data-i18n="Plans">Plans</a>
-      <a href="/diffs" class="{% if active_tab == 'diffs' %}active{% endif %}" data-i18n="Diffs">Diffs</a>
-      <a href="/findings" class="{% if active_tab == 'findings' %}active{% endif %}" data-i18n="Findings">Findings</a>
-      <a href="/report" class="{% if active_tab == 'report' %}active{% endif %}" data-i18n="Report">Report</a>
-      <a href="/audit" class="{% if active_tab == 'audit' %}active{% endif %}" data-i18n="Audit">Audit</a>
-      <a href="/profile" class="{% if active_tab == 'profile' %}active{% endif %}" data-i18n="Profile">Profile</a>
-      <a href="/settings" class="{% if active_tab == 'settings' %}active{% endif %}" data-i18n="Settings">Settings</a>
-      <a href="/health" class="{% if active_tab == 'health' %}active{% endif %}" data-i18n="Health">Health</a>
-      <a href="/docs" class="{% if active_tab == 'docs' %}active{% endif %}" data-i18n="Docs">Docs</a>
-      {% if user.role == 'admin' %}
-      <div class="nav-section muted" data-i18n="Admin">Admin</div>
-      <a href="/users" class="{% if active_tab == 'users' %}active{% endif %}" data-i18n="Users">Users</a>
-      <a href="/organizations" class="{% if active_tab == 'organizations' %}active{% endif %}" data-i18n="Organizations">Organizations</a>
-      <a href="/sso" class="{% if active_tab == 'sso' %}active{% endif %}" data-i18n="SSO / OIDC">SSO / OIDC</a>
-      <a href="/gdpr" class="{% if active_tab == 'gdpr' %}active{% endif %}" data-i18n="GDPR tools">GDPR tools</a>
-      {% endif %}
+      <a href="/" class="{% if active_tab == 'dashboard' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg><span data-i18n="Dashboard">Dashboard</span></a>
+      <a href="/ask" class="{% if active_tab == 'ask' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10h8M8 14h5M21 12a9 9 0 1 1-3.6-7.2L21 4v5h-5"/></svg><span data-i18n="Ask">Ask</span></a>
+      <a href="/chat" class="{% if active_tab == 'chat' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M8 12h8M8 8h8M4 4h16v12H7l-3 3V4z"/></svg><span data-i18n="Chat">Chat</span></a>
+      <a href="/projects" class="{% if active_tab == 'projects' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4zM3 7v10l9 4 9-4V7"/></svg><span data-i18n="Projects">Projects</span></a>
+
+      <div class="nav-group{% if active_tab in _analysis_tabs %} open{% endif %}" data-group="analysis">
+        <button type="button" class="nav-group-toggle"
+                aria-expanded="{{ 'true' if active_tab in _analysis_tabs else 'false' }}">
+          <span data-i18n="Analysis">Analysis</span>
+          <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
+          </svg>
+        </button>
+        <div class="nav-group-items">
+          <a href="/analysis" class="{% if active_tab == 'analysis' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg><span data-i18n="Runs">Runs</span></a>
+          <a href="/data" class="{% if active_tab == 'data' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg><span data-i18n="Data">Data</span></a>
+          <a href="/graph" class="{% if active_tab == 'graph' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="9" r="2.4"/><circle cx="9" cy="18" r="2.4"/><path d="M8 7l8 1.4M8 16l1-6"/></svg><span data-i18n="Graph">Graph</span></a>
+          <a href="/findings" class="{% if active_tab == 'findings' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4m0 4h.01M10.3 3.9 2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg><span data-i18n="Findings">Findings</span></a>
+          <a href="/report" class="{% if active_tab == 'report' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l3 3v15H6zM14 3v4h4M9 13h6M9 17h4"/></svg><span data-i18n="Report">Report</span></a>
+        </div>
+      </div>
+
+      <div class="nav-group{% if active_tab in _more_tabs %} open{% endif %}" data-group="more">
+        <button type="button" class="nav-group-toggle"
+                aria-expanded="{{ 'true' if active_tab in _more_tabs else 'false' }}">
+          <span data-i18n="More">More</span>
+          <svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 6l6 6-6 6" />
+          </svg>
+        </button>
+        <div class="nav-group-items">
+          <a href="/plans" class="{% if active_tab == 'plans' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l2 2 4-4M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/></svg><span data-i18n="Plans">Plans</span></a>
+          <a href="/diffs" class="{% if active_tab == 'diffs' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M5 8l-3 4 3 4M19 8l3 4-3 4"/></svg><span data-i18n="Diffs">Diffs</span></a>
+          <a href="/audit" class="{% if active_tab == 'audit' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4M12 2l8 3v6c0 5-3.5 8-8 11-4.5-3-8-6-8-11V5z"/></svg><span data-i18n="Audit">Audit</span></a>
+          <a href="/health" class="{% if active_tab == 'health' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span data-i18n="Health">Health</span></a>
+          <a href="/settings" class="{% if active_tab == 'settings' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.3 1a7 7 0 0 0-1.7-1l-.4-2.5h-4l-.4 2.5a7 7 0 0 0-1.7 1l-2.3-1-2 3.4L4.1 11a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7 7 0 0 0 1.7-1l2.3 1 2-3.4-2-1.5a7 7 0 0 0 .1-1z"/></svg><span data-i18n="Settings">Settings</span></a>
+          <a href="/profile" class="{% if active_tab == 'profile' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><span data-i18n="Profile">Profile</span></a>
+          <a href="/docs" class="{% if active_tab == 'docs' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h11l5 5v11H4zM15 4v5h5"/></svg><span data-i18n="Docs">Docs</span></a>
+          {% if user.role == 'admin' %}
+          <a href="/users" class="{% if active_tab == 'users' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M2.5 21a6.5 6.5 0 0 1 13 0M16 6a3 3 0 0 1 0 6m5.5 9a5.5 5.5 0 0 0-4-5.3"/></svg><span data-i18n="Users">Users</span></a>
+          <a href="/organizations" class="{% if active_tab == 'organizations' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="13" rx="1.5"/><path d="M8 8V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v3M12 12v4"/></svg><span data-i18n="Organizations">Organizations</span></a>
+          <a href="/sso" class="{% if active_tab == 'sso' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M15 7h3a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-3M10 17l5-5-5-5M15 12H3"/></svg><span data-i18n="SSO / OIDC">SSO / OIDC</span></a>
+          <a href="/gdpr" class="{% if active_tab == 'gdpr' %}active{% endif %}"><svg class="nav-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span data-i18n="GDPR tools">GDPR tools</span></a>
+          {% endif %}
+        </div>
+      </div>
     </nav>
     <form method="post" action="/logout" class="logout-form">
       <span class="muted">{{ user.username }}</span>
@@ -88,8 +116,26 @@
               aria-label="Dark theme">☾</button>
     </div>
   </aside>
-  <main class="content">
-    {% block content %}{% endblock %}
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-title">{% block topbar_title %}{% endblock %}</div>
+      <div class="topbar-right">
+        <label class="sr-only" for="global-project" data-i18n="Project">Project</label>
+        <select id="global-project" class="mnemos-project-picker topbar-proj"
+                aria-label="Active project (applies to every screen)"></select>
+        <a href="/settings" class="topbar-gear{% if active_tab == 'settings' %} active{% endif %}"
+           title="Settings" aria-label="Settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.3 1a7 7 0 0 0-1.7-1l-.4-2.5h-4l-.4 2.5a7 7 0 0 0-1.7 1l-2.3-1-2 3.4L4.1 11a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7 7 0 0 0 1.7-1l2.3 1 2-3.4-2-1.5a7 7 0 0 0 .1-1z"/>
+          </svg>
+        </a>
+      </div>
+    </header>
+    <div class="content">
+      {% block content %}{% endblock %}
+    </div>
   </main>
   <div class="sidebar-scrim" id="sidebar-scrim"></div>
 </div>
@@ -199,6 +245,70 @@
         markActive(pref);
       });
     }
+  });
+
+  // PR-168 — collapsible sidebar groups (Analysis + More). The nav now
+  // shows just the core links plus two foldable groups, instead of 15
+  // flat items. The group holding the current page is opened by the
+  // server (the ``open`` class); for the rest, honour the operator's
+  // last expand/collapse choice so it sticks across page loads.
+  document.addEventListener("DOMContentLoaded", function () {
+    var groups = document.querySelectorAll(".nav-group");
+    for (var i = 0; i < groups.length; i++) {
+      (function (group) {
+        var key = "mnemos_nav_" + group.getAttribute("data-group");
+        var toggle = group.querySelector(".nav-group-toggle");
+        if (!toggle) return;
+        var open = group.classList.contains("open");  // server: active group
+        if (!open) {
+          try { open = localStorage.getItem(key) === "1"; } catch (_) {}
+        }
+        group.classList.toggle("open", open);
+        toggle.setAttribute("aria-expanded", open ? "true" : "false");
+        toggle.addEventListener("click", function () {
+          var now = group.classList.toggle("open");
+          toggle.setAttribute("aria-expanded", now ? "true" : "false");
+          try { localStorage.setItem(key, now ? "1" : "0"); } catch (_) {}
+        });
+      })(groups[i]);
+    }
+  });
+
+  // PR-173 — global project selection. Pick a project once here and every
+  // per-project screen (and the chat) reads it; no re-picking per page.
+  // Populates from /api/v1/projects, marks the active one, and on change
+  // remembers it + reloads (dropping any ?project= so the page's picker
+  // presets from the remembered project and auto-loads).
+  document.addEventListener("DOMContentLoaded", function () {
+    var sel = document.getElementById("global-project");
+    if (!sel || !window.MnemosUI) return;
+    var active = (MnemosUI.currentProject && MnemosUI.currentProject()) || "";
+    fetch("/api/v1/projects", { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (projects) {
+        var ph = document.createElement("option");
+        ph.value = "";
+        ph.textContent = MnemosUI.t("Select a project");
+        sel.appendChild(ph);
+        (projects || []).forEach(function (p) {
+          var o = document.createElement("option");
+          o.value = p.id;
+          o.textContent = p.name;
+          if (p.id === active) o.selected = true;
+          sel.appendChild(o);
+        });
+      })
+      .catch(function () {});
+    sel.addEventListener("change", function () {
+      var id = sel.value;
+      if (!id) return;
+      if (MnemosUI.rememberProject) MnemosUI.rememberProject(id);
+      if (window.location.search) {
+        window.location.href = window.location.pathname;
+      } else {
+        window.location.reload();
+      }
+    });
   });
 </script>
 {% endblock %}

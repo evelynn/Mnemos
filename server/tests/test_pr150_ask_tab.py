@@ -33,22 +33,23 @@ def test_ask_is_a_valid_tab_and_in_nav():
 
 def test_ask_template_wires_endpoint_and_picker():
     html = (_TPL / "ask.html").read_text(encoding="utf-8")
-    assert "/ask" in html and "askQuestion" in html
-    assert "mountProjectPicker" in html, "elegant project selection, not raw UUID only"
-    # surfaces the deepen affordance + the answer's data access
-    assert "deepen" in html
-    assert "Deepened" in html
-    assert "Writes" in html
+    # PR-186: the Ask is now LLM-backed (graph-grounded /chat) + conversational.
+    assert "/chat" in html and "renderChatReply" in html
+    # Project selection moved to the global topbar picker (_layout); the Ask
+    # reads it via currentProject — no raw per-page UUID box.
+    assert "currentProject" in html
+    # the cross-tier trace + on-demand source affordances remain usable
+    assert "trace_flow/auto" in html
 
 
 def test_ask_tab_can_trigger_process_trace():
-    # PR-151 — the Ask tab also triggers trace_flow/auto and renders the flow
-    # (steps + flag meanings), so the cross-tier process feature is usable
-    # from the GUI, not only via REST.
+    # PR-151/186 — the Ask tab triggers trace_flow/auto and renders the flow
+    # (tier steps), so the cross-tier process feature is usable from the GUI.
     html = (_TPL / "ask.html").read_text(encoding="utf-8")
-    assert "traceProcess" in html
     assert "trace_flow/auto" in html
-    assert "flow-steps" in html and "flow-flags" in html
+    assert "renderFlowHTML" in html
+    assert "flow-step" in html
+    assert 'id="aq-trace"' in html
 
 
 def test_ask_template_renders_without_jinja_error():

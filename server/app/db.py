@@ -1,5 +1,3 @@
-from collections.abc import AsyncIterator
-
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -9,6 +7,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
+from app.db_dependency import get_session as get_session
 
 _settings = get_settings()
 # Test runs drive the app from pytest-asyncio, which (with asyncio_mode=auto
@@ -40,12 +39,12 @@ if _settings.database_url.startswith("sqlite"):
     @event.listens_for(engine.sync_engine, "connect")
     def _set_sqlite_pragmas(dbapi_conn, _conn_record):  # noqa: ANN001
         cur = dbapi_conn.cursor()
+        # SQLite parses foreign-key declarations but does not enforce them
+        # unless each connection opts in. Graph publication relies on its
+        # run/project FKs for stage cleanup and published-run retention, so
+        # local mode must match PostgreSQL's fail-closed behaviour.
+        cur.execute("PRAGMA foreign_keys=ON")
         cur.execute("PRAGMA journal_mode=WAL")
         cur.execute("PRAGMA busy_timeout=10000")
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.close()
-
-
-async def get_session() -> AsyncIterator[AsyncSession]:
-    async with SessionLocal() as session:
-        yield session

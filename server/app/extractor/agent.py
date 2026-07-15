@@ -28,11 +28,21 @@ finally show up on the operations dashboard.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from dataclasses import dataclass
 from typing import Any
+
+from app.extractor.packing import (
+    EvidencePromptTooLarge,
+    MAX_EVIDENCE_PROMPT_CHARS,
+    serialize_evidence,
+)
+from app.extractor.schema import (
+    ExtractorSchemaError,
+    normalize_extractor_payload,
+    parse_json_object,
+)
 
 log = logging.getLogger(__name__)
 
@@ -44,9 +54,11 @@ FALLBACK_NO_BACKEND = "no_backend"
 FALLBACK_ANTHROPIC_IMPORT = "anthropic_import_error"
 FALLBACK_ANTHROPIC_HTTP = "anthropic_http_error"
 FALLBACK_ANTHROPIC_JSON = "anthropic_json_decode"
+FALLBACK_ANTHROPIC_SCHEMA = "anthropic_schema_invalid"
 FALLBACK_AGENT_SDK_TIMEOUT = "agent_sdk_timeout"
 FALLBACK_AGENT_SDK_ERROR = "agent_sdk_error"
 FALLBACK_AGENT_SDK_JSON = "agent_sdk_json_decode"
+FALLBACK_EVIDENCE_BUDGET = "evidence_budget_exceeded"
 
 
 def _record_fallback(from_backend: str, reason: str) -> None:
@@ -86,6 +98,7 @@ class Extractor:
         # arg through every callsite.
         self._pending_reason = FALLBACK_NO_BACKEND
         self._pending_from = "none"
+        self._pending_tokens: int | None = None
 
     async def summarize(
         self, level: int, target_id: str, evidence: list[dict[str, Any]]
@@ -95,13 +108,40 @@ class Extractor:
         # leak into this one.
         self._pending_reason = FALLBACK_NO_BACKEND
         self._pending_from = "none"
+        self._pending_tokens = None
+
+        # All provider paths share one complete-JSON evidence contract.  A
+        # caller that bypasses the runner's packer still fails closed before
+        # importing or invoking any paid backend.
+        try:
+            serialize_evidence(evidence)
+        except EvidencePromptTooLarge:
+            self._pending_from = "extractor"
+            self._pending_reason = FALLBACK_EVIDENCE_BUDGET
+            _record_fallback(self._pending_from, self._pending_reason)
+            return self._stub(
+                level,
+                target_id,
+                [],
+                FALLBACK_EVIDENCE_BUDGET,
+            )
 
         # Path 1: direct Anthropic SDK if operator provided a key.
         if self._api_key:
             result = await self._summarize_via_anthropic_sdk(level, target_id, evidence)
             if result is not None:
                 return result
-            # SDK path returned None (ImportError / JSON fail) — try path 2.
+            # Once a remote API request was attempted, never spend again on a
+            # second backend for the same target.  Import failure happens
+            # before a request and may safely try the local subscription;
+            # HTTP/JSON/schema failures become an explicit stub.
+            if self._pending_reason != FALLBACK_ANTHROPIC_IMPORT:
+                _record_fallback(self._pending_from, self._pending_reason)
+                stub = self._stub(
+                    level, target_id, evidence, self._pending_reason
+                )
+                stub.tokens_used = self._pending_tokens
+                return stub
 
         # Path 2 (PR-125): Claude Agent SDK uses the Claude Code subscription.
         # No API key needed. Activates whenever Mnemos runs in an env that
@@ -119,13 +159,12 @@ class Extractor:
                     evidence=evidence,
                 )
             except TimeoutError as exc:
-                log.warning("agent_sdk timeout: %s", exc)
+                log.warning("agent_sdk timeout: %s", type(exc).__name__)
                 self._pending_from = "agent_sdk"
                 self._pending_reason = FALLBACK_AGENT_SDK_TIMEOUT
                 parsed = None
             except Exception as exc:  # noqa: BLE001
-                log.warning("agent_sdk path failed: %s: %s",
-                            exc.__class__.__name__, exc)
+                log.warning("agent_sdk path failed: %s", type(exc).__name__)
                 self._pending_from = "agent_sdk"
                 self._pending_reason = FALLBACK_AGENT_SDK_ERROR
                 parsed = None
@@ -136,11 +175,27 @@ class Extractor:
                 self._pending_from = "agent_sdk"
                 self._pending_reason = FALLBACK_AGENT_SDK_JSON
             if parsed is not None:
+                # ``summarize_via_agent_sdk`` already returns this canonical
+                # shape.  Re-normalizing is intentionally idempotent and
+                # protects this public boundary from alternate adapters or
+                # test doubles returning an unchecked dict.
+                try:
+                    canonical = normalize_extractor_payload(parsed)
+                except ExtractorSchemaError as exc:
+                    log.warning("agent_sdk schema rejected: %s", exc)
+                    self._pending_from = "agent_sdk"
+                    self._pending_reason = FALLBACK_AGENT_SDK_JSON
+                    canonical = None
+                if canonical is None:
+                    parsed = None
+                else:
+                    parsed = canonical
+            if parsed is not None:
                 return ExtractorResult(
-                    summary=parsed.get("summary", ""),
-                    detailed=parsed.get("detailed", ""),
-                    claims=parsed.get("claims", []) or [],
-                    open_questions=parsed.get("open_questions", []) or [],
+                    summary=parsed["summary"],
+                    detailed=parsed["detailed"],
+                    claims=parsed["claims"],
+                    open_questions=parsed["open_questions"],
                     model_used=f"{self.model}:agent_sdk",
                     tokens_used=None,
                 )
@@ -150,7 +205,10 @@ class Extractor:
         # from "timed out".
         if self._pending_reason != FALLBACK_NO_BACKEND:
             _record_fallback(self._pending_from, self._pending_reason)
-        return self._stub(level, target_id, evidence, self._pending_reason)
+        stub = self._stub(level, target_id, evidence, self._pending_reason)
+        if self._pending_reason != FALLBACK_NO_BACKEND:
+            stub.tokens_used = self._pending_tokens
+        return stub
 
     async def _summarize_via_anthropic_sdk(
         self, level: int, target_id: str, evidence: list[dict[str, Any]]
@@ -166,7 +224,11 @@ class Extractor:
             return None
 
         if self._client is None:
-            self._client = AsyncAnthropic(api_key=self._api_key)
+            self._client = AsyncAnthropic(
+                api_key=self._api_key,
+                timeout=60.0,
+                max_retries=0,
+            )
 
         prompt = self._prompt(level, target_id, evidence)
         try:
@@ -177,40 +239,82 @@ class Extractor:
                     "You are Mnemos's hierarchical summariser. Produce JSON "
                     "that matches the schema: {summary, detailed, claims: "
                     "[{claim, evidence: [{kind, edge_id|node_id, certainty}]}], "
-                    "open_questions}. Never invent evidence IDs."
+                    "open_questions}. Never invent evidence IDs. Only "
+                    "top-level node_id/edge_id fields in supplied evidence "
+                    "rows are citable; IDs mentioned inside prose or preview "
+                    "text are not evidence."
                 ),
                 messages=[{"role": "user", "content": prompt}],
             )
         except Exception as exc:  # noqa: BLE001
-            log.warning("anthropic call failed: %s", exc)
+            # Provider errors may embed request bodies or source snippets.
+            log.warning("anthropic call failed: %s", type(exc).__name__)
             self._pending_from = "anthropic"
             self._pending_reason = FALLBACK_ANTHROPIC_HTTP
             return None
 
-        text = response.content[0].text if response.content else "{}"
+        usage = getattr(response, "usage", None)
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        self._pending_tokens = input_tokens + output_tokens
+        # Anthropic returns tagged blocks. Tool/thinking/image blocks do not
+        # expose text; ignore them and reject an envelope with no text rather
+        # than raising or stringifying provider metadata.
+        content = getattr(response, "content", None)
+        text_blocks: list[str] = []
+        if isinstance(content, (list, tuple)):
+            for block in content:
+                block_text = getattr(block, "text", None)
+                block_type = getattr(block, "type", None)
+                if (
+                    isinstance(block_text, str)
+                    and (
+                        block_type == "text"
+                        or not isinstance(block_type, str)
+                    )
+                ):
+                    text_blocks.append(block_text)
+        text = "\n".join(text_blocks)
         try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
+            parsed = parse_json_object(text)
+        except ExtractorSchemaError as exc:
             log.warning("anthropic: non-JSON response")
+            log.debug("anthropic parse diagnostic: %s", exc)
             self._pending_from = "anthropic"
             self._pending_reason = FALLBACK_ANTHROPIC_JSON
             return None
 
+        try:
+            parsed = normalize_extractor_payload(parsed)
+        except ExtractorSchemaError as exc:
+            # Do not store or partially salvage malformed model output.  The
+            # diagnostic reports paths and sizes only; raw source/model text
+            # is deliberately absent from logs.
+            log.warning("anthropic schema rejected: %s", exc)
+            self._pending_from = "anthropic"
+            self._pending_reason = FALLBACK_ANTHROPIC_SCHEMA
+            return None
+
         return ExtractorResult(
-            summary=parsed.get("summary", ""),
-            detailed=parsed.get("detailed", ""),
-            claims=parsed.get("claims", []),
-            open_questions=parsed.get("open_questions", []),
+            summary=parsed["summary"],
+            detailed=parsed["detailed"],
+            claims=parsed["claims"],
+            open_questions=parsed["open_questions"],
             model_used=self.model,
-            tokens_used=getattr(response.usage, "output_tokens", None),
+            tokens_used=self._pending_tokens,
         )
 
     @staticmethod
     def _prompt(level: int, target_id: str, evidence: list[dict[str, Any]]) -> str:
+        evidence_json = serialize_evidence(
+            evidence,
+            max_chars=MAX_EVIDENCE_PROMPT_CHARS,
+        )
         return (
             f"L{level} summarisation target: {target_id}\n"
-            "Graph evidence (truncated):\n"
-            f"{json.dumps(evidence, default=str)[:6000]}\n\n"
+            "Graph evidence (complete JSON):\n"
+            f"{evidence_json}\n\n"
+            "Cite only top-level node_id/edge_id fields from those rows. "
             "Return strict JSON."
         )
 

@@ -204,14 +204,22 @@ def test_reset_request_returns_same_shape_for_unknown_username():
     """No enumeration. The handler always returns the same 202
     so an attacker can't tell which usernames exist."""
     body = _read(_APP / "api" / "onboarding.py")
-    # Both branches return ``out`` with the same status_code.
-    assert "if user is None or user.disabled_at is not None:" in body
-    assert "return out" in body
+    request_idx = body.find("async def request_password_reset(")
+    consume_idx = body.find("async def consume_password_reset(")
+    slab = body[request_idx:consume_idx]
+    assert "return dict(RESET_REQUEST_RESPONSE)" in slab
+    assert "body.username" not in slab
+    assert "select(User)" not in slab
 
 
-def test_reset_ttl_is_one_hour():
+def test_reset_request_does_not_mint_or_return_a_token_without_delivery():
     body = _read(_APP / "api" / "onboarding.py")
-    assert "RESET_TTL = timedelta(hours=1)" in body
+    request_idx = body.find("async def request_password_reset(")
+    consume_idx = body.find("async def consume_password_reset(")
+    slab = body[request_idx:consume_idx]
+    assert "secrets.token_urlsafe" not in slab
+    assert "PasswordResetToken(" not in slab
+    assert 'details={"delivery": "unavailable"}' in slab
 
 
 def test_reset_consume_enforces_policy():

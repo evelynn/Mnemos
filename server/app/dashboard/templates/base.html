@@ -18,7 +18,7 @@
         } catch (_) {}
       })();
     </script>
-    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="{{ asset_url('/static/app.css') if asset_url is defined else '/static/app.css' }}" />
     <!-- ui.js must load SYNCHRONOUSLY (no defer): it is an IIFE that
          assigns ``window.MnemosUI`` immediately and parks all DOM work
          in DOMContentLoaded handlers. Page templates' classic inline
@@ -28,7 +28,7 @@
          inline call threw ``MnemosUI is not defined`` and silently
          broke pickers, the Ask render/voice mount, deep links, and the
          welcome tour across every operator page. -->
-    <script src="/static/ui.js"></script>
+    <script src="{{ asset_url('/static/ui.js') if asset_url is defined else '/static/ui.js' }}"></script>
     <script>
       // Restore a fragment that a guest operator stashed before the
       // login redirect, and (6th-round audit S4) route the operator

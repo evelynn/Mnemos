@@ -70,7 +70,10 @@ def test_probe_overdue_ceiling_defined():
 def test_probe_recheck_counts_overdue_skips():
     body = _read(_APP / "orchestrator" / "cron_jobs.py")
     idx = body.find("async def _probe_recheck_one(")
-    slab = body[idx:idx + 3200]
+    assert idx >= 0
+    end = body.find("\nasync def ", idx + 1)
+    assert end > idx
+    slab = body[idx:end]
     # The running-analysis skip now classifies the skip as overdue.
     assert "overdue" in slab
     assert "overdue_cutoff" in slab

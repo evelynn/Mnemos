@@ -1,7 +1,7 @@
 """PR-138 — LLM budget guard.
 
 Real-execution tests for ``app/extractor/cost.py``. The MCP/LLM audit
-flagged that token counts are tracked but \$ are not capped — a runaway
+flagged that token counts are tracked but costs are not capped — a runaway
 extractor loop could spend without limit. ``cost.py`` adds a real
 DB-backed budget guard; this suite exercises every path against a
 polyglot SQLite session (no mocks of the spend logic itself).
@@ -28,7 +28,7 @@ from app.models import audit as _audit  # noqa: E402,F401
 from app.models import findings as _findings  # noqa: E402,F401
 from app.models import graph as _graph  # noqa: E402,F401
 from app.models import organization as _org  # noqa: E402,F401
-from app.models.findings import Summary  # noqa: E402
+from app.models.findings import LLMCall, Summary  # noqa: E402
 from app.models.projects import Project  # noqa: E402
 
 from app.extractor.cost import (  # noqa: E402
@@ -81,6 +81,19 @@ async def _add_summary(
         generated_at=when,
     )
     s.add(row)
+    s.add(
+        LLMCall(
+            id=row.id,
+            project_id=project.id,
+            analysis_run_id=None,
+            target_id=row.target_id,
+            level=row.level,
+            model_used=row.model_used,
+            tokens_used=tokens,
+            status="legacy_summary",
+            generated_at=when,
+        )
+    )
     await s.commit()
     return row
 
@@ -197,6 +210,21 @@ async def test_check_budget_disabled_when_cap_zero(session, monkeypatch):
     assert isinstance(status, BudgetStatus)
     assert not status.enabled
     assert not status.exceeded
+
+
+@pytest.mark.asyncio
+async def test_disabled_budget_does_not_scan_summary_history(session, monkeypatch):
+    import app.extractor.cost as cost
+
+    monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", "0")
+
+    async def unexpected_scan(*_args, **_kwargs):
+        raise AssertionError("disabled budget queried project_spend")
+
+    monkeypatch.setattr(cost, "project_spend", unexpected_scan)
+    status = await cost.check_budget(session, _uuid.uuid4())
+    assert status.enabled is False
+    assert status.spent_usd == 0.0
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,9 @@ a running server, not CI).
 from __future__ import annotations
 
 import os
+import uuid
+
+import pytest
 
 os.environ.setdefault("MNEMOS_ENV", "test")
 os.environ.setdefault("SECRET_KEY", "ci-test-pr149")
@@ -18,9 +21,11 @@ os.environ.setdefault("MNEMOS_SKIP_STARTUP_VERIFY", "1")
 
 
 def test_ask_route_registered():
-    from app.main import app
+    from app.api.ask import router
 
-    assert "/api/v1/projects/{project_id}/ask" in {getattr(r, "path", "") for r in app.routes}
+    assert "/api/v1/projects/{project_id}/ask" in {
+        getattr(r, "path", "") for r in router.routes
+    }
 
 
 def test_terms_and_confidence():
@@ -28,14 +33,17 @@ def test_terms_and_confidence():
 
     terms = _terms("Where is handle_create_order and what DB does it write?")
     assert "handle_create_order" in terms or "handle" in terms
-    # confident only when a hit id/name actually contains a term
-    hits = [{"symbol_id": "py:backend/orders.py::handle_create_order", "name": "handle_create_order"}]
+    # confident only when a code-symbol hit clears the search-score
+    # threshold (real search_symbols hits always carry a "score").
+    hits = [{"symbol_id": "py:backend/orders.py::handle_create_order",
+             "name": "handle_create_order", "score": 9.0}]
     assert _is_confident(hits, terms) is True
-    assert _is_confident([{"symbol_id": "py:x::zzz", "name": "zzz"}], terms) is False
+    # a weakly-scored hit is not a confident answer
+    assert _is_confident([{"symbol_id": "py:x::zzz", "name": "zzz", "score": 0.5}], terms) is False
     assert _is_confident([], terms) is False
     # a DataEntity table lexically hitting "order" must NOT count as a
-    # confident answer to "where is the order ... handler" → forces deepen
-    assert _is_confident([{"symbol_id": "data:orders", "name": "orders"}], terms) is False
+    # confident answer — even at a high score — → forces deepen
+    assert _is_confident([{"symbol_id": "data:orders", "name": "orders", "score": 9.0}], terms) is False
 
 
 def test_candidate_ranker_prefers_matching_file(tmp_path):
@@ -57,3 +65,37 @@ def test_candidate_ranker_prefers_matching_file(tmp_path):
     # language is classified for extraction
     langs = {p.name: lang for p, lang in ranked}
     assert langs["orders_handler.py"] == "python"
+
+
+@pytest.mark.asyncio
+async def test_ask_source_root_is_ignored_and_deepening_is_explicitly_disabled(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from app.api import ask as ask_api
+
+    async def no_hits(*args, **kwargs):  # noqa: ANN002, ANN003
+        return []
+
+    async def no_audit(*args, **kwargs):  # noqa: ANN002, ANN003
+        return None
+
+    monkeypatch.setattr(ask_api, "search_symbols", no_hits)
+    monkeypatch.setattr(ask_api, "audit_record", no_audit)
+
+    result = await ask_api.ask(
+        uuid.uuid4(),
+        ask_api.AskRequest(
+            question="Where is the missing implementation?",
+            source_root="C:\\Windows\\System32",
+            deepen=True,
+        ),
+        SimpleNamespace(id=uuid.uuid4()),
+        object(),
+    )
+
+    assert result["answered"] is False
+    assert result["deepened"] is False
+    assert result["deepening_status"] == "snapshot_bound_deepening_not_implemented"
+    assert result["extracted_files"] == []

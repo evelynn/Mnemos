@@ -5,20 +5,20 @@
 
 <form onsubmit="return loadEntities(event)">
   <label><span data-i18n="Project ID">Project ID</span><input type="text" id="pid" required placeholder="uuid" /></label>
-  <button class="primary" type="submit">Load entities</button>
+  <button class="primary" type="submit" data-i18n="Load entities">Load entities</button>
 </form>
 <div id="entities"></div>
 
 <section>
-  <h2>Sample viewer</h2>
-  <label>Entity ID<input type="text" id="eid" placeholder="db.mssql.OrderDb.dbo.Orders" /></label>
-  <button class="primary" onclick="loadSample()">Load sample</button>
+  <h2 data-i18n="Sample viewer">Sample viewer</h2>
+  <label><span data-i18n="Entity ID">Entity ID</span><input type="text" id="eid" data-i18n-placeholder="db.mssql.OrderDb.dbo.Orders" placeholder="db.mssql.OrderDb.dbo.Orders" /></label>
+  <button class="primary" onclick="loadSample()" data-i18n="Load sample">Load sample</button>
   <div id="sample"></div>
 </section>
 
 <section id="query-runner">
-  <h2>SQL query — validate &amp; authorise (read-only)</h2>
-  <p class="muted">
+  <h2 data-i18n="SQL query — validate &amp; authorise (read-only)">SQL query — validate &amp; authorise (read-only)</h2>
+  <p class="muted" data-i18n="query-runner-blurb">
     The platform never connects to a production DB itself (spec §2.5/§2.8).
     This form <strong>checks and authorises</strong> a SELECT: SQLGlot blocks
     anything that mutates state, an oversized <code>LIMIT</code> is clamped,
@@ -28,19 +28,19 @@
     <strong>Sample viewer</strong> above once the analyzer reports them back.
   </p>
   <form onsubmit="return runQuery(event)">
-    <label>DB component ID
-      <input id="q-component" type="text" required placeholder="db.mssql.OrderDb" />
+    <label><span data-i18n="DB component ID">DB component ID</span>
+      <input id="q-component" type="text" required data-i18n-placeholder="db.mssql.OrderDb" placeholder="db.mssql.OrderDb" />
     </label>
-    <label>Purpose <span class="muted">(audit log requires ≥ 3 chars; ≥ 10 strongly recommended)</span>
+    <label><span data-i18n="Purpose">Purpose</span> <span class="muted" data-i18n="(audit log requires ≥ 3 chars; ≥ 10 strongly recommended)">(audit log requires ≥ 3 chars; ≥ 10 strongly recommended)</span>
       <input id="q-purpose" type="text" minlength="3" required />
     </label>
-    <label>SQL
+    <label><span data-i18n="SQL">SQL</span>
       <textarea id="q-sql" rows="6" required placeholder="SELECT * FROM Orders WHERE ..."></textarea>
     </label>
-    <label>Max rows <span class="muted">(blank = platform default 10 000)</span>
+    <label><span data-i18n="Max rows">Max rows</span> <span class="muted" data-i18n="(blank = platform default 10 000)">(blank = platform default 10 000)</span>
       <input id="q-max-rows" type="number" min="1" />
     </label>
-    <button type="submit" class="primary" data-required-role="operator">Run query</button>
+    <button type="submit" class="primary" data-required-role="operator" data-i18n="Run query">Run query</button>
   </form>
   <div id="query-result"></div>
 </section>
@@ -51,6 +51,7 @@ async function loadEntities(ev) {
   const pid = document.getElementById("pid").value.trim();
   if (!pid) return false;
   const r = await fetch(`/api/v1/projects/${pid}/data_entities`);
+  if (!r.ok) { await MnemosUI.showError(MnemosUI.t("Could not load data entities"), r); return false; }
   const rows = await r.json();
   const out = document.getElementById("entities");
   if (!Array.isArray(rows) || rows.length === 0) {
@@ -58,26 +59,33 @@ async function loadEntities(ev) {
     MnemosUI.applyI18n(out);
     return false;
   }
-  let html = '<table class="data"><thead><tr><th>ID</th><th>Component</th><th>Kind</th><th>Sensitive</th><th>Certainty</th><th></th></tr></thead><tbody>';
+  let html = '<table class="data"><thead><tr>'
+    + `<th data-i18n="ID">ID</th>`
+    + `<th data-i18n="Component">Component</th>`
+    + `<th data-i18n="Kind">Kind</th>`
+    + `<th data-i18n="Sensitive">Sensitive</th>`
+    + `<th data-i18n="Certainty">Certainty</th>`
+    + '<th></th></tr></thead><tbody>';
   for (const r of rows) {
     // Surface component_id — the value the query runner needs.
     // Without this column the operator had no way to find it in the UI
     // (4th-round audit, scenario 2 Critical).
     const cid = r.component_id ?? "";
     const useBtn = cid
-      ? `<button type="button" onclick="useComponent('${escapeHtml(cid)}')">Use in query →</button>`
+      ? `<button type="button" onclick="useComponent('${escapeHtml(cid)}')" data-i18n="Use in query →">${MnemosUI.t("Use in query →")}</button>`
       : "";
     html += `<tr>
       <td><code>${escapeHtml(r.id)}</code></td>
       <td><code>${escapeHtml(cid)}</code></td>
       <td>${escapeHtml(r.kind ?? "")}</td>
-      <td>${r.is_sensitive ? "yes" : "no"}</td>
+      <td>${r.is_sensitive ? MnemosUI.t("yes") : MnemosUI.t("no")}</td>
       <td>${escapeHtml(r.certainty ?? "")}</td>
       <td>${useBtn}</td>
     </tr>`;
   }
   html += "</tbody></table>";
   out.innerHTML = html;
+  MnemosUI.applyI18n(out);
   return false;
 }
 
@@ -85,7 +93,7 @@ function useComponent(cid) {
   // One-click handoff from entities → query runner.
   document.getElementById("q-component").value = cid;
   document.getElementById("q-sql").focus();
-  MnemosUI.showToast("Component id copied into the SQL form below.", "success");
+  MnemosUI.showToast(MnemosUI.t("Component id copied into the SQL form below."), "success");
   document.getElementById("query-runner").scrollIntoView({behavior: "smooth"});
 }
 
@@ -102,7 +110,8 @@ async function loadSample() {
   }
   const rows = payload.rows ?? [];
   if (!rows.length) {
-    out.innerHTML = '<p class="muted">No rows in sample.</p>';
+    out.innerHTML = '<p class="muted" data-i18n="No rows in sample.">No rows in sample.</p>';
+    MnemosUI.applyI18n(out);
     return;
   }
   const cols = Object.keys(rows[0]);
@@ -111,14 +120,15 @@ async function loadSample() {
     html += "<tr>" + cols.map(c => `<td>${row[c] ?? ""}</td>`).join("") + "</tr>";
   }
   html += "</tbody></table>";
-  if (payload.masking_applied) html += '<p class="muted">masking applied</p>';
+  if (payload.masking_applied) html += '<p class="muted" data-i18n="masking applied">masking applied</p>';
   out.innerHTML = html;
+  MnemosUI.applyI18n(out);
 }
 
 async function runQuery(ev) {
   ev.preventDefault();
   const pid = document.getElementById("pid").value.trim();
-  if (!pid) { MnemosUI.showToast("Load entities first to set the project id.", "warn"); return false; }
+  if (!pid) { MnemosUI.showToast(MnemosUI.t("Load entities first to set the project id."), "warn"); return false; }
   const body = {
     db_component_id: document.getElementById("q-component").value.trim(),
     purpose: document.getElementById("q-purpose").value.trim(),
@@ -151,7 +161,7 @@ async function runQuery(ev) {
       const payload = await r.clone().json();
       const detail = payload && payload.detail;
       if (detail && typeof detail === "object" && detail.code === "sql_parse_failed") {
-        const head = "SQL parse failed — " + detail.message;
+        const head = MnemosUI.t("SQL parse failed — ") + detail.message;
         MnemosUI.showToast(head, "error");
         // Show the raw parser error in the result area too, so the
         // operator can copy it for a bug report.
@@ -170,7 +180,7 @@ async function runQuery(ev) {
   const out = document.getElementById("query-result");
   let banner = "";
   if (payload.limit_clamp === "clamped") {
-    banner = `<p class="toast warn" role="status">Results capped at ${payload.effective_limit} rows (you asked for ${payload.original_limit}).</p>`;
+    banner = `<p class="toast warn" role="status">${MnemosUI.t("Results capped at $1 rows (you asked for $2).", { 1: payload.effective_limit, 2: payload.original_limit })}</p>`;
   }
   const rows = payload.rows || [];
   const cols = payload.columns || [];
@@ -181,12 +191,10 @@ async function runQuery(ev) {
     // implying the query ran and matched nothing.
     const rewritten = payload.rewritten_sql || document.getElementById("q-sql").value;
     out.innerHTML = banner
-      + '<p class="toast success" role="status">Query authorised and written to the audit log. '
-      + 'The platform does not run SQL directly — hand the rewritten statement to the analyzer, '
-      + 'then view masked rows in the Sample viewer above.</p>'
-      + '<label>Rewritten SQL (clamped, write-blocked)'
+      + `<p class="toast success" role="status">${MnemosUI.t("Query authorised and written to the audit log. The platform does not run SQL directly — hand the rewritten statement to the analyzer, then view masked rows in the Sample viewer above.")}</p>`
+      + `<label>${MnemosUI.t("Rewritten SQL (clamped, write-blocked)")}`
       + '<textarea rows="4" readonly>' + escapeHtml(rewritten) + '</textarea></label>';
-    MnemosUI.showToast("Query authorised and logged.", "success");
+    MnemosUI.showToast(MnemosUI.t("Query authorised and logged."), "success");
     return false;
   }
   // P2-6 — pagination for large result sets. Rendering 10 000 <tr>
@@ -208,9 +216,9 @@ function _renderRowsPaginated(out, banner, cols, rows, payload) {
     + cols.map(c => `<th>${escapeHtml(c)}</th>`).join("")
     + '</tr></thead><tbody id="data-tbody"></tbody></table>';
   const status = `<p class="muted" id="data-page-status"></p>`;
-  const more = `<button type="button" class="primary" id="data-page-more" hidden>Show next ${_DATA_PAGE_SIZE} rows</button>`;
+  const more = `<button type="button" class="primary" id="data-page-more" hidden>${MnemosUI.t("Show next $1 rows", { 1: _DATA_PAGE_SIZE })}</button>`;
   const tail = payload.masking_applied
-    ? '<p class="muted">masking applied — PII tokens visible in raw SQL response only</p>'
+    ? `<p class="muted" data-i18n="masking applied — PII tokens visible in raw SQL response only">${MnemosUI.t("masking applied — PII tokens visible in raw SQL response only")}</p>`
     : "";
   out.innerHTML = banner + head + status + " " + more + tail;
   // Stash the dataset on the dom node so the "Show next" handler
@@ -241,7 +249,7 @@ function _showNextDataPage() {
   tbody.appendChild(tpl.content);
   tbody.dataset.offset = String(next);
   const status = document.getElementById("data-page-status");
-  if (status) status.textContent = `Showing ${next} of ${total} rows.`;
+  if (status) status.textContent = MnemosUI.t("Showing $1 of $2 rows.", { 1: next, 2: total });
   const more = document.getElementById("data-page-more");
   if (more) {
     more.hidden = next >= total;

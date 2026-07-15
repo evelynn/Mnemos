@@ -9,21 +9,24 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.passwords import PasswordPolicyError, hash_password
 from app.auth.rbac import require_admin
+from app.auth.sessions import revoke_all_for_user
 from app.db import get_session
-from app.models.auth import User
+from app.models.auth import ApiKey, User
 from app.models.onboarding import PasswordResetToken, UserInvite
+from app.models.organization import Organization
 from app.safety.tokens import hash_token
 
 router = APIRouter(tags=["onboarding"])
 
 INVITE_TTL = timedelta(days=7)
-RESET_TTL = timedelta(hours=1)
+RESET_REQUEST_RESPONSE = {"status": "accepted"}
+RESET_INVALID_DETAIL = "reset_invalid_or_expired"
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +56,7 @@ class InviteAccept(BaseModel):
 
 
 class PasswordResetRequest(BaseModel):
-    username: str
+    username: str = Field(..., min_length=1, max_length=64)
 
 
 class PasswordResetConsume(BaseModel):
@@ -77,6 +80,11 @@ async def create_invite(
     """Admin creates an invite. The raw token is returned ONCE so
     the admin can share it (email / Slack) out-of-band. The DB
     only ever holds the SHA-256 hash."""
+    if actor.organization_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="organization_required",
+        )
     if body.role not in {"viewer", "operator", "admin"}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_role"
@@ -121,7 +129,17 @@ async def accept_invite(
     token_h = hash_token(body.token)
     invite = (
         await db.execute(
-            select(UserInvite).where(UserInvite.token_hash == token_h)
+            select(UserInvite)
+            .join(
+                Organization,
+                Organization.id == UserInvite.organization_id,
+            )
+            .where(
+                UserInvite.token_hash == token_h,
+                UserInvite.organization_id.is_not(None),
+            )
+            .with_for_update(of=UserInvite)
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     now = datetime.now(tz=timezone.utc)
@@ -133,6 +151,7 @@ async def accept_invite(
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if (
         invite is None
+        or invite.organization_id is None
         or invite.consumed_at is not None
         or expires_at < now
     ):
@@ -188,41 +207,38 @@ async def accept_invite(
 )
 async def request_password_reset(
     body: PasswordResetRequest,
-    db: AsyncSession = Depends(get_session),
 ) -> dict[str, str]:
-    """Anonymous endpoint. Always returns 202 with the same shape
-    so an attacker can't enumerate usernames by timing.
+    """Acknowledge every syntactically valid request identically.
 
-    If the user exists and is not disabled, a token is created and
-    the raw value is returned. In a real deployment the operator
-    side ships the token via SMTP / Slack; the platform stays
-    transport-agnostic. The token is logged ONCE in the audit log
-    so an operator with audit-log access can hand-deliver it if
-    needed.
+    Mnemos currently has no configured, authenticated outbound reset-token
+    transport.  Returning a token to this anonymous caller (or putting one in
+    logs/audit data for manual hand-off) would make knowledge of a username
+    sufficient to take over that account.  This endpoint therefore does not
+    query ``users`` and does not mint a token.  A future delivery integration
+    must authenticate the destination and keep the raw token entirely outside
+    HTTP responses, application logs, and audit payloads before token creation
+    can be enabled.
     """
-    user = (
-        await db.execute(select(User).where(User.username == body.username))
-    ).scalar_one_or_none()
-    out: dict[str, str] = {"status": "accepted"}
-    if user is None or user.disabled_at is not None:
-        # Same shape as the happy path — no enumeration.
-        return out
-    raw_token = secrets.token_urlsafe(32)
-    rt = PasswordResetToken(
-        user_id=user.id,
-        token_hash=hash_token(raw_token),
-        expires_at=datetime.now(tz=timezone.utc) + RESET_TTL,
-    )
-    db.add(rt)
-    await db.commit()
+    # Deliberately never inspect the username after schema validation.  This
+    # keeps known, unknown, and disabled accounts on exactly the same path.
+    _ = body
     await audit_record(
         actor="anonymous",
         action="auth.password_reset_requested",
-        target=f"user:{user.id}",
-        details={},
+        target=None,
+        details={"delivery": "unavailable"},
     )
-    out["token"] = raw_token  # transport-agnostic
-    return out
+    return dict(RESET_REQUEST_RESPONSE)
+
+
+async def _raise_invalid_reset(db: AsyncSession) -> None:
+    """Rollback a tentative claim and expose one fixed invalid response."""
+
+    await db.rollback()
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=RESET_INVALID_DETAIL,
+    )
 
 
 @router.post(
@@ -232,45 +248,108 @@ async def consume_password_reset(
     body: PasswordResetConsume,
     db: AsyncSession = Depends(get_session),
 ) -> None:
+    """Atomically consume a securely delivered reset credential.
+
+    The anonymous request endpoint above never creates such a credential.  If
+    a trusted internal delivery mechanism provisions one, consumption locks
+    the target user *before* conditionally claiming the token.  That lock order
+    serializes different reset tokens for the same account and avoids the
+    token-A/user/token-B deadlock that claiming a token first would permit.
+    PostgreSQL's conditional ``UPDATE .. RETURNING`` is the single-use
+    linearization point; SQLite supports the statement for local mode while
+    ignoring ``FOR UPDATE``.
+    """
     token_h = hash_token(body.token)
-    rt = (
+
+    # This first read is only a candidate lookup.  It takes no lock and grants
+    # no authority; every predicate is repeated after the user row is locked.
+    now = datetime.now(tz=timezone.utc)
+    candidate_user_id = (
         await db.execute(
-            select(PasswordResetToken).where(
-                PasswordResetToken.token_hash == token_h
+            select(PasswordResetToken.user_id)
+            .join(User, User.id == PasswordResetToken.user_id)
+            .where(
+                PasswordResetToken.token_hash == token_h,
+                PasswordResetToken.consumed_at.is_(None),
+                PasswordResetToken.expires_at > now,
+                User.disabled_at.is_(None),
             )
         )
     ).scalar_one_or_none()
-    now = datetime.now(tz=timezone.utc)
-    # PR-138h — coerce SQLite-naive expires_at to UTC so the
-    # comparison works on both backends.
-    rt_expires = rt.expires_at if rt else None
-    if rt_expires is not None and rt_expires.tzinfo is None:
-        rt_expires = rt_expires.replace(tzinfo=timezone.utc)
-    if (
-        rt is None
-        or rt.consumed_at is not None
-        or rt_expires < now
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="reset_invalid_or_expired",
-        )
+    if candidate_user_id is None:
+        await _raise_invalid_reset(db)
+
     user = (
-        await db.execute(select(User).where(User.id == rt.user_id))
+        await db.execute(
+            select(User)
+            .where(
+                User.id == candidate_user_id,
+                User.disabled_at.is_(None),
+            )
+            .with_for_update(of=User)
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if user is None or user.disabled_at is not None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="reset_invalid_or_expired",
+        await _raise_invalid_reset(db)
+
+    claimed_user_id = (
+        await db.execute(
+            update(PasswordResetToken)
+            .where(
+                PasswordResetToken.token_hash == token_h,
+                PasswordResetToken.user_id == user.id,
+                PasswordResetToken.consumed_at.is_(None),
+                PasswordResetToken.expires_at > now,
+            )
+            .values(consumed_at=now)
+            .returning(PasswordResetToken.user_id)
         )
+    ).scalar_one_or_none()
+    if claimed_user_id != user.id:
+        await _raise_invalid_reset(db)
+
     try:
-        user.password_hash = hash_password(body.new_password)
+        new_password_hash = hash_password(body.new_password)
     except PasswordPolicyError as exc:
+        # Do not burn an otherwise valid one-time credential when only the new
+        # password failed policy validation.
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=exc.code
         ) from exc
-    rt.consumed_at = now
-    await db.commit()
+
+    user.password_hash = new_password_hash
+    await db.flush()
+
+    # A password reset is a credential-compromise boundary.  Revoke every
+    # database-backed bearer credential owned by the user and every other
+    # outstanding reset credential in the same transaction.
+    await db.execute(
+        update(ApiKey)
+        .where(ApiKey.user_id == user.id, ApiKey.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+    await db.execute(
+        update(PasswordResetToken)
+        .where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.consumed_at.is_(None),
+        )
+        .values(
+            consumed_at=func.coalesce(PasswordResetToken.consumed_at, now)
+        )
+    )
+
+    # Redis sessions are external to the SQL transaction.  Revoke them before
+    # commit: a Redis failure aborts the password change (fail closed), while a
+    # later SQL failure can at worst force a harmless re-login.
+    try:
+        await revoke_all_for_user(user.id)
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        await db.rollback()
+        raise
     await audit_record(
         actor=f"user:{user.id}",
         action="auth.password_reset_consumed",

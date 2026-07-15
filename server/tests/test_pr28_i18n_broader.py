@@ -64,7 +64,8 @@ def test_phrase_book_covers_every_page_h1():
 
 def test_admin_sidebar_section_is_translatable():
     body = _read(_TPL / "_layout.html")
-    assert 'data-i18n="Admin"' in body
+    # PR-168 folded the admin links into the "More" group (no separate
+    # "Admin" header), but the admin items themselves stay translatable.
     assert 'data-i18n="Organizations"' in body
     assert 'data-i18n="SSO / OIDC"' in body
     assert 'data-i18n="GDPR tools"' in body
@@ -163,11 +164,16 @@ def test_audit_uses_time_data_ts():
 
 
 def test_audit_escapes_json_detail():
-    """While we were touching the audit row builder, fix the latent
-    XSS path the findings table had (PR-24 closed the same on
-    findings.html)."""
+    """Audit rows must escape every dynamic field. PR-170 renders details
+    via an escaping key:value formatter (more readable than raw JSON) and
+    additionally escapes actor/action/target, which were written raw."""
     body = _read(_TPL / "audit.html")
-    assert "escapeHtml(JSON.stringify(e.details))" in body
+    # details go through the escaping formatter, not raw interpolation
+    assert "fmtDetails(e.details)" in body
+    assert "escapeHtml(String(v))" in body or "escapeHtml(typeof v" in body
+    # the cells that used to be raw are escaped now too
+    assert "escapeHtml(e.actor" in body
+    assert "escapeHtml(e.action" in body
 
 
 # ---------------------------------------------------------------------------

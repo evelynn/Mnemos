@@ -110,6 +110,9 @@ async function loadFindings(ev) {
   if (sev) qs.set("severity", sev);
   if (st) qs.set("status", st);
   const r = await fetch(`/api/v1/projects/${pid}/findings?${qs}`);
+  // Guard: a 500/403 must not render as "No findings." — that would
+  // tell the operator the project is clean when the API actually failed.
+  if (!r.ok) { await MnemosUI.showError(MnemosUI.t("Could not load findings"), r); return false; }
   const rows = await r.json();
   // P2-9 onboarding step 3 — 8th-round audit B3: reaching the
   // findings view *at all* (with the form filled out) counts as
@@ -191,7 +194,8 @@ function _showNextFindingsPage() {
         + `<span class="related-plans" data-finding="${escapeHtml(f.id)}"></span></div>`
         + `<details class="raw-detail"><summary>raw</summary><pre>${escapeHtml(JSON.stringify(f.detail))}</pre></details>`
         + `</details>`
-      : `<pre>${escapeHtml(JSON.stringify(f.detail))}</pre>${planBtn}`;
+      : `<details class="fix-detail"><summary data-i18n="Detail">Detail</summary>`
+        + `<pre>${escapeHtml(JSON.stringify(f.detail, null, 2))}</pre></details>${planBtn}`;
     html += `<tr>`
       + `<td><span class="priority-pill ${priority}">${priority}</span></td>`
       + `<td><span class="risk-bar" style="--risk:${risk}">${risk}</span></td>`

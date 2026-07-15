@@ -174,3 +174,95 @@ GREEN (ruff 0, pytest not-integration GREEN, mypy 69 불변, boot ready 200).
 fallback 가 silent"* 는 로컬 모드에선 더 이상 발생하지 않는다 — Agent SDK
 경로 자체가 기본 off 라 timeout 이 없고, stub 은 `fallback_reason=no_backend`
 로 즉시·명시적으로 기록된다. (운영자가 명시적으로 켜면 종전 동작 유지.)
+
+## 자율 라운드 PR-160 (docker-free 쓰기 경합 결함 1건, 테스트로 발견·재현)
+
+PR-158/159 에 이어, 중단됐던 자율 라운드를 재개해 docker-free 결정적 분석 경로의
+SQLite 쓰기 경합을 닫는다.
+
+| PR | 영역 | 발견 (실행/테스트 증거) | 점수 |
+|----|------|-----------------------|------|
+| 160 | 운영검증(배포) | `_run_analyzer_stage` 가 분석기 세션(미커밋 = SQLite 쓰기 락)을 연 채 `stage.increment` 를 호출 → `StageTracker._flush` 의 별도 세션이 25행째에 충돌 → `database is locked`. PR-141 이 에이전트 스테이지에만 적용했던 commit-before-increment 를 결정적 분석 스테이지에 완성. docker-free in-repo ggoss-py(PR-153)가 실제 행을 추출하게 되며 발현. 결정적 회귀 테스트로 old 코드 실패(25행째 lock) 재현 | 86→88 |
+
+검증: 신규 회귀 테스트가 fix 전/후 차이 실측(25행째 `OperationalError` vs 120행 완주).
+게이트 GREEN — ruff 0, mypy 69(불변), pytest not-integration **1566 pass / 19 실패는
+사전존재 Windows-환경**(서브프로세스 cp949·WinError 193·node/dotnet·`/bin/true`)으로 HEAD
+베이스라인과 **동일집합 → 회귀 0**, docker-free boot ready 200. (Linux CI 에선 GREEN.)
+
+갱신 가중평균: 운영검증 0.07×(+0.2) ≈ +0.014 → **약 91.0/100**. 나머지 차원 불변.
+
+## 자율 라운드 PR-161 (Plan/Diff Gate-B 우회 결함 1건 — Critical 보안)
+
+Plan/Diff workflow(최저 차원 8.0)를 실측하던 중 발견한 **Critical 보안 우회**:
+approve 엔드포인트가 break-glass 게이트를 `auto_review_findings.get("verdict")`
+(dict 가정)로 검사했으나 `submit_diff` 는 findings 를 **list** 로 저장 → verdict 가
+항상 None → **blocked diff 가 토큰 없이 승인 가능**(§2.5 Gate-B 무력화).
+
+| PR | 영역 | 발견 (코드/테스트 증거) | 점수 |
+|----|------|-----------------------|------|
+| 161 | Plan/Diff workflow | approve 게이트가 list-형태 findings 에서 verdict=None 으로 읽혀 스킵 → blocked diff 가 토큰 없이 승인+MR 생성 도달. `submission.status` 권위 필드로 게이트 전환. 실 `submit_diff→approve` 회귀 테스트로 old 코드 우회 재현(토큰 없이 409 미발생). 기존 테스트는 dict-형 fixture / approve 미호출이라 우회를 놓침 | 80→85 |
+
+검증: 신규 회귀 테스트가 mutation check 통과(old "DID NOT RAISE" → fix 409). 게이트
+GREEN — ruff 0, mypy 69→68(-1, 신규 0), pytest not-integration 1567 pass / 19 사전존재
+Windows-환경(= PR-160 베이스라인 동일집합·회귀 0), boot ready 200.
+
+갱신 가중평균: Plan/Diff 0.05×(+0.5) ≈ +0.025 → **약 91.2/100**. 나머지 차원 불변.
+
+남은 관련 격차(후속 후보): `list_submissions_filtered` 의 verdict 필터도 동일 dict 가정
+(대시보드 카운트, Low); approve 재승인 멱등 가드 부재.
+
+## 자율 라운드 PR-162 (dogfood로 발견한 run.stats 과대계수 — 그래프 데이터 품질)
+
+Mnemos를 **실제 외부 프로젝트**(Smart-AI-Report-V4, Next.js 343파일/57.6k LoC)에 dogfood로
+돌려 발견. `run.stats`가 distinct 현재 그래프가 아니라 ingest 레코드 수(`totals`)를 보고해,
+여러 곳에서 참조되는 엔티티가 중복 계수됐다.
+
+| PR | 영역 | 발견 (dogfood 실측) | 점수 |
+|----|------|--------------------|------|
+| 162 | 그래프 데이터 품질 | Smart-AI-Report-V4 실분석: run.stats가 data_entities **66**/contracts **63**/edges **10826** 보고했으나 distinct 현재 그래프는 **34**/**47**/**7808**(테이블이 6개 SQL문에서 참조되면 6번 계수). `_graph_inventory`로 완료 시 distinct 현재 노드/엣지를 보고. temporal upsert·totals·진행률 불변 | 88→89 |
+
+검증: 실제 run_ingest 재실행으로 fix 전(1816/63/66/10826)→후(1768/47/34/7808) 실측. 단위테스트
+mutation 내장(totals=3 vs inventory=1). 게이트 GREEN(ruff 0, mypy 68 불변, pytest not-integration
+1568 pass / 19 사전존재 Windows-환경=PR-161 동일집합·회귀 0).
+
+갱신 가중평균: 그래프품질 0.08×(+0.1) → +0.008 → 약 **91.3/100**. 나머지 차원 불변.
+
+남은 dogfood 후속(검증됨): DataEntity 시스템카탈로그/키워드 FP 필터(sqlite_master/dual/set 등,
+PR-163 후보); ggoss-ts EXPOSES 엣지 부재로 duplicate_endpoint+OTLP reconcile TS 무발화(PR-164);
+finding taxonomy에 보안·인가·로직 룰 부재(0 findings, 설계 논의).
+
+## 자율 라운드 PR-163 (dogfood — DataEntity 시스템 카탈로그 FP 필터)
+
+PR-162 dogfood 후속. distinct DataEntity 34개 중 ~8개가 도메인 아닌 노이즈(SQL 시스템 카탈로그 +
+`UPDATE..SET` 파서 아티팩트)임을 provenance까지 실측.
+
+| PR | 영역 | 발견 (dogfood provenance) | 점수 |
+|----|------|--------------------------|------|
+| 163 | 그래프 데이터 품질 | sqlite_master/pg_namespace/schemata/user_tables 등 시스템 카탈로그(drivers.ts:introspect)와 `set`(UPDATE..SET 오파싱)이 DataEntity로 추출. ingest 보수적 denylist로 노드+READS/WRITES 엣지 drop(모호어 tables/columns는 제외). dogfood 재실행: distinct DataEntity **34→26**, FP 8종 제거, 도메인 테이블 전부 보존 | 89→90 |
+
+검증: dogfood 재실행 실측 + 단위/통합 테스트. 게이트 GREEN(ruff 0, mypy 68 불변, pytest
+not-integration 1570 pass / 19 사전존재 Windows-환경=PR-162 동일집합·회귀 0).
+
+갱신 가중평균: 그래프품질 0.08×(+0.1) → +0.008 → 약 **91.4/100**.
+
+근본/잔존(정직): `set`은 ggoss-ts SQL 파서 버그가 근본(ingest 필터는 증상 차단) → analyzer 라운드
+후보. EXPOSES 엣지 부재(PR-164)는 미해결.
+
+## 자율 라운드 PR-164 (dogfood — Next.js route handler EXPOSES 엣지)
+
+PR-162/163 dogfood의 마지막 코드-격차. 분석 그래프 EXPOSES **0건**이라 duplicate_endpoint + OTLP
+reconcile가 TS에서 무발화였다.
+
+| PR | 영역 | 발견 (dogfood 실측) | 점수 |
+|----|------|--------------------|------|
+| 164 | OTLP runtime correlation | ggoss-ts가 NestJS/Express/fetch만 감지하고 **Next.js App Router**(`app/**/route.ts`의 `export function GET/POST`)는 미감지 → contract에 server EXPOSES 없음. 파일경로→URL 도출(route group 제거, `[id]`→`{id}`)로 메서드당 contract+EXPOSES 방출. dogfood 재실행: EXPOSES **0→143** | 86→87 |
+
+검증: dogfood EXPOSES 0→143 실측 + 단위테스트(Next.js 감지/dynamic/route-group/arrow/비-route 무시).
+게이트 GREEN(ruff 0, pytest not-integration 1574 pass / 19 사전존재 Windows-환경=PR-163 동일집합·회귀 0,
+실분석기 pr76/75/87 통과, mypy 불변).
+
+갱신 가중평균: OTLP 0.03×(+0.1) → +0.003 → 약 **91.4/100**(구조적 unblock, 가중 기여 소).
+
+**dogfood 검증 아크 완료**: PR-162(정확 카운트)·163(도메인-only)·164(server EXPOSES)로 dogfood가 드러낸
+코드-격차 3건 종결. 잔존은 환경의존(라이브 OTel/docker) 또는 설계(보안·인가 finding 룰 — dogfood 실제
+IDOR는 Claude가 잡고 Mnemos는 못 잡음).

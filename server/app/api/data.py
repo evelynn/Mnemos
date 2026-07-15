@@ -1,5 +1,6 @@
 """Data entity + sample browsing API (spec §8, §11.4)."""
 
+import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -19,11 +20,29 @@ from app.data_sampler.project_db import (
     enforce_policy,
     requires_awr,
     resolve_project_db,
+    sensitive_tables_hit,
 )
 from app.db import get_session
+from app.api.graph_guard import (
+    GRAPH_SNAPSHOT_UNAVAILABLE_CODE,
+    require_readable_current_graph,
+)
+from app.graph_publication import (
+    GraphPublicationError,
+    lock_validated_graph_head,
+)
+from app.graph_overlays import load_node_human_overlays, node_read_view
 from app.models.auth import User
-from app.models.graph import Node
+from app.models.graph import AnalysisRun, Node
 from app.models.samples import DataQueryLog, DataSample
+from app.sample_currentness import (
+    CurrentSamplePolicy,
+    current_sample_predicates,
+    read_current_sample_policy,
+    read_current_sample_revision,
+    revalidate_current_sample_policy,
+    sample_policy_for_project_db,
+)
 from app.safety.dialects import SUPPORTED_DIALECTS, is_supported
 from app.safety.ratelimit import actor_key, enforce as rl_enforce
 from app.safety.sql_limit import (
@@ -35,8 +54,57 @@ from app.safety.sql_limit import (
 router = APIRouter(
     prefix="/api/v1/projects/{project_id}/data_entities",
     tags=["data"],
-    dependencies=[Depends(require_project_org())],
+    dependencies=[
+        Depends(require_project_org()),
+        Depends(require_readable_current_graph, scope="function"),
+    ],
 )
+
+_CANONICAL_GIT_SHA = re.compile(r"[0-9a-f]{40,64}\Z")
+_SAMPLE_POLICY_CHANGED_CODE = "sample_policy_changed_retry"
+
+
+def _sample_policy_subject(entity_id: str, entity_data: dict[str, Any]) -> str:
+    """Build a non-executed identifier string for sensitive-table matching."""
+
+    values = [entity_id]
+    for key in (
+        "name",
+        "table",
+        "table_name",
+        "qualified_name",
+        "physical_name",
+        "schema",
+        "schema_name",
+    ):
+        value = entity_data.get(key)
+        if isinstance(value, str) and value:
+            values.append(value)
+    return " ".join(values)
+
+
+async def _require_unchanged_sample_policy(
+    db: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    component_id: object,
+    expected: CurrentSamplePolicy,
+) -> None:
+    if await revalidate_current_sample_policy(
+        db,
+        project_id=project_id,
+        component_id=component_id,
+        expected=expected,
+    ):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "schema": "mnemos.error.v1",
+            "error": _SAMPLE_POLICY_CHANGED_CODE,
+            "retryable": True,
+        },
+    )
 
 
 @router.get("")
@@ -54,14 +122,21 @@ async def list_data_entities(
             )
         )
     ).scalars().all()
+    overlays = await load_node_human_overlays(
+        db, project_id=project_id, node_ids=(row.id for row in rows)
+    )
+    views = {row.id: node_read_view(row, overlays.get(row.id)) for row in rows}
     return [
         {
             "id": r.id,
-            "name": (r.data or {}).get("name"),
-            "kind": (r.data or {}).get("kind"),
-            "component_id": (r.data or {}).get("component_id"),
-            "is_sensitive": (r.data or {}).get("is_sensitive", False),
-            "certainty": r.certainty,
+            "name": views[r.id]["data"].get("name"),
+            "kind": views[r.id]["data"].get("kind"),
+            "component_id": views[r.id]["data"].get("component_id"),
+            "is_sensitive": views[r.id]["data"].get("is_sensitive", False),
+            "certainty": views[r.id]["certainty"],
+            "source_certainty": views[r.id]["source_certainty"],
+            "effective_certainty": views[r.id]["effective_certainty"],
+            "confirmed": views[r.id]["confirmed"],
         }
         for r in rows
     ]
@@ -82,6 +157,9 @@ async def get_sample(
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     limit = max(1, min(limit, 100))
+    sample_revision = await read_current_sample_revision(
+        db, project_id=project_id
+    )
     node = (
         await db.execute(
             select(Node).where(
@@ -94,8 +172,17 @@ async def get_sample(
     ).scalar_one_or_none()
     if node is None:
         raise HTTPException(status_code=404, detail="entity_not_found")
-    if (node.data or {}).get("is_sensitive"):
+    overlays = await load_node_human_overlays(
+        db, project_id=project_id, node_ids=[node.id]
+    )
+    view = node_read_view(node, overlays.get(node.id))
+    if view["data"].get("is_sensitive"):
         raise HTTPException(status_code=403, detail="sensitive_entity_sample_disallowed")
+    sample_policy = await read_current_sample_policy(
+        db,
+        project_id=project_id,
+        component_id=view["data"].get("component_id"),
+    )
 
     sample = (
         await db.execute(
@@ -103,6 +190,7 @@ async def get_sample(
             .where(
                 DataSample.project_id == project_id,
                 DataSample.data_entity_id == entity_id,
+                *current_sample_predicates(sample_revision, sample_policy),
             )
             .order_by(DataSample.sampled_at.desc())
             .limit(1)
@@ -110,6 +198,12 @@ async def get_sample(
     ).scalar_one_or_none()
     if sample is None:
         raise HTTPException(status_code=404, detail="no_sample_yet")
+    await _require_unchanged_sample_policy(
+        db,
+        project_id=project_id,
+        component_id=view["data"].get("component_id"),
+        expected=sample_policy,
+    )
 
     rows = sample.sample_rows[:limit] if isinstance(sample.sample_rows, list) else []
     await audit_record(
@@ -126,10 +220,24 @@ async def get_sample(
         "column_stats": sample.column_stats,
         "sampled_at": sample.sampled_at,
         "masking_applied": sample.masking_applied,
+        "source_run_id": str(sample.source_run_id),
+        "source_git_sha": sample.source_git_sha,
+        "source_graph_generation": sample.source_graph_generation,
+        "source_overlay_generation": sample.source_overlay_generation,
+        "source_project_db_present": sample.source_project_db_present,
+        "source_project_db_id": (
+            str(sample.source_project_db_id)
+            if sample.source_project_db_id is not None
+            else None
+        ),
+        "source_policy_hash": sample.source_policy_hash,
     }
 
 
-@router.post("/{entity_id:path}/refresh_sample")
+@router.post(
+    "/{entity_id:path}/refresh_sample",
+    dependencies=[Depends(require_operator)],
+)
 async def refresh_sample(
     project_id: uuid.UUID,
     entity_id: str,
@@ -147,6 +255,20 @@ async def refresh_sample(
     # Samples hit the source DB via the analyzer, so keep them bounded.
     request.state.user = user
     await rl_enforce(actor_key(request, "data.sample"), limit=20, window_sec=60)
+    try:
+        head, publication = await lock_validated_graph_head(
+            db, project_id=project_id
+        )
+    except GraphPublicationError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "schema": "mnemos.error.v1",
+                "error": GRAPH_SNAPSHOT_UNAVAILABLE_CODE,
+                "reason": str(exc),
+            },
+        ) from exc
     entity = (
         await db.execute(
             select(Node).where(
@@ -158,21 +280,57 @@ async def refresh_sample(
         )
     ).scalar_one_or_none()
     if entity is None:
+        await db.rollback()
         raise HTTPException(status_code=404, detail="entity_not_found")
-    if (entity.data or {}).get("is_sensitive"):
+    overlays = await load_node_human_overlays(
+        db, project_id=project_id, node_ids=[entity.id]
+    )
+    entity_view = node_read_view(entity, overlays.get(entity.id))
+    if entity_view["data"].get("is_sensitive"):
+        await db.rollback()
         raise HTTPException(
             status_code=403, detail="sensitive_entity_sample_disallowed"
+        )
+
+    source_git_sha = (
+        await db.execute(
+            select(AnalysisRun.git_sha).where(
+                AnalysisRun.id == head.current_run_id,
+                AnalysisRun.project_id == project_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if (
+        not isinstance(source_git_sha, str)
+        or _CANONICAL_GIT_SHA.fullmatch(source_git_sha) is None
+    ):
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "schema": "mnemos.error.v1",
+                "error": GRAPH_SNAPSHOT_UNAVAILABLE_CODE,
+                "reason": "published graph has no canonical source commit",
+            },
         )
 
     # Resolve per-project-DB masking overrides when the entity advertises
     # its DB component id (spec §12.2). Absence falls back to defaults so
     # projects without explicit bindings still mask PII.
-    db_component = (entity.data or {}).get("component_id")
+    db_component = entity_view["data"].get("component_id")
     engine: MaskingEngine | None = None
     if db_component:
         pdb = await resolve_project_db(db, project_id, db_component)
         if pdb is not None:
             engine = MaskingEngine.from_project_db(pdb.masking_rules)
+    sample_policy = sample_policy_for_project_db(pdb if db_component else None)
+    sensitive_hit = sensitive_tables_hit(
+        _sample_policy_subject(entity_id, entity_view["data"]),
+        list(sample_policy.effective_sensitive_tables),
+    )
+    if sensitive_hit is not None:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail="sensitive_table_blocked")
 
     masked_rows, _col_flags, any_masked = mask_rows(body.columns, body.rows, engine)
     stats = compute_column_stats(body.columns, masked_rows)
@@ -186,6 +344,13 @@ async def refresh_sample(
         row_count_estimate=body.row_count_estimate,
         column_stats=stats,
         masking_applied=any_masked,
+        source_run_id=head.current_run_id,
+        source_git_sha=source_git_sha,
+        source_graph_generation=publication.generation,
+        source_overlay_generation=head.overlay_generation,
+        source_project_db_present=sample_policy.project_db_present,
+        source_project_db_id=sample_policy.project_db_id,
+        source_policy_hash=sample_policy.policy_hash,
     )
     db.add(sample)
     await db.commit()
@@ -202,6 +367,17 @@ async def refresh_sample(
         "rows": len(masked_rows),
         "masking_applied": any_masked,
         "sampled_at": sample.sampled_at,
+        "source_run_id": str(sample.source_run_id),
+        "source_git_sha": sample.source_git_sha,
+        "source_graph_generation": sample.source_graph_generation,
+        "source_overlay_generation": sample.source_overlay_generation,
+        "source_project_db_present": sample.source_project_db_present,
+        "source_project_db_id": (
+            str(sample.source_project_db_id)
+            if sample.source_project_db_id is not None
+            else None
+        ),
+        "source_policy_hash": sample.source_policy_hash,
     }
 
 
@@ -217,6 +393,9 @@ async def get_data_entity(
     _: CurrentUser,
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    sample_revision = await read_current_sample_revision(
+        db, project_id=project_id
+    )
     node = (
         await db.execute(
             select(Node).where(
@@ -229,6 +408,15 @@ async def get_data_entity(
     ).scalar_one_or_none()
     if node is None:
         raise HTTPException(status_code=404, detail="not_found")
+    overlays = await load_node_human_overlays(
+        db, project_id=project_id, node_ids=[node.id]
+    )
+    view = node_read_view(node, overlays.get(node.id))
+    sample_policy = await read_current_sample_policy(
+        db,
+        project_id=project_id,
+        component_id=view["data"].get("component_id"),
+    )
 
     latest_sample = (
         await db.execute(
@@ -236,18 +424,28 @@ async def get_data_entity(
             .where(
                 DataSample.project_id == project_id,
                 DataSample.data_entity_id == entity_id,
+                *current_sample_predicates(sample_revision, sample_policy),
             )
             .order_by(DataSample.sampled_at.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
+    await _require_unchanged_sample_policy(
+        db,
+        project_id=project_id,
+        component_id=view["data"].get("component_id"),
+        expected=sample_policy,
+    )
 
     return {
         "id": node.id,
-        "data": node.data,
-        "certainty": node.certainty,
+        "data": view["data"],
+        "certainty": view["certainty"],
+        "source_certainty": view["source_certainty"],
+        "effective_certainty": view["effective_certainty"],
+        "confirmed": view["confirmed"],
         "sample_available": latest_sample is not None,
-        "is_sensitive": (node.data or {}).get("is_sensitive", False),
+        "is_sensitive": view["data"].get("is_sensitive", False),
     }
 
 

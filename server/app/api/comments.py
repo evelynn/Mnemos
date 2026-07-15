@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
+from app.auth.org_scope import same_org
 from app.db import get_session
 from app.models.auth import User
 from app.models.comments import VALID_TARGET_KINDS, Comment
@@ -72,7 +73,7 @@ async def _check_target_in_user_org(
                 .where(Plan.id == target_id)
             )
         ).first()
-        if row is None or row[1].organization_id != user.organization_id:
+        if row is None or not same_org(user, row[1].organization_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     elif kind == "diff_submission":
         row = (
@@ -83,7 +84,7 @@ async def _check_target_in_user_org(
                 .where(DiffSubmission.id == target_id)
             )
         ).first()
-        if row is None or row[2].organization_id != user.organization_id:
+        if row is None or not same_org(user, row[2].organization_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     else:
         raise HTTPException(

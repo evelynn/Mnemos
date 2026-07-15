@@ -1,0 +1,14 @@
+.git
+.github
+.npm-cache
+.omc
+**/.omc
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/.venv
+**/node_modules
+server/tests
+*.db
+*.log

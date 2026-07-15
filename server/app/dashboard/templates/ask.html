@@ -1,249 +1,299 @@
 {% extends "_layout.html" %}
 {% block title %}Ask — Mnemos{% endblock %}
+{% block topbar_title %}<span data-i18n="Ask">Ask</span> <span class="crumb" data-i18n="· code Q&A">· code Q&A</span>{% endblock %}
 {% block content %}
-<header class="page-head">
-  <h1 data-i18n="Ask the system">Ask the system</h1>
-</header>
+<style>
+/* Conversational Ask (P3 redesign) — thread + docked composer. Reads theme
+   tokens so it works in Nord Light & One Dark Pro. */
+.chat { display:flex; flex-direction:column; min-height:calc(100vh - 5rem); max-width:1040px; margin:0 auto; }
+.chat-thread { flex:1; display:flex; flex-direction:column; gap:1.5rem; padding-bottom:1rem; }
+.chat-empty { margin:auto; text-align:center; color:var(--text-muted); max-width:600px; padding:3rem 1rem; }
+.chat-empty h1 { color:var(--text); margin:0 0 .5rem; }
+.chat-empty .ex-row { display:flex; flex-wrap:wrap; gap:.5rem; justify-content:center; margin-top:1.4rem; }
+.chat-empty .ex { font-size:.85rem; padding:.4rem .8rem; border:1px solid var(--border); border-radius:var(--radius-pill);
+  background:var(--surface); color:var(--text); cursor:pointer; }
+.chat-empty .ex:hover { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); }
+.turn-q { align-self:flex-end; max-width:78%; background:var(--accent); color:#fff; padding:.65rem .95rem;
+  border-radius:var(--radius-lg) var(--radius-lg) 4px var(--radius-lg); line-height:1.55; box-shadow:var(--shadow-card); }
+.turn-a { display:flex; flex-direction:column; gap:.6rem; }
+.turn-a .spinner { vertical-align:-2px; }
+.ask-badges { display:flex; gap:.45rem; align-items:center; flex-wrap:wrap; }
+.ask-answer .ask-card, .turn-a .ask-card { background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--radius-lg); padding:1rem 1.1rem; box-shadow:var(--shadow-card); }
+.ask-sig { font-family:var(--font-mono); font-size:.8rem; background:var(--surface-alt);
+  border:1px solid var(--border-soft); border-radius:var(--radius-md); padding:.6rem .75rem; margin-top:.6rem; overflow:auto; }
+.llm-prose { white-space:pre-wrap; line-height:1.7; }
+.llm-prose pre.ask-sig { white-space:pre; }
+.llm-prose:empty { display:none; }
+/* LLM answers often return markdown tables/headings — render them as real
+   tables (not raw pipes) so tabular results are actually visualized. */
+.md-table { border-collapse:collapse; width:100%; margin:.8rem 0; font-size:.85rem; display:block; overflow-x:auto; }
+.md-table th, .md-table td { border:1px solid var(--border); padding:.45rem .7rem; text-align:left; vertical-align:top; white-space:normal; }
+.md-table thead th { background:var(--surface-alt); font-weight:650; color:var(--text); }
+.md-table tbody tr:nth-child(even) { background:var(--surface-alt); }
+.md-table code { font-family:var(--font-mono); font-size:.82em; }
+.md-h { margin:1.1rem 0 .5rem; line-height:1.3; font-weight:650; color:var(--text); }
+.md-h:first-child { margin-top:.1rem; }
+h4.md-h, h5.md-h { font-size:.92rem; }
 
-<section>
-  <p class="muted" data-i18n="Ask a question about the analysed system in plain language — Mnemos answers from the knowledge graph (symbols, data access, summaries). If the graph can't answer yet, it analyses the most relevant source files on demand and answers anyway.">
-    Ask a question about the analysed system in plain language — Mnemos
-    answers from the knowledge graph (symbols, data access, summaries).
-    If the graph can't answer yet, it analyses the most relevant source
-    files on demand and answers anyway.
-  </p>
+/* docked composer */
+.chat-dock { position:sticky; bottom:0; padding:.5rem 0 1rem; background:linear-gradient(0deg,var(--bg) 72%,transparent); }
+.chat-box { border:1px solid var(--border); border-radius:18px; background:var(--surface); box-shadow:var(--shadow-hover); transition:.15s; }
+.chat-box:focus-within { border-color:var(--accent); box-shadow:0 0 0 4px var(--accent-soft); }
+#aq-q { width:100%; border:none; background:none; resize:none; outline:none; padding:.95rem 1.1rem .3rem;
+  min-height:84px; max-height:40vh; font:inherit; line-height:1.6; color:var(--text); }
+#aq-q::placeholder { color:var(--text-muted); }
+.chat-bar { display:flex; align-items:center; gap:.5rem; padding:.45rem .65rem .65rem; flex-wrap:wrap; }
+.chat-bar select#aq-pid { height:32px; min-height:32px; padding:0 .5rem; font-size:.8rem; max-width:200px; }
+.chat-root { height:32px !important; min-height:32px !important; font-size:.8rem !important; width:160px; }
+.cbtn { display:inline-flex; align-items:center; gap:.35rem; height:32px; padding:0 .7rem; border-radius:var(--radius-md);
+  border:1px solid var(--border); background:var(--surface); color:var(--text-muted); font-size:.8rem; font-weight:500; cursor:pointer; }
+.cbtn:hover { background:var(--surface-alt); color:var(--text); }
+.cbtn.on { background:var(--accent-soft); color:var(--accent); border-color:transparent; }
+.csend { margin-left:auto; display:inline-flex; align-items:center; gap:.5rem; height:34px; padding:0 1rem;
+  border-radius:var(--radius-md); background:var(--accent); color:#fff; font-weight:600; font-size:.85rem; cursor:pointer; box-shadow:var(--shadow-card); }
+.csend:hover { background:var(--accent-strong); }
+.csend kbd { font:11px var(--font-mono); background:rgba(255,255,255,.2); border-radius:4px; padding:1px 5px; }
+.chat-hint { text-align:center; font-size:.75rem; color:var(--text-muted); margin-top:.5rem; }
 
-  <form onsubmit="return askQuestion(event)" class="ask-form">
-    <label><span data-i18n="Project">Project</span>
-      <input id="aq-pid" name="project_id" required placeholder="uuid" />
-    </label>
-    <label class="ask-question"><span data-i18n="Question">Question</span>
-      <div class="ask-q-row">
-        <textarea id="aq-q" rows="2" required
-          placeholder="e.g. Where is the order creation handler and which tables does it write?"></textarea>
-        <!-- Voice command (PR-155). Hidden until the client confirms the
-             browser supports capture AND the server has an STT engine
-             installed (mountVoiceInput probes /api/v1/voice/status). -->
-        <button type="button" id="aq-mic" class="mic-btn" hidden
-                aria-label="Start voice input" aria-pressed="false"
-                data-required-role="operator"
-                title="Speak your question">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"
-               viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="1.7" aria-hidden="true">
-            <path stroke-linecap="round" stroke-linejoin="round"
-                  d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"/>
-          </svg>
-          <span class="sr-only" data-i18n="Voice input">Voice input</span>
-        </button>
+/* visualization */
+.viz { margin-top:.8rem; border:1px solid var(--border); border-radius:var(--radius-md); background:var(--surface-alt); padding:.85rem 1rem; }
+.viz-cap { font-size:.68rem; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--text-muted); margin-bottom:.7rem; }
+.dgraph { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; font-family:var(--font-mono); font-size:.78rem; }
+.dgraph .node { padding:.3rem .6rem; border-radius:var(--radius-sm); border:1px solid var(--border); background:var(--surface); }
+.dgraph .node.sym { background:var(--accent-soft); border-color:var(--accent); color:var(--accent); font-weight:700; }
+.dgraph .arr { color:var(--text-muted); }
+.dgraph .tbl { padding:.25rem .55rem; border-radius:var(--radius-sm); border:1px solid var(--border); }
+.dgraph .tbl.r { background:var(--accent-soft); }
+.dgraph .tbl.w { background:var(--warn-bg); color:var(--warn); border-color:var(--warn); }
+.dgraph .grp { display:flex; gap:.35rem; flex-wrap:wrap; align-items:center; }
+.dgraph .lbl { font-family:var(--font-body); font-size:.7rem; font-weight:700; text-transform:uppercase; color:var(--text-muted); }
+.flow { display:flex; align-items:stretch; overflow:auto; }
+.flow-step { flex:1; min-width:150px; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); padding:.6rem .75rem; position:relative; }
+.flow-step + .flow-step { margin-left:1.6rem; }
+.flow-step + .flow-step::before { content:"→"; position:absolute; left:-1.25rem; top:50%; transform:translateY(-50%); color:var(--text-muted); }
+.flow-tier { font-size:.62rem; font-weight:800; letter-spacing:.05em; padding:1px .5rem; border-radius:var(--radius-pill); background:var(--accent-soft); color:var(--accent); }
+.flow-comp { font-family:var(--font-mono); font-weight:600; font-size:.82rem; margin:.35rem 0 .15rem; }
+.flow-act { font-size:.72rem; color:var(--text-muted); }
+</style>
+
+<div class="chat">
+  <div class="chat-thread" id="aq-thread">
+    <div class="chat-empty" id="aq-empty">
+      <h1 data-i18n="Ask the system">Ask the system</h1>
+      <p class="muted" data-i18n="Ask in plain language — Mnemos answers from the knowledge graph (symbols, data access, flows) and visualizes the result.">Ask in plain language — Mnemos answers from the knowledge graph (symbols, data access, flows) and visualizes the result.</p>
+      <div class="ex-row">
+        <button type="button" class="ex">감사 로그는 어디에 기록되나요?</button>
+        <button type="button" class="ex">인증 가드는 어떤 엔드포인트에 걸려 있나요?</button>
+        <button type="button" class="ex">세션을 쓰는 함수를 보여줘</button>
       </div>
-    </label>
-    <details class="ask-advanced">
-      <summary data-i18n="Deepen options">Deepen options</summary>
-      <label class="ask-inline">
-        <input id="aq-deepen" type="checkbox" checked />
-        <span data-i18n="Analyse more on demand if the graph can't answer">Analyse more on demand if the graph can't answer</span>
-      </label>
-      <label><span data-i18n="Source root (enables deepening)">Source root (enables deepening)</span>
-        <input id="aq-root" type="text" placeholder="/abs/path/to/repo (worker-visible)" />
-      </label>
-    </details>
-    <div class="ask-actions">
-      <button class="primary" type="submit" data-required-role="operator" data-i18n="Ask">Ask</button>
-      <button type="button" onclick="traceProcess()" data-required-role="operator" data-i18n="Trace as a process (FE→BE→DB)">Trace as a process (FE→BE→DB)</button>
     </div>
-  </form>
-</section>
+  </div>
 
-<section id="aq-pending" hidden aria-live="polite">
-  <p class="muted"><span class="spinner" aria-hidden="true"></span>
-    <span id="aq-pending-msg" data-i18n="Answering…">Answering…</span></p>
-</section>
-
-<section id="aq-result" hidden aria-labelledby="aq-result-title">
-  <h2 id="aq-result-title" class="sr-only" data-i18n="Answer">Answer</h2>
-  <div id="aq-badges" class="ask-badges"></div>
-  <div id="aq-answer" class="ask-answer"></div>
-  <details id="aq-matches-wrap" hidden>
-    <summary data-i18n="Other matches">Other matches</summary>
-    <ul id="aq-matches" class="ask-matches"></ul>
-  </details>
-</section>
-
-<section id="aq-flow" hidden aria-labelledby="aq-flow-title">
-  <h2 id="aq-flow-title" data-i18n="Process trace">Process trace</h2>
-  <div id="aq-flow-badges" class="ask-badges"></div>
-  <p id="aq-flow-summary" class="ask-flow-summary"></p>
-  <ol id="aq-flow-steps" class="flow-steps"></ol>
-  <div id="aq-flow-flags"></div>
-  <p id="aq-flow-data" class="muted"></p>
-</section>
+  <div class="chat-dock">
+    <div class="chat-box">
+      <textarea id="aq-q" required
+        data-i18n-placeholder="Ask anything about the codebase — write as much as you need…"
+        placeholder="Ask anything about the codebase — write as much as you need…"></textarea>
+      <div class="chat-bar">
+        <input type="hidden" id="aq-pid" name="project_id">
+        <button type="button" id="aq-trace" class="cbtn" title="Trace FE→BE→DB">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path stroke-linecap="round" stroke-linejoin="round" d="M4 18 9 9l5 4 6-9"/></svg>
+          <span data-i18n="Trace">Trace</span></button>
+        <button type="button" id="aq-deepen" class="cbtn on" title="Analyse on demand">
+          <span data-i18n="On-demand">On-demand</span></button>
+        <input type="text" id="aq-root" class="chat-root" placeholder="source root (옵션)" />
+        <button type="button" id="aq-mic" class="cbtn mic-btn" hidden aria-label="Voice input" aria-pressed="false"
+                data-required-role="operator" title="Speak your question">🎤</button>
+        <button type="button" id="aq-send" class="csend" data-required-role="operator">
+          <span data-i18n="Send">Send</span> <kbd>↵</kbd></button>
+      </div>
+    </div>
+    <div class="chat-hint"><span data-i18n="Enter to send · Shift+Enter for a new line · Trace needs a source root">Enter to send · Shift+Enter for a new line · Trace needs a source root</span></div>
+  </div>
+</div>
 
 <script>
-const escapeHtml = MnemosUI.escapeHtml;
+const E = MnemosUI.escapeHtml;
+function mdLite(s){ let h=E(s||""); h=h.replace(/`([^`]+)`/g,"<code>$1</code>"); h=h.replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>"); return h; }
+function parseSymbolId(id){ const s=String(id||""); const at=s.split("@"); const line=at[1]?at[1].split(":")[0]:""; const segs=at[0].split(":"); const file=segs.length>=3?segs.slice(1,-1).join(":"):(segs[1]||""); return {file:file,line:line}; }
 
-async function askQuestion(ev) {
-  ev.preventDefault();
-  const pid = document.getElementById("aq-pid").value.trim();
-  const q = document.getElementById("aq-q").value.trim();
-  if (!pid || !q) return false;
-  const deepen = document.getElementById("aq-deepen").checked;
-  const root = document.getElementById("aq-root").value.trim();
+let busy=false;
+let history=[];  // LLM conversation context (sent to /chat so it stays multi-turn)
+// Project now comes from the topbar global picker (#global-project). Read it
+// via MnemosUI.currentProject() and mirror into the hidden #aq-pid for voice.
+function pid(){
+  var g = (MnemosUI.currentProject && MnemosUI.currentProject()) || "";
+  var h = document.getElementById("aq-pid"); if (h && g) h.value = g;
+  return String(g).trim();
+}
+function scrollDown(){ window.scrollTo({top:document.body.scrollHeight,behavior:"smooth"}); }
 
-  const pending = document.getElementById("aq-pending");
-  const result = document.getElementById("aq-result");
-  result.hidden = true;
-  pending.hidden = false;
-  document.getElementById("aq-pending-msg").textContent =
-    (deepen && root)
-      ? MnemosUI.t("Answering… (may analyse source files on demand)")
-      : MnemosUI.t("Answering…");
-
-  try {
-    const r = await fetch(`/api/v1/projects/${pid}/ask`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ question: q, deepen: deepen, source_root: root || null }),
-    });
-    if (!r.ok) { await MnemosUI.showError("Ask failed", r); return false; }
-    renderAnswer(await r.json());
-  } finally {
-    pending.hidden = true;
-  }
-  return false;
+function startTurn(text){
+  const empty=document.getElementById("aq-empty"); if(empty) empty.remove();
+  const t=document.getElementById("aq-thread");
+  const q=document.createElement("div"); q.className="turn-q"; q.textContent=text; t.appendChild(q);
+  const a=document.createElement("div"); a.className="turn-a";
+  a.innerHTML='<p class="muted"><span class="spinner" aria-hidden="true"></span> '+E(MnemosUI.t("Answering…"))+'</p>';
+  t.appendChild(a); scrollDown(); return a;
 }
 
-function renderAnswer(d) {
-  const result = document.getElementById("aq-result");
-  // Badges: answered / deepened.
-  const badges = [];
-  badges.push(d.answered
-    ? `<span class="badge ok" data-i18n="Answered">Answered</span>`
-    : `<span class="badge warn" data-i18n="No confident answer">No confident answer</span>`);
-  if (d.deepened) {
-    const files = (d.extracted_files || []).map(escapeHtml).join(", ");
-    badges.push(`<span class="badge info" title="${files}" data-i18n="Deepened (analysed on demand)">Deepened (analysed on demand)</span>`);
-  }
-  document.getElementById("aq-badges").innerHTML = badges.join(" ");
+// reads/writes → a compact data-access graph (symbol → tables)
+function dataGraph(name,reads,writes){
+  if(!(reads&&reads.length)&&!(writes&&writes.length)) return "";
+  const chips=(arr,cls)=>arr.map(x=>`<span class="tbl ${cls}">${E(x)}</span>`).join("");
+  let html='<div class="viz"><div class="viz-cap" data-i18n="Data access graph">Data access graph</div><div class="dgraph">';
+  if(reads&&reads.length) html+=`<span class="grp"><span class="lbl" data-i18n="Reads">Reads</span>${chips(reads,"r")}</span><span class="arr">→</span>`;
+  html+=`<span class="node sym">${E(name||"symbol")}</span>`;
+  if(writes&&writes.length) html+=`<span class="arr">→</span><span class="grp"><span class="lbl" data-i18n="Writes">Writes</span>${chips(writes,"w")}</span>`;
+  html+='</div></div>'; return html;
+}
 
-  // Primary answer card.
-  const a = d.answer;
-  const ans = document.getElementById("aq-answer");
-  if (a) {
-    const detail = a.detail || {};
-    const summary = detail.summary || (detail.data && detail.data.summary) || "";
-    const sig = (detail.data && detail.data.signature) || (detail.signature) || "";
-    const writes = (a.data_access && a.data_access.writes || []).map(w => escapeHtml(w.entity_id)).join(", ");
-    const reads = (a.data_access && a.data_access.reads || []).map(w => escapeHtml(w.entity_id)).join(", ");
-    ans.innerHTML = `
-      <div class="ask-card">
-        <h3><code>${escapeHtml(a.name || a.symbol_id)}</code>
-          <span class="muted">(${escapeHtml(a.kind || "")})</span>
-          <button type="button" id="aq-listen" class="listen-btn" hidden
-                  aria-label="${MnemosUI.t("Read the answer aloud")}"
-                  title="${MnemosUI.t("Read the answer aloud")}">🔊
-            <span data-i18n="Listen">Listen</span></button></h3>
-        ${sig ? `<pre class="ask-sig">${escapeHtml(sig)}</pre>` : ""}
-        ${summary ? `<p>${escapeHtml(summary)}</p>` : ""}
-        <p class="muted"><code>${escapeHtml(a.symbol_id)}</code></p>
-        ${writes ? `<p><strong data-i18n="Writes">Writes</strong>: ${writes}</p>` : ""}
-        ${reads ? `<p><strong data-i18n="Reads">Reads</strong>: ${reads}</p>` : ""}
-      </div>`;
-    // Voice output (PR-156): reveal the listen button when TTS is available
-    // and read the answer (name + summary) aloud on click.
-    const speakText = [a.name, summary].filter(Boolean).join(". ");
-    const listenBtn = document.getElementById("aq-listen");
-    if (listenBtn && speakText) {
-      MnemosUI.voiceStatus().then(function (s) {
-        if (s && s.tts && s.tts.available) {
-          listenBtn.hidden = false;
-          listenBtn.addEventListener("click", function () { MnemosUI.speak(speakText); });
-        }
-      });
+function renderAnswerHTML(d){
+  const a=d.answer; const badges=[];
+  badges.push(d.answered?`<span class="badge ok" data-i18n="Answer">Answer</span>`:`<span class="badge" data-i18n="Best match">Best match</span>`);
+  if(d.deepened){ const files=(d.extracted_files||[]).map(E).join(", "); badges.push(`<span class="badge info" title="${files}" data-i18n="Analysed on demand">Analysed on demand</span>`); }
+  let html=`<div class="ask-badges">${badges.join(" ")}</div>`;
+  if(a){
+    const loc=a.file?(E(a.file)+(a.line?":"+E(String(a.line)):"")):"";
+    const chips=arr=>(arr||[]).map(w=>`<span class="chip">${E(w)}</span>`).join(" ");
+    const tentative=d.answered?"":`<p class="muted ask-tentative" data-i18n="No symbol confidently answers this — showing the closest match.">No symbol confidently answers this — showing the closest match.</p>`;
+    html+=tentative+`<div class="ask-card${d.answered?"":" ask-card-tentative"}">
+      <p class="ask-text">${mdLite(a.text||a.name||"")}</p>
+      <div class="ask-meta"><span class="ask-kind">${E(a.kind||"symbol")}</span>${loc?`<span class="ask-loc">${loc}</span>`:""}</div>
+      ${a.signature?`<pre class="ask-sig">${E(a.signature)}</pre>`:""}
+      ${dataGraph(a.name,a.reads,a.writes)}
+    </div>`;
+  } else {
+    html+=`<p class="muted" data-i18n="No matching symbol — try a different phrasing, or set a source root so Mnemos can analyse on demand.">No matching symbol — try a different phrasing, or set a source root so Mnemos can analyse on demand.</p>`;
+  }
+  const matches=(d.matches||[]).slice(1);
+  if(matches.length){
+    html+=`<details class="ask-matches-wrap"><summary data-i18n="Other matches">Other matches</summary><ul class="ask-matches">`;
+    html+=matches.map(m=>{ const p=parseSymbolId(m.symbol_id); const where=p.file?`<span class="muted"> · ${E(p.file)}${p.line?":"+E(p.line):""}</span>`:""; return `<li><strong>${E(m.name||m.symbol_id)}</strong> <span class="ask-kind-sm">${E(m.kind||"")}</span>${where}</li>`; }).join("");
+    html+=`</ul></details>`;
+  }
+  return html;
+}
+
+function renderFlowHTML(d){
+  const f=d.flow||{};
+  let html=`<div class="ask-badges"><span class="badge ok" data-i18n="Traced">Traced</span>`+(d.auto_collected_files||[]).map(x=>`<span class="badge info">${E(x)}</span>`).join(" ")+`</div>`;
+  html+=`<div class="ask-card">`;
+  if(f.summary) html+=`<p class="ask-text">${E(f.summary)}</p>`;
+  const steps=f.steps||[];
+  if(steps.length){
+    html+=`<div class="viz"><div class="viz-cap" data-i18n="Runtime path (cross-tier)">Runtime path (cross-tier)</div><div class="flow">`;
+    html+=steps.map(st=>{ const sig=st.signal||{}; const sg=sig.name?`${E(sig.kind||"")}: ${E(sig.name)}`:""; return `<div class="flow-step"><span class="flow-tier">${E(st.tier||"?")}</span><div class="flow-comp">${E(st.component||"")}</div><div class="flow-act">${E(st.action||"")}${sg?" · "+sg:""}</div></div>`; }).join("");
+    html+=`</div></div>`;
+  }
+  const dt=(f.data_touched||[]).map(t=>`${E(t.op||"")} ${E(t.entity||"")}`).join(", ");
+  if(dt) html+=`<p class="muted" style="margin-top:.6rem">${E(MnemosUI.t("Data touched"))}: ${dt}</p>`;
+  html+=`</div>`;
+  return html;
+}
+
+// LLM reply (from /chat) → grounded prose. Escape first, then a safe markdown
+// subset rendered line-by-line: code blocks, GFM tables, headings, bold,
+// inline code, bullets. Tables/headings/code break OUT of the .llm-prose
+// pre-wrap wrapper into real elements so tabular results are visualized
+// (not shown as raw "| … |" pipes). Prose newlines are kept via CSS.
+function mdRender(s){
+  const L=E(s||"").split("\n");
+  const cells=line=>{ let x=line.trim(); if(x.charAt(0)==="|")x=x.slice(1); if(x.charAt(x.length-1)==="|")x=x.slice(0,-1); return x.split("|").map(c=>c.trim()); };
+  const isSep=line=>{ if(line==null||line.indexOf("|")<0) return false; const c=cells(line); return c.length>0 && c.every(x=>/^:?-+:?$/.test(x)); };
+  const isRow=line=> line!=null && line.indexOf("|")>=0 && line.trim()!=="" && !isSep(line);
+  const inl=t=> t.replace(/`([^`]+)`/g,"<code>$1</code>").replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>");
+  let out="";
+  for(let i=0;i<L.length;i++){
+    const ln=L[i];
+    if(/^\s*```/.test(ln)){                              // fenced code block
+      let buf=""; i++;
+      for(; i<L.length && !/^\s*```/.test(L[i]); i++) buf+=L[i]+"\n";
+      out+=`</div><pre class="ask-sig">${buf.replace(/\n$/,"")}</pre><div class="llm-prose">`;
+      continue;
     }
-  } else {
-    ans.innerHTML = `<p class="muted" data-i18n="No matching symbol — try a different phrasing, or provide a source root so Mnemos can analyse on demand.">No matching symbol — try a different phrasing, or provide a source root so Mnemos can analyse on demand.</p>`;
+    const hm=ln.match(/^\s*(#{1,5})\s+(.*?)\s*#*\s*$/);   // heading
+    if(hm){ const lv=Math.min(hm[1].length+1,5); out+=`</div><h${lv} class="md-h">${inl(hm[2])}</h${lv}><div class="llm-prose">`; continue; }
+    if(isRow(ln)){                                        // GFM table (header + separator row)
+      let j=i+1; while(j<L.length && L[j].trim()==="") j++;
+      if(j<L.length && isSep(L[j])){
+        const head=cells(ln), rows=[]; let k=j+1;
+        while(k<L.length){
+          if(L[k].trim()===""){ let m=k+1; while(m<L.length && L[m].trim()==="") m++; if(m<L.length && isRow(L[m])){ k=m; continue; } break; }
+          if(!isRow(L[k])) break;
+          rows.push(cells(L[k])); k++;
+        }
+        let t=`</div><table class="md-table"><thead><tr>${head.map(c=>`<th>${inl(c)}</th>`).join("")}</tr></thead><tbody>`;
+        t+=rows.map(r=>`<tr>${head.map((_,ci)=>`<td>${inl(r[ci]!=null?r[ci]:"")}</td>`).join("")}</tr>`).join("");
+        out+=t+`</tbody></table><div class="llm-prose">`; i=k-1; continue;
+      }
+    }
+    const bm=ln.match(/^\s*[-*]\s+(.*)$/);                // bullet
+    if(bm){ out+="• "+inl(bm[1])+"\n"; continue; }
+    out+=inl(ln)+"\n";                                    // prose (newline kept by pre-wrap)
   }
-
-  // Other matches.
-  const matches = (d.matches || []).slice(1);
-  const wrap = document.getElementById("aq-matches-wrap");
-  if (matches.length) {
-    document.getElementById("aq-matches").innerHTML = matches.map(m =>
-      `<li><code>${escapeHtml(m.name || m.symbol_id)}</code> <span class="muted">${escapeHtml(m.kind || "")}</span></li>`).join("");
-    wrap.hidden = false;
-  } else {
-    wrap.hidden = true;
-  }
-
-  result.hidden = false;
-  MnemosUI.applyI18n(result);
+  return out;
+}
+function renderChatReply(d){
+  const prov=d.provider?`<span class="badge info">${E(d.provider)}</span>`:"";
+  const speak=(d.reply||"").replace(/[`*#|>]/g," ").replace(/\s+/g," ").trim().slice(0,4000);
+  return `<div class="ask-badges"><span class="badge ok" data-i18n="Answer">Answer</span>${prov}`
+    + `<span class="badge" data-i18n="LLM · graph-grounded">LLM · graph-grounded</span></div>`
+    + `<div class="ask-card"><div class="llm-prose">${mdRender(d.reply||"")}</div>`
+    + `<button type="button" id="aq-listen" class="listen-btn" data-speak="${E(speak)}" hidden`
+    + ` aria-label="${E(MnemosUI.t("Read the answer aloud"))}" title="${E(MnemosUI.t("Read the answer aloud"))}">🔊 <span data-i18n="Listen">Listen</span></button></div>`;
 }
 
-async function traceProcess() {
-  const pid = document.getElementById("aq-pid").value.trim();
-  const q = document.getElementById("aq-q").value.trim();
-  const root = document.getElementById("aq-root").value.trim();
-  if (!pid || !q) { MnemosUI.showToast(MnemosUI.t("Pick a project and enter the process to trace."), "warn"); return; }
-  if (!root) { MnemosUI.showToast(MnemosUI.t("A source root is required to trace a process — set it under Deepen options."), "warn"); return; }
-
-  const pending = document.getElementById("aq-pending");
-  const flowSec = document.getElementById("aq-flow");
-  flowSec.hidden = true;
-  pending.hidden = false;
-  document.getElementById("aq-pending-msg").textContent =
-    MnemosUI.t("Tracing the process across tiers… (analyses the relevant FE/BE/DB files)");
-  try {
-    const r = await fetch(`/api/v1/projects/${pid}/trace_flow/auto`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ entry: q, source_root: root }),
-    });
-    if (!r.ok) { await MnemosUI.showError("Process trace failed", r); return; }
-    renderFlow(await r.json());
-  } finally {
-    pending.hidden = true;
-  }
+async function send(){
+  if(busy) return; const p=pid(); const q=document.getElementById("aq-q").value.trim();
+  if(!p){ MnemosUI.showToast(MnemosUI.t("Pick a project first."),"warn"); return; }
+  if(!q) return;
+  const trace=document.getElementById("aq-trace").classList.contains("on");
+  const deepen=document.getElementById("aq-deepen").classList.contains("on");
+  const root=document.getElementById("aq-root").value.trim();
+  const slot=startTurn(q);
+  document.getElementById("aq-q").value=""; grow(); busy=true;
+  try{
+    if(trace){
+      if(!root){ slot.innerHTML=`<p class="muted" data-i18n="A source root is required to trace a process.">A source root is required to trace a process.</p>`; MnemosUI.applyI18n(slot); return; }
+      const r=await fetch(`/api/v1/projects/${p}/trace_flow/auto`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({entry:q,source_root:root})});
+      if(!r.ok){ slot.innerHTML=`<p class="muted">⚠ ${E(MnemosUI.t("Process trace failed"))}</p>`; await MnemosUI.showError("Process trace failed",r); return; }
+      slot.innerHTML=renderFlowHTML(await r.json());
+    } else {
+      // LLM-backed answer: /chat grounds on the graph (symbol hits + overview)
+      // then an LLM (claudecode/…) composes the answer, so natural-language
+      // questions are understood properly. Slower than the old graph lookup.
+      const r=await fetch(`/api/v1/projects/${p}/chat`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({message:q,history:history.slice(-12),source_root:root||null})});
+      if(!r.ok){
+        if(r.status===503){ slot.innerHTML=`<p class="muted">⚠ <span data-i18n="The AI is starting up — ask again in a moment.">The AI is starting up — ask again in a moment.</span></p>`; MnemosUI.applyI18n(slot); }
+        else { slot.innerHTML=`<p class="muted">⚠ ${E(MnemosUI.t("Ask failed"))}</p>`; await MnemosUI.showError("Ask failed",r); }
+        return;
+      }
+      const d=await r.json();
+      slot.innerHTML=renderChatReply(d);
+      // Read-aloud (TTS) when a server STT/TTS engine is present (PR-156).
+      const _lb=slot.querySelector("#aq-listen");
+      if(_lb){ MnemosUI.voiceStatus().then(function(s){ if(s&&s.tts&&s.tts.available){ _lb.hidden=false; _lb.addEventListener("click",function(){ MnemosUI.speak(_lb.dataset.speak); }); } }); }
+      history.push({role:"user",content:q}); history.push({role:"assistant",content:(d.reply||"").slice(0,7000)});
+    }
+    MnemosUI.applyI18n(slot); scrollDown();
+  } finally { busy=false; }
 }
 
-function renderFlow(d) {
-  const f = d.flow || {};
-  document.getElementById("aq-flow-badges").innerHTML =
-    `<span class="badge ok" data-i18n="Traced">Traced</span>` +
-    (d.auto_collected_files || []).map(x => `<span class="badge info">${escapeHtml(x)}</span>`).join(" ");
-  document.getElementById("aq-flow-summary").textContent = f.summary || "";
+// auto-grow textarea
+const ta=document.getElementById("aq-q");
+function grow(){ ta.style.height="auto"; ta.style.height=Math.min(ta.scrollHeight, window.innerHeight*0.40)+"px"; }
+ta.addEventListener("input", grow); grow();
+ta.addEventListener("keydown", e=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); send(); } });
+document.getElementById("aq-send").addEventListener("click", send);
+document.getElementById("aq-trace").addEventListener("click", e=>e.currentTarget.classList.toggle("on"));
+document.getElementById("aq-deepen").addEventListener("click", e=>e.currentTarget.classList.toggle("on"));
+document.querySelectorAll(".chat-empty .ex").forEach(b=>b.addEventListener("click",()=>{ ta.value=b.textContent; grow(); ta.focus(); }));
 
-  document.getElementById("aq-flow-steps").innerHTML = (f.steps || []).map(st => {
-    const sig = st.signal || {};
-    const sigTxt = sig.name ? ` <span class="muted">(${escapeHtml(sig.kind || "")}: ${escapeHtml(sig.name)})</span>` : "";
-    return `<li><strong>[${escapeHtml(st.tier || "?")}]</strong> ${escapeHtml(st.component || "")} — ${escapeHtml(st.action || "")}${sigTxt}</li>`;
-  }).join("");
-
-  const flags = f.flags || [];
-  document.getElementById("aq-flow-flags").innerHTML = flags.length
-    ? "<h3 data-i18n='Flags'>Flags</h3><ul class='flow-flags'>" + flags.map(fl =>
-        `<li><strong>${escapeHtml(fl.name || "")}</strong>: `
-        + (fl.values || []).map(v => `<code>${escapeHtml(String(v.value))}</code> = ${escapeHtml(v.meaning || "")}`).join("; ")
-        + "</li>").join("") + "</ul>"
-    : "";
-
-  const dt = (f.data_touched || []).map(t => `${escapeHtml(t.op || "")} ${escapeHtml(t.entity || "")}`).join(", ");
-  document.getElementById("aq-flow-data").textContent = dt ? (MnemosUI.t("Data touched") + ": " + dt) : "";
-
-  const sec = document.getElementById("aq-flow");
-  sec.hidden = false;
-  MnemosUI.applyI18n(sec);
-}
-
-MnemosUI.mountProjectPicker("#aq-pid", { autoSubmit: false });
-
-// Voice command (PR-155): speak the question instead of typing it.
-// Recognition runs on a local server-side model; the recognised text
-// lands in the question box for the operator to review before asking.
-MnemosUI.mountVoiceInput({
-  button: "#aq-mic",
-  target: "#aq-q",
-  projectInput: "#aq-pid",
-});
+// sync hidden project from the topbar picker (for the voice STT call)
+(function(){ var g=(MnemosUI.currentProject&&MnemosUI.currentProject())||""; var h=document.getElementById("aq-pid"); if(h&&g) h.value=g; })();
+MnemosUI.mountVoiceInput({ button:"#aq-mic", target:"#aq-q", projectInput:"#aq-pid" });
+ta.focus();
 </script>
 {% endblock %}

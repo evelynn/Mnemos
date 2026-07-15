@@ -4,31 +4,31 @@
 <header class="page-head"><h1 data-i18n="Organizations">Organizations</h1></header>
 <section class="hint">
   <p class="muted">
-    Multi-tenant partitioning. Every project, user, and secret is scoped
-    to exactly one organisation; routes that mention <code>project_id</code>
-    reject access from users in a different organisation with
-    <code>404 not_found</code> (so tenant boundaries don't leak existence).
+    <span data-i18n="Multi-tenant partitioning. Every project, user, and secret is scoped to exactly one organisation; routes that mention">Multi-tenant partitioning. Every project, user, and secret is scoped
+    to exactly one organisation; routes that mention</span> <code>project_id</code>
+    <span data-i18n="reject access from users in a different organisation with">reject access from users in a different organisation with</span>
+    <code>404 not_found</code> <span data-i18n="(so tenant boundaries don&#39;t leak existence).">(so tenant boundaries don't leak existence).</span>
   </p>
   <p class="muted">
-    The <code>default</code> organisation is the home of all single-tenant
-    deployments and cannot be deleted.
+    <span data-i18n="The default organisation is the home of all single-tenant deployments and cannot be deleted.">The <code>default</code> organisation is the home of all single-tenant
+    deployments and cannot be deleted.</span>
   </p>
 </section>
 
 <section>
-  <h2>Create organisation</h2>
+  <h2 data-i18n="Create organisation">Create organisation</h2>
   <form onsubmit="return createOrg(event)">
-    <label>Slug<input type="text" name="slug" required placeholder="team-red" pattern="[a-z0-9][a-z0-9-]{1,62}" /></label>
-    <label>Display name<input type="text" name="display_name" required placeholder="Team Red" /></label>
-    <button type="submit" class="primary">Create</button>
+    <label><span data-i18n="Slug">Slug</span><input type="text" name="slug" required placeholder="team-red" data-i18n-placeholder="team-red" pattern="[a-z0-9][a-z0-9-]{1,62}" /></label>
+    <label><span data-i18n="Display name">Display name</span><input type="text" name="display_name" required placeholder="Team Red" data-i18n-placeholder="Team Red" /></label>
+    <button type="submit" class="primary" data-i18n="Create">Create</button>
   </form>
   <pre id="create-result" class="muted"></pre>
 </section>
 
 <section>
-  <h2>Existing organisations</h2>
-  <button onclick="loadOrgs()" class="primary">Refresh</button>
-  <div id="orgs-list"><p class="muted">Click refresh to load.</p></div>
+  <h2 data-i18n="Existing organisations">Existing organisations</h2>
+  <button onclick="loadOrgs()" class="primary" data-i18n="Refresh">Refresh</button>
+  <div id="orgs-list"><p class="muted" data-i18n="Click refresh to load.">Click refresh to load.</p></div>
 </section>
 
 <script>
@@ -62,29 +62,38 @@ async function loadOrgs() {
   }
   const rows = await r.json();
   if (!rows.length) {
-    out.innerHTML = '<p class="muted">No organisations recorded.</p>';
+    out.innerHTML = `<p class="muted" data-i18n="No organisations recorded.">No organisations recorded.</p>`;
+    MnemosUI.applyI18n(out);
     return;
   }
-  let html = '<table class="data"><thead><tr><th>Slug</th><th>Display name</th><th>ID</th><th>Created</th><th></th></tr></thead><tbody>';
+  let html = '<table class="data"><thead><tr>'
+    + `<th data-i18n="Slug">Slug</th>`
+    + `<th data-i18n="Display name">Display name</th>`
+    + `<th data-i18n="ID">ID</th>`
+    + `<th data-i18n="Created">Created</th>`
+    + '<th></th></tr></thead><tbody>';
   for (const o of rows) {
     const canDelete = o.slug !== "default";
     html += `<tr>
-      <td><code>${o.slug}</code></td>
-      <td>${o.display_name}</td>
-      <td><code class="muted">${o.id}</code></td>
-      <td>${o.created_at}</td>
-      <td>${canDelete ? `<button onclick="deleteOrg('${o.id}','${o.slug}')">Delete</button>` : '<span class="muted">protected</span>'}</td>
+      <td><code>${escapeHtml(o.slug)}</code></td>
+      <td>${escapeHtml(o.display_name)}</td>
+      <td><code class="muted">${escapeHtml(o.id)}</code></td>
+      <td>${escapeHtml(o.created_at)}</td>
+      <td>${canDelete
+        ? `<button onclick="deleteOrg('${escapeHtml(o.id)}','${escapeHtml(o.slug)}')" data-i18n="Delete">Delete</button>`
+        : `<span class="muted" data-i18n="protected">protected</span>`}</td>
     </tr>`;
   }
   html += '</tbody></table>';
   out.innerHTML = html;
+  MnemosUI.applyI18n(out);
 }
 
 async function deleteOrg(id, slug) {
-  if (!confirm(`Delete organisation "${slug}"? Existing rows that reference it will keep their dangling FK — run cleanup manually.`)) return;
+  if (!confirm(MnemosUI.t("Delete organisation \"$1\"? Existing rows that reference it will keep their dangling FK — run cleanup manually.", {1: slug}))) return;
   const r = await fetch(`/api/v1/organizations/${id}`, {method: "DELETE"});
   if (r.ok || r.status === 204) loadOrgs();
-  else await MnemosUI.showError("Delete failed", r);
+  else await MnemosUI.showError(MnemosUI.t("Delete failed"), r);
 }
 </script>
 {% endblock %}
