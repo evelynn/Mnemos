@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 _RELOAD_PROBE = """
 import importlib
@@ -44,3 +46,38 @@ def test_get_session_identity_survives_db_backend_reload() -> None:
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.asyncio
+async def test_audit_record_uses_current_db_session_factory(monkeypatch) -> None:
+    """Audit writes must follow a backend rebind and commit on that backend."""
+    import app.db as app_db
+    from app.audit import logger as audit_logger
+
+    captured: dict[str, object] = {"commits": 0}
+
+    class _Session:
+        def add(self, entry) -> None:
+            captured["entry"] = entry
+
+        async def commit(self) -> None:
+            captured["commits"] = int(captured["commits"]) + 1
+
+        async def rollback(self) -> None:
+            raise AssertionError("a valid audit write unexpectedly rolled back")
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+    monkeypatch.setattr(app_db, "SessionLocal", lambda: _SessionContext())
+
+    await audit_logger.record(actor="gitlab", action="webhook.received")
+
+    entry = captured["entry"]
+    assert entry.actor == "gitlab"
+    assert entry.action == "webhook.received"
+    assert captured["commits"] == 1

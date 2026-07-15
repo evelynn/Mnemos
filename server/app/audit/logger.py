@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import SessionLocal
+import app.db as app_db
 from app.models.audit import AuditLog
 
 log = logging.getLogger(__name__)
@@ -86,7 +86,11 @@ async def record(
             raise
         return
 
-    async with SessionLocal() as db:
+    # Resolve the factory through the module at call time.  The Docker-free
+    # harness and the integration suite intentionally rebind ``app.db`` from
+    # SQLite to PostgreSQL; capturing SessionLocal by value would keep writing
+    # audit rows to the stale backend even after the application had moved.
+    async with app_db.SessionLocal() as db:
         try:
             db.add(entry)
             await db.commit()

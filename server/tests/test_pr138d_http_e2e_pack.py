@@ -84,12 +84,6 @@ def seeded_state(tmp_path_factory, event_loop):
         except Exception:  # noqa: BLE001
             pass
         importlib.reload(_db)
-        # ``audit.logger`` imports the session factory by value rather than
-        # looking it up on ``app.db`` at call time. Rebind that test-only
-        # captured reference after the deliberate DB-module reload so a prior
-        # test's Postgres URL cannot leak into this SQLite E2E pack.
-        if "app.audit.logger" in sys.modules:
-            sys.modules["app.audit.logger"].SessionLocal = _db.SessionLocal
     # Same treatment for any modules that may have captured
     # ``SessionLocal`` at import time. seed_demo + local_mode both
     # re-import lazily; force re-load for safety.
