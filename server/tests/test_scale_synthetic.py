@@ -142,25 +142,37 @@ def test_masker_handles_50000_row_payload_under_budget():
     assert elapsed < 10, f"50K-row mask took {elapsed:.1f}s (budget 10s)"
 
 
-def test_masker_is_linear_in_rows():
-    """Soft regression guard: doubling row count doubles wall time
-    (within 5×). A quadratic regex bug would blow this open.
+def test_masker_visits_each_cell_once():
+    """Fixed-width row work grows exactly with the number of cells.
+
+    The real engine's throughput and output stay covered by the 50K-row
+    budget above.  Counting work here avoids turning a millisecond-scale
+    denominator into a scheduler-sensitive CI microbenchmark.
     """
-    columns = ["email", "id"]
 
-    def _mask(n: int) -> float:
-        rows = [[f"u{i}@ex.com", i] for i in range(n)]
-        start = time.monotonic()
-        mask_rows(columns, rows)
-        return time.monotonic() - start
+    class CountingEngine(MaskingEngine):
+        calls = 0
 
-    t1k = _mask(1_000)
-    t10k = _mask(10_000)
-    # Linear → ratio is ~10. Accept up to 5× of that (50) to ride
-    # out GC noise. A quadratic regex would be 100×.
-    if t1k > 0:
-        ratio = t10k / max(t1k, 0.001)
-        assert ratio < 50, f"non-linear masker scaling: 10×rows = {ratio:.1f}× time"
+        def mask_value(self, column: str, value: object) -> tuple[object, bool]:
+            self.calls += 1
+            return value, False
+
+    def _visits(row_count: int) -> int:
+        engine = CountingEngine()
+        rows = [[i, i] for i in range(row_count)]
+        masked, col_flags, any_masked = mask_rows(
+            ["value", "id"], rows, engine
+        )
+        assert len(masked) == row_count
+        assert col_flags == [False, False]
+        assert any_masked is False
+        return engine.calls
+
+    visits_1k = _visits(1_000)
+    visits_10k = _visits(10_000)
+    assert visits_1k == 2_000
+    assert visits_10k == 20_000
+    assert visits_10k == visits_1k * 10
 
 
 # ---------------------------------------------------------------------------
