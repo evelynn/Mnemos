@@ -204,9 +204,17 @@ async def test_push_event_enqueues_and_audits(
     from app.models.auth import PlatformSetting
     from app.models.graph import AnalysisRun
     from app.models.projects import Project
-    from app.config import get_settings
+    from app.api import webhooks
 
-    monkeypatch.setattr(get_settings(), "source_mirror_root", str(tmp_path))
+    # Patch the handler's lookup seam, not one particular cached Settings
+    # instance. Earlier Docker-free tests deliberately clear/recreate the
+    # settings cache while switching DB backends, so mutating the object that
+    # happened to be cached here made this integration test order-dependent.
+    monkeypatch.setattr(
+        webhooks,
+        "get_settings",
+        lambda: SimpleNamespace(source_mirror_root=str(tmp_path)),
+    )
 
     # The receiver is fail-closed (no secret -> 503). Seed the secret +
     # the project and FLUSH only — the request handler shares this exact
@@ -251,7 +259,7 @@ async def test_push_event_enqueues_and_audits(
     )
     assert r.status_code == 200
     body = r.json()
-    assert body["enqueued"] is True
+    assert body["enqueued"] is True, body
 
     runs = (
         await db_session.execute(
@@ -343,7 +351,7 @@ async def test_feature_branch_push_is_audited_but_not_enqueued(
         await db_session.execute(
             select(AuditLog)
             .where(AuditLog.action == "webhook.skipped")
-            .order_by(AuditLog.created_at.desc())
+            .order_by(AuditLog.occurred_at.desc())
         )
     ).scalars().first()
     assert audit is not None

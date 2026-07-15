@@ -250,11 +250,24 @@ async def test_reconcile_matches_via_contract_node_id(db_session):
 
     from app.merge.runtime import reconcile_observations
     from app.models.graph import Edge
+    from app.models.organization import Organization
     from app.models.runtime import RuntimeObservation
 
     org = _uuid.uuid4()
     proj = _uuid.uuid4()
     now = _dt.now(tz=_tz.utc)
+
+    # Runtime observations are tenant-owned. SQLite's polyglot test layer did
+    # not enforce this PostgreSQL foreign key, so seed the owning tenant
+    # explicitly instead of relying on a dangling UUID fixture.
+    db_session.add(
+        Organization(
+            id=org,
+            slug=f"otlp-contract-{org.hex}",
+            display_name="OTLP contract fixture",
+        )
+    )
+    await db_session.flush()
 
     # EXPOSES edge whose route lives ONLY on the target contract node id
     # (empty edge.data — exactly what the static analyzers emit).
