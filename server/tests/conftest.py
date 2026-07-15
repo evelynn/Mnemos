@@ -214,8 +214,13 @@ async def http_client(db_session):
 
     app.dependency_overrides[get_session] = _use_test_session
     try:
+        # Production defaults session cookies to ``Secure``.  Use an HTTPS
+        # origin here so httpx behaves like the browser deployment we claim
+        # to exercise and sends the login cookie on subsequent requests.
+        # An HTTP origin silently retains-but-withholds a Secure cookie,
+        # turning every successful login into a misleading follow-up 401.
         async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://testserver"
+            transport=ASGITransport(app=app), base_url="https://testserver"
         ) as client:
             # Simulate a browser that already holds the double-submit CSRF
             # cookie: set the cookie + matching X-CSRF-Token header so

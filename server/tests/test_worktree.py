@@ -259,7 +259,19 @@ async def test_compute_diff_captures_exact_git_add_all_payload(
     subprocess.run(["git", "-C", str(dst), "add", "-A"], check=True)
     assert await wt.canonical_staged_diff(dst) == diff
     subprocess.run(
-        ["git", "-C", str(dst), "commit", "-q", "-m", "candidate"],
+        [
+            "git",
+            "-C",
+            str(dst),
+            "-c",
+            "user.email=mnemos@local",
+            "-c",
+            "user.name=Mnemos",
+            "commit",
+            "-q",
+            "-m",
+            "candidate",
+        ],
         check=True,
     )
     assert await wt.canonical_committed_diff(dst) == diff

@@ -10,8 +10,13 @@ requires-python = ">=3.12"
 dependencies = [
     # 0.121 adds function-scoped yield dependencies. Graph reads use that
     # boundary to revalidate the publication generation before a response is
-    # sent under PostgreSQL READ COMMITTED.
-    "fastapi>=0.121",
+    # sent under PostgreSQL READ COMMITTED. FastAPI 0.137 deliberately changed
+    # include_router() from flattened APIRoutes to a router tree. Runtime
+    # dispatch and OpenAPI traverse that tree, but ``app.routes`` is no longer
+    # the flat route registry Mnemos introspection expects. Keep the last
+    # compatible line until that migration is explicit instead of accepting a
+    # breaking pre-1.0 upgrade.
+    "fastapi>=0.121,<0.137",
     "uvicorn[standard]>=0.30",
     "pydantic>=2.7",
     "pydantic-settings>=2.4",

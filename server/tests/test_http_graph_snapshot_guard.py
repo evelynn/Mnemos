@@ -250,8 +250,9 @@ async def test_confirmation_http_success_commits_exactly_one_overlay_revision(
     )
     assert login.status_code == 200
 
+    project_id = project.id
     response = await http_client.post(
-        f"/api/v1/projects/{project.id}/graph/confirm_fact",
+        f"/api/v1/projects/{project_id}/graph/confirm_fact",
         json={
             "target_kind": "node",
             "target_id": "py:confirmation.py::target",
@@ -263,12 +264,12 @@ async def test_confirmation_http_success_commits_exactly_one_overlay_revision(
     assert response.json()["effective_certainty"] == "asserted"
 
     db_session.expire_all()
-    head = await db_session.get(GraphHead, project.id)
+    head = await db_session.get(GraphHead, project_id)
     overlay_count = (
         await db_session.execute(
             select(func.count())
             .select_from(GraphNodeHumanOverlay)
-            .where(GraphNodeHumanOverlay.project_id == project.id)
+            .where(GraphNodeHumanOverlay.project_id == project_id)
         )
     ).scalar_one()
     assert head is not None

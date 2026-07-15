@@ -262,13 +262,13 @@ async def test_reconcile_matches_via_contract_node_id(db_session):
         id=_uuid.uuid4(), project_id=proj, valid_from=now,
         source_id="sym:orders-api:CreateOrder",
         target_id="contract:POST /orders", kind="EXPOSES",
-        certainty="verified", data={}, created_by="seed",
+        certainty="verified", data={}, created_by=["seed"],
     )
     decoy = Edge(
         id=_uuid.uuid4(), project_id=proj, valid_from=now,
         source_id="sym:orders-api:GetOrder",
         target_id="contract:GET /orders/{id}", kind="EXPOSES",
-        certainty="verified", data={}, created_by="seed",
+        certainty="verified", data={}, created_by=["seed"],
     )
     obs = RuntimeObservation(
         organization_id=org, project_id=None, service="orders-api",

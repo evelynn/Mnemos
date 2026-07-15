@@ -1,5 +1,3 @@
-from collections.abc import AsyncIterator
-
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -9,6 +7,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
+from app.db_dependency import get_session as get_session
 
 _settings = get_settings()
 # Test runs drive the app from pytest-asyncio, which (with asyncio_mode=auto
@@ -49,8 +48,3 @@ if _settings.database_url.startswith("sqlite"):
         cur.execute("PRAGMA busy_timeout=10000")
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.close()
-
-
-async def get_session() -> AsyncIterator[AsyncSession]:
-    async with SessionLocal() as session:
-        yield session
