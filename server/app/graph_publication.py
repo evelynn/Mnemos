@@ -30,7 +30,8 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable
+from itertools import islice
+from typing import Any, Iterable, Mapping, TypeVar
 
 from sqlalchemy import and_, delete, or_, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -60,7 +61,11 @@ GRAPH_HEAD_READY = "ready"
 _CERTAINTY_RANK = {"inferred": 0, "asserted": 1, "verified": 2}
 _NODE_BATCH = 250
 _EDGE_BATCH = 150  # three-column tuple predicates stay below old SQLite limits
+_STAGE_NODE_BATCH = 250
+_STAGE_EDGE_BATCH = 150
 _CLEANABLE_RUN_STATUSES = ANALYSIS_RUN_TERMINAL_STATUSES | {"published"}
+
+_StageCandidateT = TypeVar("_StageCandidateT")
 
 
 class GraphPublicationError(RuntimeError):
@@ -270,6 +275,99 @@ def edge_semantic_hash(
             "created_by": list(created_by),
         }
     )
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class StagedNodeCandidate:
+    """Immutable input for one run-scoped staged node.
+
+    The payload is captured as canonical JSON instead of retaining the caller's
+    mutable dictionary.  ``data`` returns a fresh dictionary on every access,
+    so buffering a candidate cannot make staging depend on a later caller-side
+    mutation.
+    """
+
+    node_id: str
+    kind: str
+    certainty: str
+    source_name: str
+    _data_json: str
+
+    def __init__(
+        self,
+        *,
+        node_id: str,
+        kind: str,
+        data: Mapping[str, Any],
+        certainty: str,
+        source_name: str,
+    ) -> None:
+        object.__setattr__(self, "node_id", node_id)
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "certainty", certainty)
+        object.__setattr__(self, "source_name", source_name)
+        object.__setattr__(self, "_data_json", _canonical_json(dict(data)))
+
+    @property
+    def data(self) -> dict[str, Any]:
+        value = json.loads(self._data_json)
+        if not isinstance(value, dict):  # pragma: no cover - constructor invariant
+            raise GraphPublicationInvariantError(
+                "staged node candidate data must be a JSON object"
+            )
+        return value
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class StagedEdgeCandidate:
+    """Immutable input for one run-scoped staged edge."""
+
+    source_id: str
+    target_id: str
+    kind: str
+    certainty: str
+    source_name: str
+    _data_json: str
+
+    def __init__(
+        self,
+        *,
+        source_id: str,
+        target_id: str,
+        kind: str,
+        data: Mapping[str, Any],
+        certainty: str,
+        source_name: str,
+    ) -> None:
+        object.__setattr__(self, "source_id", source_id)
+        object.__setattr__(self, "target_id", target_id)
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "certainty", certainty)
+        object.__setattr__(self, "source_name", source_name)
+        object.__setattr__(self, "_data_json", _canonical_json(dict(data)))
+
+    @property
+    def data(self) -> dict[str, Any]:
+        value = json.loads(self._data_json)
+        if not isinstance(value, dict):  # pragma: no cover - constructor invariant
+            raise GraphPublicationInvariantError(
+                "staged edge candidate data must be a JSON object"
+            )
+        return value
+
+
+def _bounded_stage_input(
+    values: Iterable[_StageCandidateT],
+    *,
+    limit: int,
+    label: str,
+) -> tuple[_StageCandidateT, ...]:
+    """Consume at most ``limit + 1`` values and reject oversized input."""
+
+    batch = tuple(islice(iter(values), limit + 1))
+    if len(batch) > limit:
+        raise ValueError(f"{label} staging batch exceeds {limit} candidates")
+    return batch
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -569,6 +667,269 @@ async def _lock_open_stage_run(
     )
 
 
+def _merge_staged_node_candidate(
+    current: GraphNodeStage | None,
+    *,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    candidate: StagedNodeCandidate,
+) -> tuple[GraphNodeStage, bool]:
+    """Apply the historical singleton node reducer to one in-memory row."""
+
+    data = strip_durable_overlay_fields(candidate.data, target_kind="node")
+    incoming_hash = node_semantic_hash(
+        kind=candidate.kind,
+        data=data,
+        certainty=candidate.certainty,
+        created_by=[candidate.source_name],
+    )
+    if current is None:
+        return (
+            GraphNodeStage(
+                run_id=run_id,
+                project_id=project_id,
+                node_id=candidate.node_id,
+                kind=candidate.kind,
+                data=dict(data),
+                certainty=candidate.certainty,
+                source_name=candidate.source_name,
+                source_names=[candidate.source_name],
+                semantic_hash=incoming_hash,
+            ),
+            True,
+        )
+    if current.project_id != project_id:
+        raise GraphPublicationInvariantError(
+            "staged node identity already belongs to a different project"
+        )
+    owners = _canonical_sources(current.source_names or [current.source_name])
+    if current.semantic_hash == incoming_hash:
+        return current, False
+    same_payload = (
+        current.kind == candidate.kind
+        and _canonical_json(current.data) == _canonical_json(data)
+        and current.certainty == candidate.certainty
+    )
+    if same_payload:
+        merged_owners = _canonical_sources([*owners, candidate.source_name])
+        merged_hash = node_semantic_hash(
+            kind=candidate.kind,
+            data=data,
+            certainty=candidate.certainty,
+            created_by=merged_owners,
+        )
+        if current.semantic_hash == merged_hash:
+            return current, False
+        current.source_name = merged_owners[0]
+        current.source_names = merged_owners
+        current.semantic_hash = merged_hash
+        return current, True
+    if set(owners) != {candidate.source_name}:
+        raise StagedIdentityConflict(
+            f"conflicting staged node payload for identity {candidate.node_id!r}"
+        )
+    if _would_downgrade(current.certainty, candidate.certainty):
+        return current, False
+    current.kind = candidate.kind
+    current.data = dict(data)
+    current.certainty = candidate.certainty
+    current.source_name = candidate.source_name
+    current.source_names = [candidate.source_name]
+    current.semantic_hash = incoming_hash
+    return current, True
+
+
+def _merge_staged_edge_candidate(
+    current: GraphEdgeStage | None,
+    *,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    candidate: StagedEdgeCandidate,
+) -> tuple[GraphEdgeStage, bool]:
+    """Apply the historical singleton edge reducer to one in-memory row."""
+
+    data = strip_durable_overlay_fields(candidate.data, target_kind="edge")
+    incoming_hash = edge_semantic_hash(
+        source_id=candidate.source_id,
+        target_id=candidate.target_id,
+        kind=candidate.kind,
+        data=data,
+        certainty=candidate.certainty,
+        created_by=[candidate.source_name],
+    )
+    if current is None:
+        return (
+            GraphEdgeStage(
+                run_id=run_id,
+                project_id=project_id,
+                source_id=candidate.source_id,
+                target_id=candidate.target_id,
+                kind=candidate.kind,
+                data=dict(data),
+                certainty=candidate.certainty,
+                source_name=candidate.source_name,
+                source_names=[candidate.source_name],
+                semantic_hash=incoming_hash,
+            ),
+            True,
+        )
+    if current.project_id != project_id:
+        raise GraphPublicationInvariantError(
+            "staged edge identity already belongs to a different project"
+        )
+    owners = _canonical_sources(current.source_names or [current.source_name])
+    if current.semantic_hash == incoming_hash:
+        return current, False
+    same_payload = (
+        _canonical_json(current.data) == _canonical_json(data)
+        and current.certainty == candidate.certainty
+    )
+    if same_payload:
+        merged_owners = _canonical_sources([*owners, candidate.source_name])
+        merged_hash = edge_semantic_hash(
+            source_id=candidate.source_id,
+            target_id=candidate.target_id,
+            kind=candidate.kind,
+            data=data,
+            certainty=candidate.certainty,
+            created_by=merged_owners,
+        )
+        if current.semantic_hash == merged_hash:
+            return current, False
+        current.source_name = merged_owners[0]
+        current.source_names = merged_owners
+        current.semantic_hash = merged_hash
+        return current, True
+    if set(owners) != {candidate.source_name}:
+        raise StagedIdentityConflict(
+            "conflicting staged edge payload for identity "
+            f"{(candidate.source_id, candidate.target_id, candidate.kind)!r}"
+        )
+    if _would_downgrade(current.certainty, candidate.certainty):
+        return current, False
+    current.data = dict(data)
+    current.certainty = candidate.certainty
+    current.source_name = candidate.source_name
+    current.source_names = [candidate.source_name]
+    current.semantic_hash = incoming_hash
+    return current, True
+
+
+async def stage_nodes_batch(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    candidates: Iterable[StagedNodeCandidate],
+) -> tuple[bool, ...]:
+    """Stage a bounded node batch with one lock and one identity read.
+
+    Reducer outcomes match sequential :func:`stage_node` calls in input order.
+    The caller owns flush/commit/rollback, as it did for the singleton writer.
+    """
+
+    batch = _bounded_stage_input(
+        candidates, limit=_STAGE_NODE_BATCH, label="node"
+    )
+    if not batch:
+        return ()
+    await _lock_open_stage_run(
+        session, project_id=project_id, run_id=run_id
+    )
+    node_ids = list(dict.fromkeys(candidate.node_id for candidate in batch))
+    current_rows = (
+        await session.execute(
+            select(GraphNodeStage).where(
+                GraphNodeStage.run_id == run_id,
+                GraphNodeStage.node_id.in_(node_ids),
+            )
+        )
+    ).scalars().all()
+    current_by_id: dict[str, GraphNodeStage] = {}
+    for row in current_rows:
+        if row.node_id in current_by_id:
+            raise GraphPublicationInvariantError(
+                f"duplicate staged node identity: {row.node_id!r}"
+            )
+        current_by_id[row.node_id] = row
+
+    changed: list[bool] = []
+    for candidate in batch:
+        current = current_by_id.get(candidate.node_id)
+        merged, did_change = _merge_staged_node_candidate(
+            current,
+            project_id=project_id,
+            run_id=run_id,
+            candidate=candidate,
+        )
+        if current is None:
+            session.add(merged)
+            current_by_id[candidate.node_id] = merged
+        changed.append(did_change)
+    return tuple(changed)
+
+
+async def stage_edges_batch(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    candidates: Iterable[StagedEdgeCandidate],
+) -> tuple[bool, ...]:
+    """Stage a bounded edge batch with one lock and one identity read."""
+
+    batch = _bounded_stage_input(
+        candidates, limit=_STAGE_EDGE_BATCH, label="edge"
+    )
+    if not batch:
+        return ()
+    await _lock_open_stage_run(
+        session, project_id=project_id, run_id=run_id
+    )
+    keys = list(
+        dict.fromkeys(
+            (candidate.source_id, candidate.target_id, candidate.kind)
+            for candidate in batch
+        )
+    )
+    current_rows = (
+        await session.execute(
+            select(GraphEdgeStage).where(
+                GraphEdgeStage.run_id == run_id,
+                tuple_(
+                    GraphEdgeStage.source_id,
+                    GraphEdgeStage.target_id,
+                    GraphEdgeStage.kind,
+                ).in_(keys),
+            )
+        )
+    ).scalars().all()
+    current_by_key: dict[tuple[str, str, str], GraphEdgeStage] = {}
+    for row in current_rows:
+        key = (row.source_id, row.target_id, row.kind)
+        if key in current_by_key:
+            raise GraphPublicationInvariantError(
+                f"duplicate staged edge identity: {key!r}"
+            )
+        current_by_key[key] = row
+
+    changed: list[bool] = []
+    for candidate in batch:
+        key = (candidate.source_id, candidate.target_id, candidate.kind)
+        current = current_by_key.get(key)
+        merged, did_change = _merge_staged_edge_candidate(
+            current,
+            project_id=project_id,
+            run_id=run_id,
+            candidate=candidate,
+        )
+        if current is None:
+            session.add(merged)
+            current_by_key[key] = merged
+        changed.append(did_change)
+    return tuple(changed)
+
+
 async def stage_node(
     session: AsyncSession,
     *,
@@ -580,86 +941,23 @@ async def stage_node(
     certainty: str,
     source_name: str,
 ) -> bool:
-    """Materialize one run-scoped node candidate without touching ``nodes``.
+    """Materialize one run-scoped node candidate without touching ``nodes``."""
 
-    One analyzer run may emit the same logical identity more than once (for
-    example, a normalized HTTP contract from two language analyzers).  Stage
-    tables intentionally hold one materialized candidate per identity, so the
-    deterministic rule matches the historical writer: identical input is a
-    no-op, lower certainty cannot replace higher certainty, and a same/higher
-    certainty later candidate replaces the earlier candidate.  Returns true
-    when the staged materialization changed.
-
-    The run/base/project invariants are revalidated by capture and promotion.
-    A row written before base capture makes capture fail, and a cross-project
-    row makes promotion fail; neither case can mutate the published graph.
-    """
-
-    await _lock_open_stage_run(
-        session, project_id=project_id, run_id=run_id
-    )
-    data = strip_durable_overlay_fields(data, target_kind="node")
-    incoming_hash = node_semantic_hash(
-        kind=kind,
-        data=data,
-        certainty=certainty,
-        created_by=[source_name],
-    )
-    current = await session.get(GraphNodeStage, (run_id, node_id))
-    if current is None:
-        session.add(
-            GraphNodeStage(
-                run_id=run_id,
-                project_id=project_id,
+    result = await stage_nodes_batch(
+        session,
+        project_id=project_id,
+        run_id=run_id,
+        candidates=(
+            StagedNodeCandidate(
                 node_id=node_id,
                 kind=kind,
-                data=dict(data),
+                data=data,
                 certainty=certainty,
                 source_name=source_name,
-                source_names=[source_name],
-                semantic_hash=incoming_hash,
-            )
-        )
-        return True
-    if current.project_id != project_id:
-        raise GraphPublicationInvariantError(
-            "staged node identity already belongs to a different project"
-        )
-    owners = _canonical_sources(current.source_names or [current.source_name])
-    if current.semantic_hash == incoming_hash:
-        return False
-    same_payload = (
-        current.kind == kind
-        and _canonical_json(current.data) == _canonical_json(data)
-        and current.certainty == certainty
+            ),
+        ),
     )
-    if same_payload:
-        merged_owners = _canonical_sources([*owners, source_name])
-        merged_hash = node_semantic_hash(
-            kind=kind,
-            data=data,
-            certainty=certainty,
-            created_by=merged_owners,
-        )
-        if current.semantic_hash == merged_hash:
-            return False
-        current.source_name = merged_owners[0]
-        current.source_names = merged_owners
-        current.semantic_hash = merged_hash
-        return True
-    if set(owners) != {source_name}:
-        raise StagedIdentityConflict(
-            f"conflicting staged node payload for identity {node_id!r}"
-        )
-    if _would_downgrade(current.certainty, certainty):
-        return False
-    current.kind = kind
-    current.data = dict(data)
-    current.certainty = certainty
-    current.source_name = source_name
-    current.source_names = [source_name]
-    current.semantic_hash = incoming_hash
-    return True
+    return result[0]
 
 
 async def stage_edge(
@@ -674,82 +972,24 @@ async def stage_edge(
     certainty: str,
     source_name: str,
 ) -> bool:
-    """Materialize one run-scoped edge candidate without touching ``edges``.
+    """Materialize one run-scoped edge candidate without touching ``edges``."""
 
-    Duplicate and certainty handling is identical to :func:`stage_node`.
-    Returns true only when the staged materialization changed.
-    """
-
-    await _lock_open_stage_run(
-        session, project_id=project_id, run_id=run_id
-    )
-    data = strip_durable_overlay_fields(data, target_kind="edge")
-    incoming_hash = edge_semantic_hash(
-        source_id=source_id,
-        target_id=target_id,
-        kind=kind,
-        data=data,
-        certainty=certainty,
-        created_by=[source_name],
-    )
-    key = (run_id, source_id, target_id, kind)
-    current = await session.get(GraphEdgeStage, key)
-    if current is None:
-        session.add(
-            GraphEdgeStage(
-                run_id=run_id,
-                project_id=project_id,
+    result = await stage_edges_batch(
+        session,
+        project_id=project_id,
+        run_id=run_id,
+        candidates=(
+            StagedEdgeCandidate(
                 source_id=source_id,
                 target_id=target_id,
                 kind=kind,
-                data=dict(data),
+                data=data,
                 certainty=certainty,
                 source_name=source_name,
-                source_names=[source_name],
-                semantic_hash=incoming_hash,
-            )
-        )
-        return True
-    if current.project_id != project_id:
-        raise GraphPublicationInvariantError(
-            "staged edge identity already belongs to a different project"
-        )
-    owners = _canonical_sources(current.source_names or [current.source_name])
-    if current.semantic_hash == incoming_hash:
-        return False
-    same_payload = (
-        _canonical_json(current.data) == _canonical_json(data)
-        and current.certainty == certainty
+            ),
+        ),
     )
-    if same_payload:
-        merged_owners = _canonical_sources([*owners, source_name])
-        merged_hash = edge_semantic_hash(
-            source_id=source_id,
-            target_id=target_id,
-            kind=kind,
-            data=data,
-            certainty=certainty,
-            created_by=merged_owners,
-        )
-        if current.semantic_hash == merged_hash:
-            return False
-        current.source_name = merged_owners[0]
-        current.source_names = merged_owners
-        current.semantic_hash = merged_hash
-        return True
-    if set(owners) != {source_name}:
-        raise StagedIdentityConflict(
-            "conflicting staged edge payload for identity "
-            f"{(source_id, target_id, kind)!r}"
-        )
-    if _would_downgrade(current.certainty, certainty):
-        return False
-    current.data = dict(data)
-    current.certainty = certainty
-    current.source_name = source_name
-    current.source_names = [source_name]
-    current.semantic_hash = incoming_hash
-    return True
+    return result[0]
 
 
 async def bootstrap_graph_head(

@@ -252,6 +252,82 @@ async def test_run_ingest_resumes_valid_published_postprocess_without_reindexing
     assert any(event.get("event") == "run_completed" for event in bus.events)
 
 
+@pytest.mark.asyncio
+async def test_published_postprocess_reuses_supplied_exhausted_llm_budget(
+    database,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _, session_factory = database
+    project_id, run_id, _ = await _seed_published(session_factory)
+    _wire_sessions(monkeypatch, session_factory)
+    from app.extractor.cost import LLMRunBudget, RunBudgetExceeded
+    from app.orchestrator import jobs
+
+    async def _runtime(*_args: Any, **_kwargs: Any) -> dict[str, int]:
+        return {"matched": 0, "unmatched": 0}
+
+    async def _findings(*_args: Any, **_kwargs: Any) -> dict[str, int]:
+        return {"created": 0}
+
+    async def _supersede(*_args: Any, **_kwargs: Any) -> int:
+        return 0
+
+    async def _audit(**_kwargs: Any) -> None:
+        return None
+
+    budget = LLMRunBudget(
+        max_calls=1,
+        max_input_tokens=10_000,
+        wall_time_sec=60,
+    )
+    budget.reserve(100)  # Simulate the sole allowance spent by Agent extraction.
+    with pytest.raises(RunBudgetExceeded, match="run_call_limit_exceeded"):
+        budget.reserve(1)
+
+    seen_budgets: list[LLMRunBudget] = []
+
+    async def _summary(*_args: Any, run_budget=None, **_kwargs: Any) -> int:
+        seen_budgets.append(run_budget)
+        assert run_budget is budget
+        assert run_budget.exhausted_reason == "run_call_limit_exceeded"
+        return 0
+
+    def _must_not_replace_budget():
+        raise AssertionError("postprocess replaced the supplied source-run budget")
+
+    monkeypatch.setattr(jobs, "reconcile_observations", _runtime)
+    monkeypatch.setattr(jobs, "rebuild_findings", _findings)
+    monkeypatch.setattr(jobs, "_supersede_stale_graph_summaries", _supersede)
+    monkeypatch.setattr(jobs, "summarise_l1", _summary)
+    monkeypatch.setattr(jobs, "summarise_l2", _summary)
+    monkeypatch.setattr(jobs, "summarise_l3", _summary)
+    monkeypatch.setattr(jobs, "Extractor", lambda: object())
+    monkeypatch.setattr(jobs.LLMRunBudget, "from_env", _must_not_replace_budget)
+    monkeypatch.setattr(jobs, "audit_record", _audit)
+
+    result = await jobs._run_published_postprocess(
+        _Bus(),
+        project_id=project_id,
+        run_id=run_id,
+        summarize=True,
+        l1_limit=25,
+        l2_limit=25,
+        l3_limit=25,
+        position=0,
+        llm_run_budget=budget,
+    )
+
+    assert result == "completed"
+    assert seen_budgets == [budget, budget, budget]
+    async with session_factory() as session:
+        run = await session.get(AnalysisRun, run_id)
+        assert run is not None
+        persisted = run.stats["ai_narration"]["run_budget"]
+        assert persisted["calls_started"] == 1
+        assert persisted["estimated_input_tokens"] == 100
+        assert persisted["exhausted_reason"] == "run_call_limit_exceeded"
+
+
 async def _assert_published_prelock_failure_preserved_source(
     session_factory,
     *,

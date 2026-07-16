@@ -120,10 +120,12 @@ class LLMRunBudget:
 
     max_calls: int = 64
     max_input_tokens: int = 120_000
+    max_output_tokens: int = 128_000
     wall_time_sec: int = 600
     started_monotonic: float = field(default_factory=time.monotonic)
     calls_started: int = 0
     input_tokens_reserved: int = 0
+    output_tokens_reserved: int = 0
     exhausted_reason: str | None = None
 
     @classmethod
@@ -135,6 +137,12 @@ class LLMRunBudget:
             max_input_tokens=_bounded_env_int(
                 "MNEMOS_LLM_MAX_INPUT_TOKENS_PER_RUN",
                 120_000,
+                minimum=1_000,
+                maximum=50_000_000,
+            ),
+            max_output_tokens=_bounded_env_int(
+                "MNEMOS_LLM_MAX_OUTPUT_TOKENS_PER_RUN",
+                128_000,
                 minimum=1_000,
                 maximum=50_000_000,
             ),
@@ -157,8 +165,19 @@ class LLMRunBudget:
         if self.exhausted_reason is None:
             self.exhausted_reason = reason
 
-    def reserve(self, estimated_input_tokens: int) -> float:
-        """Reserve one logical/physical provider attempt or fail closed."""
+    def reserve(
+        self,
+        estimated_input_tokens: int,
+        requested_output_tokens: int = 0,
+    ) -> float:
+        """Reserve one physical provider attempt or fail closed.
+
+        ``requested_output_tokens`` is the provider cap, or the equivalent
+        client-side ceiling for opaque subscription backends.  Existing
+        extraction callers may omit it while they migrate; consumers that do
+        know their output limit reserve it before dispatch so retries and
+        fallbacks cannot multiply output work without bound.
+        """
 
         if self.exhausted_reason is not None:
             raise RunBudgetExceeded(self.exhausted_reason)
@@ -172,8 +191,16 @@ class LLMRunBudget:
         if self.input_tokens_reserved + estimate > self.max_input_tokens:
             self.stop("run_input_token_limit_exceeded")
             raise RunBudgetExceeded("run_input_token_limit_exceeded")
+        output_reservation = max(0, int(requested_output_tokens))
+        if (
+            self.output_tokens_reserved + output_reservation
+            > self.max_output_tokens
+        ):
+            self.stop("run_output_token_limit_exceeded")
+            raise RunBudgetExceeded("run_output_token_limit_exceeded")
         self.calls_started += 1
         self.input_tokens_reserved += estimate
+        self.output_tokens_reserved += output_reservation
         return self.remaining_seconds()
 
     def stats(self) -> dict[str, int | float | str | None]:
@@ -182,6 +209,8 @@ class LLMRunBudget:
             "calls_started": self.calls_started,
             "max_input_tokens": self.max_input_tokens,
             "estimated_input_tokens": self.input_tokens_reserved,
+            "max_output_tokens": self.max_output_tokens,
+            "reserved_output_tokens": self.output_tokens_reserved,
             "wall_time_sec": self.wall_time_sec,
             "elapsed_sec": round(
                 max(0.0, time.monotonic() - self.started_monotonic), 3

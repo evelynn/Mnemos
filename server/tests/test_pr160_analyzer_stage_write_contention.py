@@ -66,7 +66,7 @@ class _FakeRunner:
 
 @pytest.mark.asyncio
 async def test_analyzer_stage_commits_before_progress_flush(tmp_path, monkeypatch):
-    from sqlalchemy import func, select
+    from sqlalchemy import event, func, select
     from sqlalchemy.ext.asyncio import (
         AsyncSession,
         async_sessionmaker,
@@ -88,6 +88,7 @@ async def test_analyzer_stage_commits_before_progress_flush(tmp_path, monkeypatc
     )
     from app.models.graph import AnalysisRun, GraphNodeStage
     from app.models.projects import Project
+    from app.models.stages import AnalysisStage
     import app.orchestrator.jobs as jobs
     import app.orchestrator.stages as stages_mod
 
@@ -164,10 +165,32 @@ async def test_analyzer_stage_commits_before_progress_flush(tmp_path, monkeypatc
 
     monkeypatch.setattr(stages_mod.StageTracker, "increment", _spy_increment)
 
-    totals = {"symbols": 0, "edges": 0, "contracts": 0, "data_entities": 0, "errors": 0}
-    await jobs._run_analyzer_stage(
-        _StubBus(), pid, run_id, "python", "symbols", str(tmp_path), 1, totals
+    stage_identity_selects = 0
+
+    def _count_stage_identity_selects(
+        _connection, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        nonlocal stage_identity_selects
+        normalized = " ".join(statement.lower().split())
+        if normalized.startswith("select graph_node_stage.run_id"):
+            stage_identity_selects += 1
+
+    event.listen(
+        engine.sync_engine,
+        "before_cursor_execute",
+        _count_stage_identity_selects,
     )
+    totals = {"symbols": 0, "edges": 0, "contracts": 0, "data_entities": 0, "errors": 0}
+    try:
+        await jobs._run_analyzer_stage(
+            _StubBus(), pid, run_id, "python", "symbols", str(tmp_path), 1, totals
+        )
+    finally:
+        event.remove(
+            engine.sync_engine,
+            "before_cursor_execute",
+            _count_stage_identity_selects,
+        )
 
     # Every streamed symbol persisted and counted.
     async with Session() as s:
@@ -179,8 +202,20 @@ async def test_analyzer_stage_commits_before_progress_flush(tmp_path, monkeypatc
                 )
             )
         ).scalars().all()
+        persisted_stage = (
+            await s.execute(
+                select(AnalysisStage).where(
+                    AnalysisStage.run_id == run_id,
+                    AnalysisStage.name == "symbols:python",
+                )
+            )
+        ).scalar_one()
     assert len(nodes) == n_records
     assert totals["symbols"] == n_records
+    assert persisted_stage.stats["stage_batches"] == 3
+    assert persisted_stage.stats["staged_candidates"] == n_records
+    assert persisted_stage.stats["stage_rows_changed"] == n_records
+    assert stage_identity_selects == 3  # ceil(120 / 50), not 120 fact reads
 
     # The invariant under test: progress was reported at least once, and every
     # report saw its batch already committed (never 0). Under the pre-PR-160

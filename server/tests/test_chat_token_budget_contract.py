@@ -267,6 +267,66 @@ async def test_chat_mapped_korean_uses_one_answer_call_and_returns_budget_metada
 
 
 @pytest.mark.asyncio
+async def test_chat_rewrite_and_answer_share_one_physical_attempt_budget(monkeypatch):
+    budget_ids: list[int] = []
+    provider_calls = 0
+
+    async def fake_config(_db):  # noqa: ANN001
+        return {
+            "openai": {
+                "api_key": "test",
+                "model": "mock",
+                "base_url": "https://invalid.test/v1",
+            }
+        }
+
+    async def fake_search(*_args, **_kwargs):  # noqa: ANN003
+        return [{"symbol_id": "sym:auth", "name": "authenticate", "score": 0.1}]
+
+    async def fake_provider(*_args, **kwargs):  # noqa: ANN003
+        nonlocal provider_calls
+        provider_calls += 1
+        budget = kwargs["run_budget"]
+        budget_ids.append(id(budget))
+        budget.reserve(100, requested_output_tokens=kwargs["max_output_tokens"])
+        if provider_calls == 1:
+            return '["authenticate", "session", "token"]'
+        return "grounded answer"
+
+    async def fake_context(*_args, **_kwargs):  # noqa: ANN003
+        return []
+
+    async def fake_audit(**_kwargs):  # noqa: ANN003
+        return None
+
+    async def overview(*_args, **_kwargs):  # noqa: ANN003
+        return {"counts": {}, "contracts": [], "entities": []}
+
+    monkeypatch.setattr(chat_api, "resolve_config", fake_config)
+    monkeypatch.setattr(chat_api, "search_symbols", fake_search)
+    monkeypatch.setattr(chat_api, "_project_overview", overview)
+    monkeypatch.setattr(chat_api, "_build_context", fake_context)
+    monkeypatch.setattr(chat_api, "provider_chat", fake_provider)
+    monkeypatch.setattr(chat_api, "audit_record", fake_audit)
+
+    result = await chat_api.chat(
+        uuid.uuid4(),
+        chat_api.ChatRequest(message="explain the authorization lifecycle", provider="openai"),
+        SimpleNamespace(id=uuid.uuid4()),
+        object(),
+    )
+
+    assert provider_calls == 2
+    assert len(set(budget_ids)) == 1
+    assert result["request_budget"]["calls_started"] == 2
+    assert result["request_budget"]["estimated_input_tokens"] == 200
+    assert result["request_budget"]["reserved_output_tokens"] == (
+        chat_api.CHAT_REWRITE_MAX_OUTPUT_TOKENS
+        + chat_api.CHAT_ANSWER_MAX_OUTPUT_TOKENS
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
 async def test_http_provider_wire_payload_receives_purpose_limit(monkeypatch, provider):
     captured = {}
@@ -383,6 +443,62 @@ async def test_anthropic_api_wire_payload_receives_purpose_limit(monkeypatch):
     assert captured["max_tokens"] == 1_200
 
 
+@pytest.mark.asyncio
+async def test_claude_api_fallback_cannot_reset_attempt_budget(monkeypatch):
+    class Messages:
+        async def create(self, **_kwargs):  # noqa: ANN003
+            raise RuntimeError("remote dispatch failed")
+
+    class AsyncAnthropic:
+        def __init__(self, **_kwargs):  # noqa: ANN003
+            self.messages = Messages()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "anthropic",
+        SimpleNamespace(AsyncAnthropic=AsyncAnthropic),
+    )
+    fallback_calls = 0
+
+    async def fallback(**kwargs):  # noqa: ANN003
+        nonlocal fallback_calls
+        fallback_calls += 1
+        kwargs["run_budget"].reserve(
+            1,
+            requested_output_tokens=kwargs["requested_max_output_tokens"],
+        )
+        return "must not run"
+
+    monkeypatch.setattr(providers, "_claude_subscription", fallback)
+    budget = providers.LLMRunBudget(
+        max_calls=1,
+        max_input_tokens=10_000,
+        max_output_tokens=2_400,
+        wall_time_sec=30,
+    )
+
+    result = await providers.provider_chat(
+        "claudecode",
+        {
+            "claudecode": {
+                "api_key": "test",
+                "model": "mock",
+                "mode": "api",
+            }
+        },
+        system="s",
+        prompt="p",
+        timeout_s=5,
+        max_output_tokens=1_200,
+        run_budget=budget,
+    )
+
+    assert result is None
+    assert fallback_calls == 1
+    assert budget.calls_started == 1
+    assert budget.exhausted_reason == "run_call_limit_exceeded"
+
+
 def _fake_subscription_sdk(monkeypatch, blocks: list[str], calls: list[int]):
     class TextBlock:
         def __init__(self, text):  # noqa: ANN001
@@ -448,6 +564,61 @@ async def test_subscription_client_ceiling_allows_complete_bounded_answer(
 
     assert result == "first\nsecond"
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_subscription_init_retry_reserves_each_physical_attempt(monkeypatch):
+    calls = 0
+
+    class TextBlock:
+        def __init__(self, text):  # noqa: ANN001
+            self.text = text
+
+    class AssistantMessage:
+        def __init__(self, content):  # noqa: ANN001
+            self.content = content
+
+    class ClaudeAgentOptions:
+        def __init__(self, **_kwargs):  # noqa: ANN003
+            pass
+
+    async def query(**_kwargs):  # noqa: ANN003
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("initialize failed before content")
+        yield AssistantMessage([TextBlock("ok")])
+
+    monkeypatch.setattr(providers, "is_agent_sdk_available", lambda: True)
+    monkeypatch.setitem(
+        sys.modules,
+        "claude_agent_sdk",
+        SimpleNamespace(
+            AssistantMessage=AssistantMessage,
+            ClaudeAgentOptions=ClaudeAgentOptions,
+            TextBlock=TextBlock,
+            query=query,
+        ),
+    )
+    budget = providers.LLMRunBudget(
+        max_calls=2,
+        max_input_tokens=10_000,
+        max_output_tokens=256,
+        wall_time_sec=30,
+    )
+
+    result = await providers._claude_subscription(
+        system="s",
+        prompt="p",
+        timeout_s=5,
+        requested_max_output_tokens=128,
+        run_budget=budget,
+    )
+
+    assert result == "ok"
+    assert calls == 2
+    assert budget.calls_started == 2
+    assert budget.output_tokens_reserved == 256
 
 
 def test_client_enforced_provider_output_caps_are_explicit():
