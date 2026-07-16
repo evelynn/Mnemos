@@ -319,3 +319,213 @@ async def test_full_index_is_zero_llm_and_same_content_incremental_is_noop(
         )
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_agent_option_does_not_allocate_budget_when_analyzer_is_available(
+    tmp_path, monkeypatch
+):
+    from app.orchestrator import jobs, stages
+
+    monkeypatch.setenv("MNEMOS_INREPO_ANALYZERS", "1")
+    monkeypatch.setenv("MNEMOS_LOCAL_MODE", "1")
+    (tmp_path / "service.py").write_text(
+        "def indexed_without_agent():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(jobs, "SessionLocal", Session)
+    monkeypatch.setattr(stages, "SessionLocal", Session)
+
+    async def no_audit(**_kwargs):
+        return None
+
+    async def agent_must_not_run(*_args, **_kwargs):
+        raise AssertionError("available deterministic analyzer routed to Agent")
+
+    def budget_must_not_start():
+        raise AssertionError("unused Agent option started the shared LLM deadline")
+
+    monkeypatch.setattr(jobs, "audit_record", no_audit)
+    monkeypatch.setattr(jobs, "analyzer_available", lambda _language: True)
+    monkeypatch.setattr(jobs, "_run_agent_extraction_stage", agent_must_not_run)
+    monkeypatch.setattr(jobs.LLMRunBudget, "from_env", budget_must_not_start)
+
+    project_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    settings = get_settings()
+    monkeypatch.setattr(settings, "source_allowed_root", str(tmp_path))
+    monkeypatch.setattr(
+        settings,
+        "source_project_roots",
+        json.dumps({str(project_id): "."}),
+    )
+    async with Session() as session:
+        session.add(
+            Project(
+                id=project_id,
+                name="lazy-agent-budget",
+                gitlab_project_id=991002,
+                gitlab_url="https://example.invalid/lazy-agent-budget",
+                default_branch="main",
+                languages=["python"],
+            )
+        )
+        session.add(
+            AnalysisRun(
+                id=run_id,
+                project_id=project_id,
+                status="queued",
+                triggered_by="test",
+                git_sha="HEAD",
+                scope="full",
+            )
+        )
+        await session.commit()
+
+    await jobs.run_ingest(
+        {"progress": RecordingBus()},
+        str(project_id),
+        str(run_id),
+        str(tmp_path),
+        {
+            "scope": "full",
+            "summarize": False,
+            "agent_extract_limit": 1,
+        },
+    )
+
+    async with Session() as session:
+        run = await session.get(AnalysisRun, run_id)
+        llm_calls = int(
+            (
+                await session.execute(select(func.count()).select_from(LLMCall))
+            ).scalar_one()
+        )
+        assert run is not None and run.status == "completed"
+        assert run.stats["ai_narration"]["run_budget"] is None
+        assert llm_calls == 0
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_source_run_forwards_agent_budget_to_published_postprocess(
+    tmp_path, monkeypatch
+):
+    from app.extractor.cost import LLMRunBudget, RunBudgetExceeded
+    from app.orchestrator import jobs, stages
+
+    monkeypatch.setenv("MNEMOS_INREPO_ANALYZERS", "1")
+    monkeypatch.setenv("MNEMOS_LOCAL_MODE", "1")
+    (tmp_path / "service.swift").write_text(
+        "func indexedByAgent() -> Int { return 1 }\n",
+        encoding="utf-8",
+    )
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(jobs, "SessionLocal", Session)
+    monkeypatch.setattr(stages, "SessionLocal", Session)
+
+    async def no_audit(**_kwargs):
+        return None
+
+    budget = LLMRunBudget(
+        max_calls=1,
+        max_input_tokens=10_000,
+        wall_time_sec=60,
+    )
+    factory_calls: list[LLMRunBudget] = []
+    agent_budgets: list[LLMRunBudget] = []
+    postprocess_budgets: list[LLMRunBudget | None] = []
+
+    def one_budget_per_source_run():
+        factory_calls.append(budget)
+        return budget
+
+    async def fake_agent_stage(*_args, run_budget=None, **_kwargs):
+        assert run_budget is budget
+        agent_budgets.append(run_budget)
+        run_budget.reserve(100)
+        with pytest.raises(RunBudgetExceeded, match="run_call_limit_exceeded"):
+            run_budget.reserve(1)
+        return jobs.AnalyzerStageOutcome(
+            producer="agent:swift",
+            verb="extract",
+            authoritative=True,
+            records=1,
+        )
+
+    async def no_link_stage(*_args, **_kwargs):
+        return None
+
+    async def capture_postprocess(*_args, llm_run_budget=None, **_kwargs):
+        postprocess_budgets.append(llm_run_budget)
+        return "completed"
+
+    monkeypatch.setattr(jobs, "audit_record", no_audit)
+    monkeypatch.setattr(jobs, "analyzer_available", lambda _language: False)
+    monkeypatch.setattr(jobs, "_run_agent_extraction_stage", fake_agent_stage)
+    monkeypatch.setattr(jobs, "_run_call_linking_stage", no_link_stage)
+    monkeypatch.setattr(jobs, "_run_published_postprocess", capture_postprocess)
+    monkeypatch.setattr(jobs.LLMRunBudget, "from_env", one_budget_per_source_run)
+
+    project_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    settings = get_settings()
+    monkeypatch.setattr(settings, "source_allowed_root", str(tmp_path))
+    monkeypatch.setattr(
+        settings,
+        "source_project_roots",
+        json.dumps({str(project_id): "."}),
+    )
+    async with Session() as session:
+        session.add(
+            Project(
+                id=project_id,
+                name="shared-source-budget",
+                gitlab_project_id=991003,
+                gitlab_url="https://example.invalid/shared-source-budget",
+                default_branch="main",
+                languages=["swift"],
+            )
+        )
+        session.add(
+            AnalysisRun(
+                id=run_id,
+                project_id=project_id,
+                status="queued",
+                triggered_by="test",
+                git_sha="HEAD",
+                scope="full",
+            )
+        )
+        await session.commit()
+
+    await jobs.run_ingest(
+        {"progress": RecordingBus()},
+        str(project_id),
+        str(run_id),
+        str(tmp_path),
+        {
+            "scope": "full",
+            "summarize": True,
+            "agent_extract_limit": 1,
+        },
+    )
+
+    assert factory_calls == [budget]
+    assert agent_budgets == [budget]
+    assert postprocess_budgets == [budget]
+    assert budget.calls_started == 1
+    assert budget.input_tokens_reserved == 100
+    assert budget.exhausted_reason == "run_call_limit_exceeded"
+
+    await engine.dispose()

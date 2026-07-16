@@ -44,6 +44,7 @@ from app.auth.deps import CurrentUser
 from app.auth.org_scope import require_project_org
 from app.auth.rbac import require_operator
 from app.db import get_session
+from app.extractor.cost import LLMRunBudget
 from app.mcp.queries import get_data_access, get_symbol, search_symbols
 
 log = logging.getLogger("mnemos.chat")
@@ -61,6 +62,9 @@ CHAT_CODE_TOTAL_MAX_CHARS = 6_000
 CHAT_CODE_ITEM_MAX_CHARS = 1_600
 CHAT_REWRITE_MAX_OUTPUT_TOKENS = 128
 CHAT_ANSWER_MAX_OUTPUT_TOKENS = 1_200
+CHAT_MAX_PROVIDER_ATTEMPTS = 4
+CHAT_MAX_RESERVED_INPUT_TOKENS = 120_000
+CHAT_MAX_RESERVED_OUTPUT_TOKENS = 4_800
 
 REWRITE_MIN_TERMS = 3
 REWRITE_MAX_TERMS = 8
@@ -674,7 +678,12 @@ def _parse_rewrite_terms(text: str) -> list[str]:
 
 
 async def _llm_search_terms(
-    question: str, overview: dict, provider: str, cfg: dict, timeout_s: int
+    question: str,
+    overview: dict,
+    provider: str,
+    cfg: dict,
+    timeout_s: int,
+    run_budget: LLMRunBudget | None = None,
 ) -> list[str]:
     """LLM → English code-search terms grounded in THIS project.
 
@@ -709,6 +718,7 @@ async def _llm_search_terms(
             prompt=prompt,
             timeout_s=min(timeout_s, 90),
             max_output_tokens=CHAT_REWRITE_MAX_OUTPUT_TOKENS,
+            run_budget=run_budget,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("chat: search-term rewrite failed: %s", exc)
@@ -756,6 +766,7 @@ async def chat(
     # that a Korean concept query otherwise misses entirely).
     rewrite_attempted = False
     rewrite_terms: list[str] = []
+    llm_run_budget: LLMRunBudget | None = None
     rewrite_needed = _weak_recall(
         body.message,
         hits,
@@ -763,8 +774,19 @@ async def chat(
     )
     if rewrite_needed:
         rewrite_attempted = True
+        llm_run_budget = LLMRunBudget(
+            max_calls=CHAT_MAX_PROVIDER_ATTEMPTS,
+            max_input_tokens=CHAT_MAX_RESERVED_INPUT_TOKENS,
+            max_output_tokens=CHAT_MAX_RESERVED_OUTPUT_TOKENS,
+            wall_time_sec=body.timeout_s,
+        )
         rewrite_terms = await _llm_search_terms(
-            body.message, overview, provider, cfg, body.timeout_s
+            body.message,
+            overview,
+            provider,
+            cfg,
+            body.timeout_s,
+            run_budget=llm_run_budget,
         )
         if rewrite_terms:
             more = await search_symbols(
@@ -790,6 +812,16 @@ async def chat(
     )
     output_capability = output_token_limit_capability(provider, cfg)
 
+    if llm_run_budget is None:
+        # Keep the deterministic retrieval path free of LLM objects.  The
+        # request budget begins only when the first provider call is needed.
+        llm_run_budget = LLMRunBudget(
+            max_calls=CHAT_MAX_PROVIDER_ATTEMPTS,
+            max_input_tokens=CHAT_MAX_RESERVED_INPUT_TOKENS,
+            max_output_tokens=CHAT_MAX_RESERVED_OUTPUT_TOKENS,
+            wall_time_sec=body.timeout_s,
+        )
+
     reply = await provider_chat(
         provider,
         cfg,
@@ -797,8 +829,14 @@ async def chat(
         prompt=prompt,
         timeout_s=body.timeout_s,
         max_output_tokens=CHAT_ANSWER_MAX_OUTPUT_TOKENS,
+        run_budget=llm_run_budget,
     )
     if reply is None:
+        if llm_run_budget.exhausted:
+            raise HTTPException(
+                status_code=429,
+                detail=f"llm_request_budget_exceeded:{llm_run_budget.exhausted_reason}",
+            )
         raise HTTPException(status_code=503, detail="llm_call_failed")
 
     await audit_record(
@@ -814,6 +852,7 @@ async def chat(
             "rewrite_attempted": rewrite_attempted,
             "prompt_chars": prompt_meta["provider_input_chars"],
             "prompt_truncated": bool(prompt_meta["truncated"] or context_meta["truncated"]),
+            "llm_budget": llm_run_budget.stats(),
         },
     )
 
@@ -848,4 +887,5 @@ async def chat(
             "requested_max_tokens": CHAT_ANSWER_MAX_OUTPUT_TOKENS,
             **output_capability,
         },
+        "request_budget": llm_run_budget.stats(),
     }

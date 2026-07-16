@@ -32,6 +32,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.extractor.agent_sdk import is_agent_sdk_available
+from app.extractor.cost import LLMRunBudget, RunBudgetExceeded
 from app.models.auth import PlatformSetting, Secret
 from app.safety.crypto import decrypt
 
@@ -49,6 +50,37 @@ class _SubscriptionOutputTooLarge(RuntimeError):
 
 class _ProviderResponseTooLarge(RuntimeError):
     """A provider response exceeded Mnemos's finite client-side byte ceiling."""
+
+
+def _provider_input_reservation(system: str, prompt: str) -> int:
+    """Return a conservative provider-independent input reservation.
+
+    Provider tokenizers differ, especially for Korean source questions.  The
+    UTF-8 byte length is intentionally an upper-bound-style reservation rather
+    than a claimed billed-token count.  Actual provider usage, when available,
+    belongs in the physical-call ledger and never overwrites this estimate.
+    """
+
+    return max(1, len(system.encode("utf-8")) + len(prompt.encode("utf-8")) + 16)
+
+
+def _reserve_provider_attempt(
+    run_budget: LLMRunBudget | None,
+    *,
+    system: str,
+    prompt: str,
+    timeout_s: int,
+    requested_max_output_tokens: int,
+) -> float:
+    """Reserve one observable network/SDK attempt and return its timeout."""
+
+    if run_budget is None:
+        return float(timeout_s)
+    remaining = run_budget.reserve(
+        _provider_input_reservation(system, prompt),
+        requested_output_tokens=requested_max_output_tokens,
+    )
+    return max(0.001, min(float(timeout_s), remaining))
 
 
 def _provider_response_max_bytes(max_output_tokens: int) -> int:
@@ -347,12 +379,20 @@ async def _openai_compatible(
     prompt: str,
     timeout_s: int,
     max_output_tokens: int,
+    run_budget: LLMRunBudget | None = None,
 ) -> str | None:
     """A /chat/completions call in the OpenAI wire format — serves both
     OpenAI proper and any OpenAI-compatible endpoint (Atlas)."""
     url = base_url.rstrip("/") + "/chat/completions"
     output_limit_field = _openai_output_limit_field(base_url=base_url, model=model)
-    async with httpx.AsyncClient(timeout=timeout_s) as client:
+    attempt_timeout = _reserve_provider_attempt(
+        run_budget,
+        system=system,
+        prompt=prompt,
+        timeout_s=timeout_s,
+        requested_max_output_tokens=max_output_tokens,
+    )
+    async with httpx.AsyncClient(timeout=attempt_timeout) as client:
         response = await _post_json_bounded(
             client,
             url,
@@ -381,11 +421,19 @@ async def _gemini_generate(
     prompt: str,
     timeout_s: int,
     max_output_tokens: int,
+    run_budget: LLMRunBudget | None = None,
 ) -> str | None:
     # Auth via the x-goog-api-key header (current docs) — never the ?key=
     # query param, so the key never lands in a URL/log.
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    async with httpx.AsyncClient(timeout=timeout_s) as client:
+    attempt_timeout = _reserve_provider_attempt(
+        run_budget,
+        system=system,
+        prompt=prompt,
+        timeout_s=timeout_s,
+        requested_max_output_tokens=max_output_tokens,
+    )
+    async with httpx.AsyncClient(timeout=attempt_timeout) as client:
         response = await _post_json_bounded(
             client,
             url,
@@ -413,6 +461,7 @@ async def _atlas_chat(
     prompt: str,
     timeout_s: int,
     requested_max_output_tokens: int,
+    run_budget: LLMRunBudget | None = None,
 ) -> str | None:
     """AI-ATLAS public agent API (hansol). Two steps: create a session, then
     post the message; the reply is ``response.message``. Atlas has no system
@@ -423,7 +472,17 @@ async def _atlas_chat(
     )
     base = base_url.rstrip("/")
     headers = {"x-api-key": api_key, "Content-Type": "application/json"}
-    async with httpx.AsyncClient(timeout=timeout_s) as client:
+    # Atlas requires a remote session before its message endpoint.  Reserve
+    # before that external dispatch: this deliberately fails safe if a crash
+    # leaves it unclear whether the message was subsequently accepted.
+    attempt_timeout = _reserve_provider_attempt(
+        run_budget,
+        system=system,
+        prompt=prompt,
+        timeout_s=timeout_s,
+        requested_max_output_tokens=requested_max_output_tokens,
+    )
+    async with httpx.AsyncClient(timeout=attempt_timeout) as client:
         session_response = await _post_json_bounded(
             client,
             f"{base}/agents/{agent_id}/sessions",
@@ -460,12 +519,20 @@ async def _claude_api(
     prompt: str,
     timeout_s: int,
     max_output_tokens: int,
+    run_budget: LLMRunBudget | None = None,
 ) -> str | None:
     """Direct Anthropic API — ~10-30s, far faster than the subprocess."""
     try:
         import anthropic  # noqa: PLC0415
 
         client = anthropic.AsyncAnthropic(api_key=api_key)
+        attempt_timeout = _reserve_provider_attempt(
+            run_budget,
+            system=system,
+            prompt=prompt,
+            timeout_s=timeout_s,
+            requested_max_output_tokens=max_output_tokens,
+        )
         resp = await asyncio.wait_for(
             client.messages.create(
                 model=model or "claude-sonnet-4-6",
@@ -473,10 +540,12 @@ async def _claude_api(
                 max_tokens=max_output_tokens,
                 messages=[{"role": "user", "content": prompt}],
             ),
-            timeout=timeout_s,
+            timeout=attempt_timeout,
         )
         parts = [getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text"]
         return "\n".join(parts).strip() or None
+    except RunBudgetExceeded:
+        raise
     except Exception as exc:  # noqa: BLE001
         log.warning("chat: anthropic API failed (%s); trying subscription", exc.__class__.__name__)
         return None
@@ -488,6 +557,7 @@ async def _claude_subscription(
     prompt: str,
     timeout_s: int,
     requested_max_output_tokens: int = _MAX_TOKENS,
+    run_budget: LLMRunBudget | None = None,
 ) -> str | None:
     """Local Claude Code subscription — no API key, but ~60-180s/call."""
     if not is_agent_sdk_available():
@@ -541,7 +611,16 @@ async def _claude_subscription(
     for attempt in range(2):
         out: list[str] = []
         try:
-            await asyncio.wait_for(_drain(out), timeout=timeout_s)
+            attempt_timeout = _reserve_provider_attempt(
+                run_budget,
+                system=system,
+                prompt=prompt,
+                timeout_s=timeout_s,
+                requested_max_output_tokens=requested_max_output_tokens,
+            )
+            await asyncio.wait_for(_drain(out), timeout=attempt_timeout)
+        except RunBudgetExceeded:
+            raise
         except TimeoutError:
             log.warning("chat: subscription LLM timed out after %ds", timeout_s)
             return None
@@ -575,6 +654,7 @@ async def provider_chat(
     prompt: str,
     timeout_s: int = 180,
     max_output_tokens: int = _MAX_TOKENS,
+    run_budget: LLMRunBudget | None = None,
 ) -> str | None:
     """Dispatch a one-shot answer to ``provider`` using the resolved
     config. Returns markdown, or ``None`` on any failure (logged).
@@ -600,6 +680,7 @@ async def provider_chat(
                 prompt=prompt,
                 timeout_s=timeout_s,
                 max_output_tokens=max_output_tokens,
+                run_budget=run_budget,
             )
         if provider == "atlas":
             return await _atlas_chat(
@@ -610,6 +691,7 @@ async def provider_chat(
                 prompt=prompt,
                 timeout_s=timeout_s,
                 requested_max_output_tokens=max_output_tokens,
+                run_budget=run_budget,
             )
         if provider == "gemini":
             return await _gemini_generate(
@@ -619,6 +701,7 @@ async def provider_chat(
                 prompt=prompt,
                 timeout_s=timeout_s,
                 max_output_tokens=max_output_tokens,
+                run_budget=run_budget,
             )
         if provider == "claudecode":
             mode = c.get("mode") or "subscription"
@@ -631,6 +714,7 @@ async def provider_chat(
                     prompt=prompt,
                     timeout_s=timeout_s,
                     max_output_tokens=max_output_tokens,
+                    run_budget=run_budget,
                 )
                 if reply is not None:
                     return reply
@@ -640,6 +724,7 @@ async def provider_chat(
                     prompt=prompt,
                     timeout_s=timeout_s,
                     requested_max_output_tokens=max_output_tokens,
+                    run_budget=run_budget,
                 )
             # Subscription mode (default): use the local Claude Code login.
             reply = await _claude_subscription(
@@ -647,6 +732,7 @@ async def provider_chat(
                 prompt=prompt,
                 timeout_s=timeout_s,
                 requested_max_output_tokens=max_output_tokens,
+                run_budget=run_budget,
             )
             if reply is not None:
                 return reply
@@ -659,6 +745,7 @@ async def provider_chat(
                     prompt=prompt,
                     timeout_s=timeout_s,
                     max_output_tokens=max_output_tokens,
+                    run_budget=run_budget,
                 )
             return None
         return None

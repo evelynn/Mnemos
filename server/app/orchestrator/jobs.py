@@ -13,7 +13,7 @@ import logging
 import time
 import uuid
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -45,13 +45,17 @@ from app.graph_publication import (
     GRAPH_HEAD_READY,
     GraphPublicationInvariantError,
     LegacyGraphWriteRejected,
+    StagedEdgeCandidate,
+    StagedNodeCandidate,
     bootstrap_graph_head,
     capture_graph_base_generation,
     cleanup_staged_graph,
     promote_staged_graph,
     seal_graph_coverage,
     stage_edge,
+    stage_edges_batch,
     stage_node,
+    stage_nodes_batch,
     validate_graph_publication_receipt,
 )
 from app.merge.contract_id import http_contract_id
@@ -92,6 +96,54 @@ _SUMMARY_RETENTION_BATCH = 900
 _AGENT_RUN_DEADLINE = "run_deadline_exceeded"
 _MAX_POSTPROCESS_ERROR_CHARS = 2048
 _MAX_POSTPROCESS_ERRORS = 4
+_ANALYZER_STAGE_BATCH_SIZE = 50
+
+
+@dataclass
+class _GraphStageBuffer:
+    """Bounded analyzer candidates waiting for one stage-table merge.
+
+    Nodes and edges have disjoint identities, so their table writes may be
+    grouped independently while preserving input order within each reducer.
+    The caller commits only after both groups succeed, making a mixed batch
+    fail atomically on an identity conflict.
+    """
+
+    project_id: uuid.UUID
+    run_id: uuid.UUID
+    nodes: list[StagedNodeCandidate] = field(default_factory=list)
+    edges: list[StagedEdgeCandidate] = field(default_factory=list)
+
+    @property
+    def size(self) -> int:
+        return len(self.nodes) + len(self.edges)
+
+    def add_node(self, candidate: StagedNodeCandidate) -> None:
+        self.nodes.append(candidate)
+
+    def add_edge(self, candidate: StagedEdgeCandidate) -> None:
+        self.edges.append(candidate)
+
+    async def flush(self, session: AsyncSession) -> tuple[int, int]:
+        candidate_count = self.size
+        if candidate_count == 0:
+            return 0, 0
+        node_changes = await stage_nodes_batch(
+            session,
+            project_id=self.project_id,
+            run_id=self.run_id,
+            candidates=self.nodes,
+        )
+        edge_changes = await stage_edges_batch(
+            session,
+            project_id=self.project_id,
+            run_id=self.run_id,
+            candidates=self.edges,
+        )
+        changed_count = sum(node_changes) + sum(edge_changes)
+        self.nodes.clear()
+        self.edges.clear()
+        return candidate_count, changed_count
 
 
 def _reserve_agent_provider_call(
@@ -823,6 +875,7 @@ async def _record_payload(
     source_root: str | Path | None = None,
     expected_source_name: str | None = None,
     run_id: uuid.UUID | None = None,
+    stage_buffer: _GraphStageBuffer | None = None,
 ) -> bool:
     """Apply one analyzer JSON record if its record_type is in ``accept_kinds``.
 
@@ -852,6 +905,14 @@ async def _record_payload(
         # import behind the test-environment gate makes the production ingest
         # dependency graph stage-only.
         from app.merge.writer import upsert_edge, upsert_node
+    if stage_buffer is not None and (
+        run_id is None
+        or stage_buffer.project_id != project_id
+        or stage_buffer.run_id != run_id
+    ):
+        raise GraphPublicationInvariantError(
+            "analyzer stage buffer does not belong to the staging run"
+        )
     raw_source_name = payload.get("source_name")
     if not _valid_graph_text(
         raw_source_name, max_chars=_MAX_PRODUCER_NAME_CHARS
@@ -938,16 +999,27 @@ async def _record_payload(
             )
         else:
             _node_skip(node_id)
-            await stage_node(
-                session,
-                project_id=project_id,
-                run_id=run_id,
-                node_id=node_id,
-                kind="Symbol",
-                data=data,
-                certainty=data.get("certainty", "asserted"),
-                source_name=source_name,
-            )
+            if stage_buffer is None:
+                await stage_node(
+                    session,
+                    project_id=project_id,
+                    run_id=run_id,
+                    node_id=node_id,
+                    kind="Symbol",
+                    data=data,
+                    certainty=data.get("certainty", "asserted"),
+                    source_name=source_name,
+                )
+            else:
+                stage_buffer.add_node(
+                    StagedNodeCandidate(
+                        node_id=node_id,
+                        kind="Symbol",
+                        data=data,
+                        certainty=data.get("certainty", "asserted"),
+                        source_name=source_name,
+                    )
+                )
         totals["symbols"] += 1
         return True
     elif record_type == "contract":
@@ -981,16 +1053,27 @@ async def _record_payload(
             )
         else:
             _node_skip(node_id)
-            await stage_node(
-                session,
-                project_id=project_id,
-                run_id=run_id,
-                node_id=node_id,
-                kind="Contract",
-                data=data,
-                certainty=data.get("certainty", "inferred"),
-                source_name=source_name,
-            )
+            if stage_buffer is None:
+                await stage_node(
+                    session,
+                    project_id=project_id,
+                    run_id=run_id,
+                    node_id=node_id,
+                    kind="Contract",
+                    data=data,
+                    certainty=data.get("certainty", "inferred"),
+                    source_name=source_name,
+                )
+            else:
+                stage_buffer.add_node(
+                    StagedNodeCandidate(
+                        node_id=node_id,
+                        kind="Contract",
+                        data=data,
+                        certainty=data.get("certainty", "inferred"),
+                        source_name=source_name,
+                    )
+                )
         totals["contracts"] += 1
         return True
     elif record_type == "data_entity":
@@ -1016,16 +1099,27 @@ async def _record_payload(
             )
         else:
             _node_skip(node_id)
-            await stage_node(
-                session,
-                project_id=project_id,
-                run_id=run_id,
-                node_id=node_id,
-                kind="DataEntity",
-                data=data,
-                certainty=data.get("certainty", "verified"),
-                source_name=source_name,
-            )
+            if stage_buffer is None:
+                await stage_node(
+                    session,
+                    project_id=project_id,
+                    run_id=run_id,
+                    node_id=node_id,
+                    kind="DataEntity",
+                    data=data,
+                    certainty=data.get("certainty", "verified"),
+                    source_name=source_name,
+                )
+            else:
+                stage_buffer.add_node(
+                    StagedNodeCandidate(
+                        node_id=node_id,
+                        kind="DataEntity",
+                        data=data,
+                        certainty=data.get("certainty", "verified"),
+                        source_name=source_name,
+                    )
+                )
         totals["data_entities"] = totals.get("data_entities", 0) + 1
         return True
     elif record_type == "edge":
@@ -1066,17 +1160,29 @@ async def _record_payload(
             )
         else:
             _edge_skip((src, tgt, kind))
-            await stage_edge(
-                session,
-                project_id=project_id,
-                run_id=run_id,
-                source_id=src,
-                target_id=tgt,
-                kind=kind,
-                data=metadata,
-                certainty=data.get("certainty", "asserted"),
-                source_name=source_name,
-            )
+            if stage_buffer is None:
+                await stage_edge(
+                    session,
+                    project_id=project_id,
+                    run_id=run_id,
+                    source_id=src,
+                    target_id=tgt,
+                    kind=kind,
+                    data=metadata,
+                    certainty=data.get("certainty", "asserted"),
+                    source_name=source_name,
+                )
+            else:
+                stage_buffer.add_edge(
+                    StagedEdgeCandidate(
+                        source_id=src,
+                        target_id=tgt,
+                        kind=kind,
+                        data=metadata,
+                        certainty=data.get("certainty", "asserted"),
+                        source_name=source_name,
+                    )
+                )
         totals["edges"] += 1
         return True
     return False
@@ -1228,8 +1334,15 @@ async def _run_analyzer_stage(
                 before_totals = dict(totals)
                 contract_errors: list[str] = []
                 records_seen = 0
+                stage_batches = 0
+                staged_candidates = 0
+                stage_rows_changed = 0
                 async with SessionLocal() as session:
                     pending_progress = 0
+                    stage_buffer = _GraphStageBuffer(
+                        project_id=project_id,
+                        run_id=run_id,
+                    )
                     record_stream = runner.run(
                         verb,
                         path,
@@ -1260,6 +1373,7 @@ async def _run_analyzer_stage(
                                 seen_edges=seen_edges,
                                 source_root=path,
                                 expected_source_name=producer,
+                                stage_buffer=stage_buffer,
                             )
                             if accepted:
                                 records_seen += 1
@@ -1277,11 +1391,21 @@ async def _run_analyzer_stage(
                             # SQLite permits only one writer at a time. Commit
                             # graph rows before StageTracker opens its own
                             # progress-write session.
-                            if pending_progress >= 50:
+                            if pending_progress >= _ANALYZER_STAGE_BATCH_SIZE:
+                                buffered, changed = await stage_buffer.flush(session)
+                                if buffered:
+                                    stage_batches += 1
+                                    staged_candidates += buffered
+                                    stage_rows_changed += changed
                                 await session.commit()
                                 await stage.increment(pending_progress)
                                 pending_progress = 0
                                 await _ensure_run_active(run_id)
+                    buffered, changed = await stage_buffer.flush(session)
+                    if buffered:
+                        stage_batches += 1
+                        staged_candidates += buffered
+                        stage_rows_changed += changed
                     await session.commit()
                     if pending_progress:
                         await stage.increment(pending_progress)
@@ -1299,6 +1423,9 @@ async def _run_analyzer_stage(
             "producer": producer,
             "verb": verb,
             "records": records_seen,
+            "stage_batches": stage_batches,
+            "staged_candidates": staged_candidates,
+            "stage_rows_changed": stage_rows_changed,
             "authoritative": authoritative,
             "contract_errors": contract_errors,
         })
@@ -2469,6 +2596,7 @@ async def _run_published_postprocess(
     l2_limit: int,
     l3_limit: int,
     position: int,
+    llm_run_budget: LLMRunBudget | None = None,
 ) -> str:
     """Build derived products after the source graph receipt is durable."""
 
@@ -2598,7 +2726,14 @@ async def _run_published_postprocess(
 
         if summarize:
             extractor = Extractor()
-            run_budget = LLMRunBudget.from_env()
+            # A source run that used Agent extraction passes its existing
+            # budget through publication.  Replacing it here would multiply
+            # the advertised call/input/wall ceilings.  A published resume (or
+            # a source run with narration only) has no live in-memory budget
+            # and receives exactly one fresh bounded budget at this boundary.
+            run_budget = llm_run_budget
+            if run_budget is None:
+                run_budget = LLMRunBudget.from_env()
             for _level, label, fn, limit in (
                 (1, "l1_summaries", summarise_l1, l1_limit),
                 (2, "l2_summaries", summarise_l2, l2_limit),
@@ -3239,11 +3374,6 @@ async def run_ingest(
             if agent_limit > 0 and (
                 scope != "incremental" or bool(selected_analyzers or removed_analyzers)
             ):
-                if llm_run_budget is None:
-                    # Agent extraction and L1-L3 narration spend from one
-                    # provider-independent budget.  Enabling both features
-                    # must not multiply the run's call/input/time ceilings.
-                    llm_run_budget = LLMRunBudget.from_env()
                 for language in source_languages:
                     if not analyzer_available(language):
                         agent_key = f"agent:{language}"
@@ -3271,6 +3401,13 @@ async def run_ingest(
                                     "reason": "unchanged_source_content",
                                 })
                             continue
+                        if llm_run_budget is None:
+                            # Start the shared deadline only when an Agent
+                            # stage will actually run.  Merely enabling the
+                            # fallback must not consume narration wall time
+                            # when every language has deterministic coverage or
+                            # this producer was skipped as unchanged.
+                            llm_run_budget = LLMRunBudget.from_env()
                         position += 1
                         agent_outcome = await _run_agent_extraction_stage(
                             bus, project_id, run_id, language, path,
@@ -3617,6 +3754,7 @@ async def run_ingest(
                 l2_limit=l2_limit,
                 l3_limit=l3_limit,
                 position=position,
+                llm_run_budget=llm_run_budget,
             )
             return
 

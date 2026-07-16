@@ -31,6 +31,24 @@ def test_run_budget_enforces_call_and_input_limits() -> None:
     assert tokens.calls_started == 0
 
 
+def test_run_budget_reserves_output_before_dispatch() -> None:
+    budget = LLMRunBudget(
+        max_calls=3,
+        max_input_tokens=10_000,
+        max_output_tokens=1_500,
+        wall_time_sec=60,
+    )
+
+    assert budget.reserve(100, requested_output_tokens=1_200) > 0
+    with pytest.raises(RunBudgetExceeded, match="run_output_token_limit_exceeded"):
+        budget.reserve(100, requested_output_tokens=301)
+
+    assert budget.calls_started == 1
+    assert budget.input_tokens_reserved == 100
+    assert budget.output_tokens_reserved == 1_200
+    assert budget.stats()["reserved_output_tokens"] == 1_200
+
+
 def test_run_budget_enforces_absolute_deadline(monkeypatch) -> None:
     import app.extractor.cost as cost
 

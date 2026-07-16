@@ -1,12 +1,16 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
     DateTime,
+    ForeignKey,
     Index,
+    Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -221,7 +225,241 @@ class LLMCall(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
+    # Expand-only v1 physical-attempt contract.  Legacy writers/readers keep
+    # using the columns above while integrations migrate one call path at a
+    # time.  Unknown provider facts remain NULL; they are never fabricated as
+    # zero-token calls.
+    contract_version: Mapped[int] = mapped_column(
+        SmallInteger,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+    operation_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    budget_scope_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    purpose: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    attempt_no: Mapped[Optional[int]] = mapped_column(nullable=True)
+    parent_attempt_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("llm_calls.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    attempt_kind: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    provider: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    provider_mode: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    requested_model: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    resolved_model: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    provider_request_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
+    input_fingerprint: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    estimated_input_tokens: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    input_estimate_method: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True
+    )
+    requested_max_output_tokens: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    attempt_status: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
+    result_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    failure_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    finish_reason: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    duration_ms: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    usage_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    usage_source: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
+    input_tokens: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    uncached_input_tokens: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    output_tokens: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    visible_output_tokens: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    total_tokens: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    cache_read_input_tokens: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    cache_write_input_tokens: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    reasoning_output_tokens: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    tool_input_tokens: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    provider_total_tokens: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    provider_turn_count: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    reported_cost_usd: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(20, 10), nullable=True
+    )
+    estimated_cost_usd: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(20, 10), nullable=True
+    )
+    reserved_cost_usd: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(20, 10), nullable=True
+    )
+    pricing_version: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+
     __table_args__ = (
         Index("ix_llm_calls_project_generated", "project_id", "generated_at"),
         Index("ix_llm_calls_analysis_run", "analysis_run_id"),
+        Index("ix_llm_calls_budget_scope", "budget_scope_id"),
+        Index("ix_llm_calls_project_started", "project_id", "started_at"),
+        UniqueConstraint(
+            "operation_id",
+            "attempt_no",
+            name="uq_llm_calls_operation_attempt",
+        ),
+        CheckConstraint(
+            "contract_version IN (0, 1)",
+            name="ck_llm_calls_contract_version",
+        ),
+        CheckConstraint(
+            "input_fingerprint IS NULL OR length(input_fingerprint) = 64",
+            name="ck_llm_calls_input_fingerprint",
+        ),
+        CheckConstraint(
+            "(estimated_input_tokens IS NULL OR estimated_input_tokens >= 0) AND "
+            "(requested_max_output_tokens IS NULL OR "
+            "requested_max_output_tokens >= 0) AND "
+            "(duration_ms IS NULL OR duration_ms >= 0) AND "
+            "(input_tokens IS NULL OR input_tokens >= 0) AND "
+            "(uncached_input_tokens IS NULL OR uncached_input_tokens >= 0) AND "
+            "(output_tokens IS NULL OR output_tokens >= 0) AND "
+            "(visible_output_tokens IS NULL OR visible_output_tokens >= 0) AND "
+            "(total_tokens IS NULL OR total_tokens >= 0) AND "
+            "(cache_read_input_tokens IS NULL OR "
+            "cache_read_input_tokens >= 0) AND "
+            "(cache_write_input_tokens IS NULL OR "
+            "cache_write_input_tokens >= 0) AND "
+            "(reasoning_output_tokens IS NULL OR "
+            "reasoning_output_tokens >= 0) AND "
+            "(tool_input_tokens IS NULL OR tool_input_tokens >= 0) AND "
+            "(provider_total_tokens IS NULL OR provider_total_tokens >= 0) AND "
+            "(provider_turn_count IS NULL OR provider_turn_count >= 0)",
+            name="ck_llm_calls_token_values",
+        ),
+        CheckConstraint(
+            "(reported_cost_usd IS NULL OR reported_cost_usd >= 0) AND "
+            "(estimated_cost_usd IS NULL OR estimated_cost_usd >= 0) AND "
+            "(reserved_cost_usd IS NULL OR reserved_cost_usd >= 0)",
+            name="ck_llm_calls_cost_values",
+        ),
+        CheckConstraint(
+            "(input_tokens IS NULL OR uncached_input_tokens IS NULL OR "
+            "uncached_input_tokens <= input_tokens) AND "
+            "(input_tokens IS NULL OR cache_read_input_tokens IS NULL OR "
+            "cache_read_input_tokens <= input_tokens) AND "
+            "(input_tokens IS NULL OR cache_write_input_tokens IS NULL OR "
+            "cache_write_input_tokens <= input_tokens) AND "
+            "(input_tokens IS NULL OR "
+            "COALESCE(uncached_input_tokens, 0) + "
+            "COALESCE(cache_read_input_tokens, 0) + "
+            "COALESCE(cache_write_input_tokens, 0) <= input_tokens) AND "
+            "(output_tokens IS NULL OR visible_output_tokens IS NULL OR "
+            "visible_output_tokens <= output_tokens) AND "
+            "(output_tokens IS NULL OR reasoning_output_tokens IS NULL OR "
+            "reasoning_output_tokens <= output_tokens) AND "
+            "(output_tokens IS NULL OR "
+            "COALESCE(visible_output_tokens, 0) + "
+            "COALESCE(reasoning_output_tokens, 0) <= output_tokens) AND "
+            "(input_tokens IS NULL OR output_tokens IS NULL OR "
+            "(total_tokens IS NOT NULL AND "
+            "total_tokens = input_tokens + output_tokens)) AND "
+            "(provider_total_tokens IS NULL OR total_tokens IS NULL OR "
+            "provider_total_tokens = total_tokens)",
+            name="ck_llm_calls_usage_relations",
+        ),
+        CheckConstraint(
+            "usage_status IS NULL OR "
+            "(usage_status = 'reported_complete' AND input_tokens IS NOT NULL "
+            "AND output_tokens IS NOT NULL AND total_tokens IS NOT NULL) OR "
+            "(usage_status = 'reported_partial' AND ("
+            "input_tokens IS NOT NULL OR uncached_input_tokens IS NOT NULL OR "
+            "output_tokens IS NOT NULL OR visible_output_tokens IS NOT NULL OR "
+            "total_tokens IS NOT NULL OR cache_read_input_tokens IS NOT NULL OR "
+            "cache_write_input_tokens IS NOT NULL OR "
+            "reasoning_output_tokens IS NOT NULL OR "
+            "tool_input_tokens IS NOT NULL OR provider_total_tokens IS NOT NULL OR "
+            "provider_turn_count IS NOT NULL OR reported_cost_usd IS NOT NULL)) OR "
+            "(usage_status = 'legacy_total_only' AND total_tokens IS NOT NULL "
+            "AND input_tokens IS NULL AND uncached_input_tokens IS NULL AND "
+            "output_tokens IS NULL AND visible_output_tokens IS NULL AND "
+            "cache_read_input_tokens IS NULL AND "
+            "cache_write_input_tokens IS NULL AND "
+            "reasoning_output_tokens IS NULL AND tool_input_tokens IS NULL AND "
+            "provider_turn_count IS NULL AND reported_cost_usd IS NULL) OR "
+            "(usage_status IN ('unavailable', 'lost_after_dispatch', "
+            "'legacy_unknown') AND input_tokens IS NULL AND "
+            "uncached_input_tokens IS NULL AND output_tokens IS NULL AND "
+            "visible_output_tokens IS NULL AND total_tokens IS NULL AND "
+            "cache_read_input_tokens IS NULL AND "
+            "cache_write_input_tokens IS NULL AND "
+            "reasoning_output_tokens IS NULL AND tool_input_tokens IS NULL AND "
+            "provider_total_tokens IS NULL AND provider_turn_count IS NULL AND "
+            "reported_cost_usd IS NULL)",
+            name="ck_llm_calls_usage_status_shape",
+        ),
+        CheckConstraint(
+            "contract_version = 0 OR ("
+            "operation_id IS NOT NULL AND budget_scope_id IS NOT NULL AND "
+            "purpose IS NOT NULL AND attempt_no > 0 AND "
+            "attempt_kind IS NOT NULL AND provider IS NOT NULL AND "
+            "provider_mode IS NOT NULL AND requested_model IS NOT NULL AND "
+            "input_fingerprint IS NOT NULL AND "
+            "estimated_input_tokens IS NOT NULL AND "
+            "input_estimate_method IS NOT NULL AND "
+            "requested_max_output_tokens > 0 AND "
+            "attempt_status IS NOT NULL AND result_status IS NOT NULL AND "
+            "started_at IS NOT NULL AND usage_status IS NOT NULL AND "
+            "usage_source IS NOT NULL)",
+            name="ck_llm_calls_v1_shape",
+        ),
+        CheckConstraint(
+            "contract_version = 0 OR ("
+            "purpose IN ('summary', 'agent_extract', 'flow', 'chat_rewrite', "
+            "'chat_answer', 'second_opinion') AND "
+            "attempt_kind IN ('primary', 'retry', 'fallback') AND "
+            "attempt_status IN ('started', 'completed', 'failed', 'timeout', "
+            "'cancelled', 'unknown') AND "
+            "result_status IN ('pending', 'accepted', 'empty', "
+            "'parse_rejected', 'schema_rejected', 'grounding_rejected', "
+            "'output_limit_rejected', 'not_applicable') AND "
+            "usage_status IN ('reported_complete', 'reported_partial', "
+            "'unavailable', 'lost_after_dispatch') AND "
+            "usage_source IN ('provider_api', 'agent_sdk', "
+            "'configured_estimate', 'unknown'))",
+            name="ck_llm_calls_v1_enums",
+        ),
+        CheckConstraint(
+            "contract_version = 0 OR "
+            "((attempt_status = 'started' AND completed_at IS NULL AND "
+            "duration_ms IS NULL AND result_status = 'pending') OR "
+            "(attempt_status <> 'started' AND completed_at IS NOT NULL AND "
+            "duration_ms IS NOT NULL)) AND "
+            "(result_status <> 'accepted' OR attempt_status = 'completed') AND "
+            "(parent_attempt_id IS NULL OR parent_attempt_id <> id)",
+            name="ck_llm_calls_v1_lifecycle",
+        ),
     )
