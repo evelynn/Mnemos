@@ -17,8 +17,9 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.extractor.agent import (
     FALLBACK_ANTHROPIC_CLIENT_INIT,
@@ -1286,6 +1287,138 @@ async def _priority_data_entities(
     return out[:limit]
 
 
+_L1_SQLITE_BATCH_SIZE = 64
+
+
+def _uses_sqlite(session: AsyncSession) -> bool:
+    """Return true only for the local SQLite execution path."""
+
+    dialect = getattr(getattr(session, "bind", None), "dialect", None)
+    return getattr(dialect, "name", None) == "sqlite"
+
+
+async def _sqlite_l1_edges(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    nodes: list[Node],
+    direction: str,
+) -> list[Edge]:
+    """Load each target's historical ordered top ten in one SQLite query.
+
+    Every UNION branch is the former per-target SELECT, including its exact
+    predicates, order, and limit.  The 64-target ceiling keeps the compound
+    statement at no more than 256 SQLite binds, below the portable 999-bind
+    ceiling.  The outer order is explicit because UNION branch order is not a
+    result-order contract.
+    """
+
+    branches = []
+    for index, node in enumerate(nodes):
+        if direction == "out":
+            target_filter = Edge.source_id == node.id
+            edge_order = (
+                Edge.kind.asc(),
+                Edge.target_id.asc(),
+                Edge.source_id.asc(),
+                Edge.id.asc(),
+            )
+        else:
+            target_filter = Edge.target_id == node.id
+            edge_order = (
+                Edge.kind.asc(),
+                Edge.source_id.asc(),
+                Edge.target_id.asc(),
+                Edge.id.asc(),
+            )
+        target_edges = (
+            select(Edge)
+            .where(
+                Edge.project_id == project_id,
+                target_filter,
+                Edge.valid_to.is_(None),
+            )
+            .order_by(*edge_order)
+            .limit(10)
+            .subquery(f"l1_{direction}_{index}")
+        )
+        branches.append(
+            select(
+                *(target_edges.c[column.key] for column in Edge.__table__.columns)
+            )
+        )
+
+    combined = union_all(*branches).subquery(f"l1_{direction}_batch")
+    edge = aliased(Edge, combined)
+    if direction == "out":
+        batch_order = (
+            edge.source_id.asc(),
+            edge.kind.asc(),
+            edge.target_id.asc(),
+            edge.source_id.asc(),
+            edge.id.asc(),
+        )
+    else:
+        batch_order = (
+            edge.target_id.asc(),
+            edge.kind.asc(),
+            edge.source_id.asc(),
+            edge.target_id.asc(),
+            edge.id.asc(),
+        )
+    return (
+        await session.execute(select(edge).order_by(*batch_order))
+    ).scalars().all()
+
+
+async def _sqlite_l1_batch(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    nodes: list[Node],
+) -> tuple[
+    dict[str, list[Edge]],
+    dict[str, list[Edge]],
+    dict[str, Any],
+    Any,
+]:
+    """Preload one bounded SQLite L1 block without changing evidence order."""
+
+    outgoing = {node.id: [] for node in nodes}
+    incoming = {node.id: [] for node in nodes}
+    for edge in await _sqlite_l1_edges(
+        session,
+        project_id=project_id,
+        nodes=nodes,
+        direction="out",
+    ):
+        outgoing[edge.source_id].append(edge)
+    for edge in await _sqlite_l1_edges(
+        session,
+        project_id=project_id,
+        nodes=nodes,
+        direction="in",
+    ):
+        incoming[edge.target_id].append(edge)
+
+    node_overlays = await load_node_human_overlays(
+        session,
+        project_id=project_id,
+        node_ids=(node.id for node in nodes),
+    )
+    neighbour_edges = [
+        edge
+        for node in nodes
+        for edge in (*incoming[node.id], *outgoing[node.id])
+    ]
+    edge_overlays = await load_edge_overlays(
+        session,
+        project_id=project_id,
+        identities=(edge_identity(edge) for edge in neighbour_edges),
+    )
+    return outgoing, incoming, node_overlays, edge_overlays
+
+
 async def summarise_l1(
     session: AsyncSession,
     extractor: Extractor,
@@ -1314,52 +1447,68 @@ async def summarise_l1(
     nodes = [*symbols, *entities]
 
     count = 0
-    for sym in nodes:
+    sqlite_batching = _uses_sqlite(session)
+    sqlite_batch = None
+    for node_index, sym in enumerate(nodes):
         if run_budget is not None and run_budget.exhausted:
             break
-        neighbours_out = (
-            await session.execute(
-                select(Edge)
-                .where(
-                    Edge.project_id == project_id,
-                    Edge.source_id == sym.id,
-                    Edge.valid_to.is_(None),
+        if sqlite_batching:
+            if node_index % _L1_SQLITE_BATCH_SIZE == 0:
+                sqlite_batch = await _sqlite_l1_batch(
+                    session,
+                    project_id=project_id,
+                    nodes=nodes[node_index : node_index + _L1_SQLITE_BATCH_SIZE],
                 )
-                .order_by(
-                    Edge.kind.asc(),
-                    Edge.target_id.asc(),
-                    Edge.source_id.asc(),
-                    Edge.id.asc(),
+            if sqlite_batch is None:
+                raise AssertionError("SQLite L1 batch was not loaded")
+            outgoing, incoming, node_overlays, edge_overlays = sqlite_batch
+            neighbours_out = outgoing[sym.id]
+            neighbours_in = incoming[sym.id]
+            neighbour_edges = [*neighbours_in, *neighbours_out]
+        else:
+            neighbours_out = (
+                await session.execute(
+                    select(Edge)
+                    .where(
+                        Edge.project_id == project_id,
+                        Edge.source_id == sym.id,
+                        Edge.valid_to.is_(None),
+                    )
+                    .order_by(
+                        Edge.kind.asc(),
+                        Edge.target_id.asc(),
+                        Edge.source_id.asc(),
+                        Edge.id.asc(),
+                    )
+                    .limit(10)
                 )
-                .limit(10)
+            ).scalars().all()
+            neighbours_in = (
+                await session.execute(
+                    select(Edge)
+                    .where(
+                        Edge.project_id == project_id,
+                        Edge.target_id == sym.id,
+                        Edge.valid_to.is_(None),
+                    )
+                    .order_by(
+                        Edge.kind.asc(),
+                        Edge.source_id.asc(),
+                        Edge.target_id.asc(),
+                        Edge.id.asc(),
+                    )
+                    .limit(10)
+                )
+            ).scalars().all()
+            node_overlays = await load_node_human_overlays(
+                session, project_id=project_id, node_ids=[sym.id]
             )
-        ).scalars().all()
-        neighbours_in = (
-            await session.execute(
-                select(Edge)
-                .where(
-                    Edge.project_id == project_id,
-                    Edge.target_id == sym.id,
-                    Edge.valid_to.is_(None),
-                )
-                .order_by(
-                    Edge.kind.asc(),
-                    Edge.source_id.asc(),
-                    Edge.target_id.asc(),
-                    Edge.id.asc(),
-                )
-                .limit(10)
+            neighbour_edges = [*neighbours_in, *neighbours_out]
+            edge_overlays = await load_edge_overlays(
+                session,
+                project_id=project_id,
+                identities=(edge_identity(edge) for edge in neighbour_edges),
             )
-        ).scalars().all()
-        node_overlays = await load_node_human_overlays(
-            session, project_id=project_id, node_ids=[sym.id]
-        )
-        neighbour_edges = [*neighbours_in, *neighbours_out]
-        edge_overlays = await load_edge_overlays(
-            session,
-            project_id=project_id,
-            identities=(edge_identity(edge) for edge in neighbour_edges),
-        )
         node_view = node_read_view(sym, node_overlays.get(sym.id))
         evidence: list[dict[str, Any]] = [
             {

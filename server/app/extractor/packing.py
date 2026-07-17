@@ -17,10 +17,25 @@ MAX_EVIDENCE_PROMPT_CHARS = 16_000
 # Mnemos-controlled text.  Direct adapters reserve this on top of the UTF-8
 # byte upper bound; opaque Agent SDK paths reserve the full model context.
 PROVIDER_INPUT_ENVELOPE_TOKENS = 256
+_PROMPT_JSON_SEPARATORS = (", ", ": ")
+_PROMPT_JSON_LIST_SEPARATOR_BYTES = len(
+    _PROMPT_JSON_SEPARATORS[0].encode("utf-8")
+)
 
 
 class EvidencePromptTooLarge(ValueError):
     """Complete evidence JSON cannot fit the provider input contract."""
+
+
+def _serialize_prompt_json(obj: Any) -> str:
+    """Use one canonical JSON dialect for prompt text and byte accounting."""
+
+    return json.dumps(
+        obj,
+        default=str,
+        sort_keys=True,
+        separators=_PROMPT_JSON_SEPARATORS,
+    )
 
 
 def serialize_evidence(
@@ -38,7 +53,7 @@ def serialize_evidence(
 
     if max_chars <= 0:
         raise ValueError("max_chars must be positive")
-    serialized = json.dumps(evidence, default=str, sort_keys=True)
+    serialized = _serialize_prompt_json(evidence)
     if len(serialized) > max_chars:
         raise EvidencePromptTooLarge(
             f"evidence JSON exceeds hard limit ({len(serialized)} > {max_chars})"
@@ -53,32 +68,46 @@ def evidence_hash(evidence: list[dict[str, Any]]) -> str:
     Physical edge UUIDs are deliberately removed: a bitemporal rewrite of the
     same logical ``(source, target, kind)`` edge is not new evidence.
     """
-    canonical: list[dict[str, Any]] = []
+    canonical: list[tuple[str, str, str, str, str]] = []
     for ev in evidence:
         item = dict(ev)
         if item.get("kind") == "edge":
             item.pop("edge_id", None)
-        canonical.append(item)
-    canonical.sort(
-        key=lambda item: (
-            str(item.get("kind") or ""),
-            str(item.get("node_id") or item.get("source_id") or ""),
-            str(item.get("target_id") or ""),
-            str(item.get("edge_kind") or ""),
-            json.dumps(item, sort_keys=True, separators=(",", ":"), default=str),
-        )
-    )
-    h = hashlib.sha256()
-    h.update(b"mnemos.evidence.v2\0")
-    h.update(
-        json.dumps(
-            canonical,
+        serialized = json.dumps(
+            item,
             sort_keys=True,
             separators=(",", ":"),
             default=str,
-        ).encode()
-    )
+        )
+        canonical.append(
+            (
+                str(item.get("kind") or ""),
+                str(item.get("node_id") or item.get("source_id") or ""),
+                str(item.get("target_id") or ""),
+                str(item.get("edge_kind") or ""),
+                serialized,
+            )
+        )
+    canonical.sort()
+
+    # Reuse the exact JSON text that completed the historical sort key.  A
+    # compact JSON list is precisely ``[item,item]``, so streaming those bytes
+    # avoids serializing every evidence row a second time and avoids allocating
+    # one full-list JSON string plus its encoded copy.
+    h = hashlib.sha256(b"mnemos.evidence.v2\0[")
+    separator = b""
+    for item in canonical:
+        h.update(separator)
+        h.update(item[4].encode())
+        separator = b","
+    h.update(b"]")
     return h.hexdigest()
+
+
+def _json_utf8_size(obj: Any) -> int:
+    """Return the exact UTF-8 byte size of Mnemos' canonical prompt JSON."""
+
+    return len(_serialize_prompt_json(obj).encode("utf-8"))
 
 
 def _approx_tokens(obj: Any) -> int:
@@ -95,8 +124,7 @@ def _approx_tokens(obj: Any) -> int:
     approximation.
     """
 
-    serialized = json.dumps(obj, default=str, sort_keys=True)
-    return max(1, len(serialized.encode("utf-8")))
+    return max(1, _json_utf8_size(obj))
 
 
 def _bounded_item(item: dict[str, Any], max_tokens: int) -> dict[str, Any]:
@@ -161,16 +189,27 @@ def pack_by_budget(
         raise ValueError("max_tokens must be >= 128")
     chunks: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
+    # Default ``json.dumps`` renders a list as ``[item, item]``.  Track that
+    # exact byte size incrementally so appending N items does not repeatedly
+    # serialize the complete prefix.  ``ensure_ascii=True`` is intentionally
+    # unchanged, so provider input, chunk boundaries, and validator scope are
+    # byte-for-byte identical to the historical implementation.
+    current_size = 2  # ``[]``
     for item in items:
         bounded_item = _bounded_item(item, max_tokens)
-        candidate = [*current, bounded_item]
-        if current and _approx_tokens(candidate) > max_tokens:
+        item_size = _json_utf8_size(bounded_item)
+        candidate_size = current_size + item_size + (
+            _PROMPT_JSON_LIST_SEPARATOR_BYTES if current else 0
+        )
+        if current and candidate_size > max_tokens:
             chunks.append(current)
             current = []
-            candidate = [bounded_item]
-        if _approx_tokens(candidate) > max_tokens:
+            current_size = 2
+            candidate_size = current_size + item_size
+        if candidate_size > max_tokens:
             raise ValueError("bounded evidence item exceeds max_tokens")
         current.append(bounded_item)
+        current_size = candidate_size
     if current:
         chunks.append(current)
     if any(_approx_tokens(chunk) > max_tokens for chunk in chunks):
