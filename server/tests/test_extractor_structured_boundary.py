@@ -11,6 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.extractor.agent_sdk import (
+    SUMMARY_CANDIDATE_CONTRACT,
+    SummaryCandidateContext,
+    _summary_candidate,
+    normalize_summary_candidate_payload,
+)
 from app.extractor.schema import (
     MAX_CLAIMS,
     ExtractorSchemaError,
@@ -18,6 +24,8 @@ from app.extractor.schema import (
     parse_and_normalize_extractor_payload,
 )
 from app.extractor.validator import validate_claims
+
+pytestmark = pytest.mark.usefixtures("fake_llm_attempt_callbacks")
 
 
 def _payload() -> dict:
@@ -50,6 +58,46 @@ def test_canonical_normalizer_is_pure_and_idempotent():
     assert canonical == normalize_extractor_payload(canonical)
     assert canonical["summary"] == "Reads the current graph."
     assert canonical["claims"][0]["claim"] == "The symbol has a caller."
+
+
+def test_summary_candidate_wrapper_is_pure_strict_and_idempotent():
+    raw = {"contract": SUMMARY_CANDIDATE_CONTRACT, **_payload()}
+    before = json.loads(json.dumps(raw))
+
+    canonical = normalize_summary_candidate_payload(raw)
+    candidate = _summary_candidate(
+        canonical,
+        context=SummaryCandidateContext(
+            project_id=uuid.uuid4(),
+            binding_fingerprint="a" * 64,
+        ),
+    )
+
+    assert raw == before
+    assert canonical == normalize_summary_candidate_payload(canonical)
+    assert canonical["contract"] == SUMMARY_CANDIDATE_CONTRACT
+    assert candidate.contract_name == SUMMARY_CANDIDATE_CONTRACT
+    assert candidate.binding_fingerprint == "a" * 64
+    assert candidate.payload == canonical
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"contract": SUMMARY_CANDIDATE_CONTRACT, "summary": "secret-value"},
+        {
+            "contract": SUMMARY_CANDIDATE_CONTRACT,
+            **_payload(),
+            "unexpected": "secret-value",
+        },
+        {"contract": "mnemos.summary.v9", **_payload()},
+    ],
+)
+def test_summary_candidate_wrapper_rejects_drift_without_echo(payload):
+    with pytest.raises((ExtractorSchemaError, ValueError)) as exc_info:
+        normalize_summary_candidate_payload(payload)
+
+    assert "secret-value" not in str(exc_info.value)
 
 
 def test_supported_provider_dialects_converge_to_one_shape():
@@ -106,6 +154,8 @@ def test_legacy_omissions_receive_explicit_canonical_defaults():
             "$.claims[0].evidence[0].edge_id",
         ),
         ({"summary": 42}, "$.summary"),
+        ({"summary": "db\x00break"}, "$.summary"),
+        ({"summary": "invalid-\ud800-surrogate"}, "$.summary"),
         ({"summary": "s", "untrusted_metadata": {}}, "$"),
         (
             {
@@ -231,10 +281,14 @@ async def test_agent_sdk_mock_envelope_runs_through_real_boundary(monkeypatch):
     class AssistantMessage:
         def __init__(self, content):
             self.content = content
+            self.model = agent_sdk.AGENT_SDK_BUDGETED_MODEL
+            self.error = None
 
     class ResultMessage:
         def __init__(self, is_error=False):
             self.is_error = is_error
+            self.subtype = "success"
+            self.stop_reason = "end_turn"
 
     class ClaudeAgentOptions:
         def __init__(self, **kwargs):
@@ -257,8 +311,8 @@ async def test_agent_sdk_mock_envelope_runs_through_real_boundary(monkeypatch):
     )
     monkeypatch.delenv("MNEMOS_DISABLE_AGENT_SDK", raising=False)
     with patch.dict("sys.modules", {"claude_agent_sdk": fake_module}):
-        result = await agent_sdk.summarize_via_agent_sdk(
-            model="claude-test",
+            result = await agent_sdk.summarize_via_agent_sdk(
+                model=agent_sdk.AGENT_SDK_BUDGETED_MODEL,
             level=1,
             target_id="sym:x",
             evidence=[],
@@ -273,15 +327,101 @@ async def test_agent_sdk_mock_envelope_runs_through_real_boundary(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "exception_name"),
+    [
+        ("transport", "AgentSDKTransportError"),
+        ("result", "AgentSDKResultError"),
+        ("output", "AgentSDKOutputLimitError"),
+    ],
+)
+async def test_agent_sdk_real_generator_failures_remain_typed(
+    monkeypatch,
+    failure: str,
+    exception_name: str,
+) -> None:
+    from app.extractor import agent_sdk
+
+    class TextBlock:
+        def __init__(self, text):
+            self.text = text
+
+    class AssistantMessage:
+        def __init__(self, content):
+            self.content = content
+            self.model = "claude-sonnet-4-6"
+            self.error = None
+
+    class ResultMessage:
+        def __init__(self, is_error=False):
+            self.is_error = is_error
+            self.subtype = "success"
+            self.stop_reason = "end_turn"
+
+    class ClaudeAgentOptions:
+        def __init__(self, **_kwargs):
+            pass
+
+    async def query(**_kwargs):
+        if failure == "transport":
+            raise RuntimeError("provider detail must not escape")
+        if failure == "result":
+            yield ResultMessage(True)
+            return
+        yield AssistantMessage(
+            [TextBlock("x" * (agent_sdk.MAX_AGENT_SUMMARY_OUTPUT_BYTES + 1))]
+        )
+
+    fake_module = type(
+        "FakeAgentSDK",
+        (),
+        {
+            "AssistantMessage": AssistantMessage,
+            "ClaudeAgentOptions": ClaudeAgentOptions,
+            "ResultMessage": ResultMessage,
+            "TextBlock": TextBlock,
+            "query": query,
+        },
+    )
+    events: list[str] = []
+
+    async def reserve() -> float:
+        events.append("budget")
+        return 30.0
+
+    def dispatch() -> None:
+        events.append("dispatch")
+
+    expected = getattr(agent_sdk, exception_name)
+    monkeypatch.delenv("MNEMOS_DISABLE_AGENT_SDK", raising=False)
+    with patch.dict("sys.modules", {"claude_agent_sdk": fake_module}):
+        with pytest.raises(expected):
+            await agent_sdk.summarize_via_agent_sdk(
+                model="claude-sonnet-4-6",
+                level=1,
+                target_id="sym:x",
+                evidence=[],
+                on_provider_start=reserve,
+                on_provider_dispatch=dispatch,
+            )
+
+    assert events == ["dispatch"]
+
+
+@pytest.mark.asyncio
 async def test_direct_provider_rejects_schema_invalid_reply(monkeypatch):
     from app.extractor.agent import (
         FALLBACK_ANTHROPIC_SCHEMA,
         Extractor,
     )
 
-    response = MagicMock(
+    response = SimpleNamespace(
+        id="msg-schema-invalid",
+        model="claude-sonnet-4-6",
+        stop_reason="end_turn",
         content=[
-            MagicMock(
+            SimpleNamespace(
+                type="text",
                 text=json.dumps(
                     {
                         "summary": "looks plausible",
@@ -290,7 +430,7 @@ async def test_direct_provider_rejects_schema_invalid_reply(monkeypatch):
                 )
             )
         ],
-        usage=MagicMock(output_tokens=10),
+        usage=SimpleNamespace(input_tokens=0, output_tokens=10),
     )
     fake_client = MagicMock()
     fake_client.messages.create = AsyncMock(return_value=response)
@@ -335,9 +475,12 @@ async def test_failed_remote_response_never_charges_a_second_backend(monkeypatch
 async def test_direct_provider_records_input_plus_output_tokens(monkeypatch):
     from app.extractor.agent import Extractor
 
-    response = MagicMock(
-        content=[MagicMock(text='{"summary": "grounded"}')],
-        usage=MagicMock(input_tokens=120, output_tokens=30),
+    response = SimpleNamespace(
+        id="msg-grounded",
+        model="claude-sonnet-4-6",
+        stop_reason="end_turn",
+        content=[SimpleNamespace(type="text", text='{"summary": "grounded"}')],
+        usage=SimpleNamespace(input_tokens=120, output_tokens=30),
     )
     fake_client = MagicMock()
     fake_client.messages.create = AsyncMock(return_value=response)
@@ -356,10 +499,13 @@ async def test_direct_provider_records_input_plus_output_tokens(monkeypatch):
 async def test_direct_provider_ignores_non_text_envelope_blocks(monkeypatch):
     from app.extractor.agent import FALLBACK_ANTHROPIC_JSON, Extractor
 
-    tool_block = MagicMock(spec=["type"], type="tool_use")
-    response = MagicMock(
+    tool_block = SimpleNamespace(type="tool_use")
+    response = SimpleNamespace(
+        id="msg-no-text",
+        model="claude-sonnet-4-6",
+        stop_reason="end_turn",
         content=[tool_block],
-        usage=MagicMock(input_tokens=4, output_tokens=2),
+        usage=SimpleNamespace(input_tokens=4, output_tokens=2),
     )
     fake_client = MagicMock()
     fake_client.messages.create = AsyncMock(return_value=response)

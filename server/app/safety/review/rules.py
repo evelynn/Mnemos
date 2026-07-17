@@ -11,8 +11,14 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.safety.review.types import Finding
+from app.safety.review.types import Finding, Severity
 from app.safety.self_review import review_diff
+
+
+_SEVERITY_MAP: dict[str, Severity] = {
+    "error": "critical",
+    "warning": "warning",
+}
 
 
 async def run(
@@ -23,14 +29,19 @@ async def run(
     diff: str,
 ) -> list[Finding]:
     result = review_diff(diff)
-    return [
-        Finding(
-            pass_name="rules",
-            severity=f.severity,  # type: ignore[arg-type]
-            rule=f.rule,
-            location=f.location,
-            message=f.message,
-            evidence=[],
+    findings: list[Finding] = []
+    for source in result.findings:
+        severity = _SEVERITY_MAP.get(source.severity)
+        if severity is None:
+            raise ValueError("self-review emitted an unsupported severity")
+        findings.append(
+            Finding(
+                pass_name="rules",
+                severity=severity,
+                rule=source.rule,
+                location=source.location,
+                message=source.message,
+                evidence=[],
+            )
         )
-        for f in result.findings
-    ]
+    return findings

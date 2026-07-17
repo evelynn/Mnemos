@@ -48,7 +48,7 @@ async def require_readable_current_graph(
             detail={
                 "schema": "mnemos.error.v1",
                 "error": GRAPH_SNAPSHOT_UNAVAILABLE_CODE,
-                "reason": str(exc),
+                "reason": GRAPH_SNAPSHOT_UNAVAILABLE_CODE,
                 "repair": {
                     "scope": "full",
                     "reason": "no atomically published graph is ready",
@@ -71,7 +71,7 @@ async def require_readable_current_graph(
                 detail={
                     "schema": "mnemos.error.v1",
                     "error": GRAPH_SNAPSHOT_CHANGED_CODE,
-                    "reason": str(exc),
+                    "reason": GRAPH_SNAPSHOT_CHANGED_CODE,
                     "retryable": True,
                     "snapshot": {
                         "generation": stamp.generation,

@@ -143,6 +143,26 @@ class Summary(Base):
     evidence_hash: Mapped[Optional[str]] = mapped_column(
         String(64), nullable=True
     )
+    # Durable model output is first persisted as an encrypted semantic
+    # candidate.  These three fields bind the grounded Summary projection to
+    # its final candidate-producing physical attempt without forcing legacy/
+    # deterministic rows to invent model provenance. For multi-chunk rollups,
+    # ``tokens_used`` and ``model_used`` are the immutable receipt projection
+    # for that final call. Whole map+reduce usage is calculated from the
+    # component LLMCall ledger rather than copied from mutable caller state.
+    # Writers populate the triplet atomically; the database rejects every
+    # partially populated shape.
+    llm_attempt_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("llm_calls.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    semantic_binding_fingerprint: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    projection_sha256: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
     model_used: Mapped[str] = mapped_column(String, nullable=False)
     tokens_used: Mapped[Optional[int]] = mapped_column(nullable=True)
     # PR-138b — when the extractor fell through to the stub path, this
@@ -186,6 +206,13 @@ class Summary(Base):
                 "validated_graph_generation IS NOT NULL"
             ),
         ),
+        Index(
+            "uq_summaries_llm_attempt",
+            "llm_attempt_id",
+            unique=True,
+            postgresql_where=text("llm_attempt_id IS NOT NULL"),
+            sqlite_where=text("llm_attempt_id IS NOT NULL"),
+        ),
         CheckConstraint(
             "(validated_graph_generation IS NULL AND "
             "validated_overlay_generation IS NULL AND validated_at IS NULL) OR "
@@ -194,6 +221,162 @@ class Summary(Base):
             "validated_at IS NOT NULL AND validated_graph_generation > 0 AND "
             "validated_overlay_generation >= 0)",
             name="ck_summaries_graph_validation_marker",
+        ),
+        CheckConstraint(
+            "(llm_attempt_id IS NULL AND "
+            "semantic_binding_fingerprint IS NULL AND "
+            "projection_sha256 IS NULL) OR "
+            "(llm_attempt_id IS NOT NULL AND "
+            "semantic_binding_fingerprint IS NOT NULL AND "
+            "projection_sha256 IS NOT NULL)",
+            name="ck_summaries_llm_provenance_shape",
+        ),
+        CheckConstraint(
+            "(semantic_binding_fingerprint IS NULL AND "
+            "projection_sha256 IS NULL) OR "
+            "(semantic_binding_fingerprint IS NOT NULL AND "
+            "projection_sha256 IS NOT NULL AND "
+            "length(semantic_binding_fingerprint) = 64 AND "
+            "semantic_binding_fingerprint = "
+            "lower(semantic_binding_fingerprint) AND "
+            "length(replace(replace(replace(replace(replace(replace("
+            "replace(replace(replace(replace(replace(replace(replace("
+            "replace(replace(replace(semantic_binding_fingerprint, "
+            "'0', ''), '1', ''), '2', ''), '3', ''), '4', ''), "
+            "'5', ''), '6', ''), '7', ''), '8', ''), '9', ''), "
+            "'a', ''), 'b', ''), 'c', ''), 'd', ''), 'e', ''), "
+            "'f', '')) = 0 AND "
+            "length(projection_sha256) = 64 AND "
+            "projection_sha256 = lower(projection_sha256) AND "
+            "length(replace(replace(replace(replace(replace(replace("
+            "replace(replace(replace(replace(replace(replace(replace("
+            "replace(replace(replace(projection_sha256, '0', ''), "
+            "'1', ''), '2', ''), '3', ''), '4', ''), '5', ''), "
+            "'6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), "
+            "'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '')) = 0)",
+            name="ck_summaries_llm_provenance_sha256",
+        ),
+    )
+
+
+class LLMProjectBudgetAccount(Base):
+    """Per-project serialization row and immutable hard-dollar policy snapshot."""
+
+    __tablename__ = "llm_project_budget_accounts"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True
+    )
+    policy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    cap_usd: Mapped[Decimal] = mapped_column(Numeric(20, 10), nullable=False)
+    window_sec: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "length(policy_version) BETWEEN 1 AND 32",
+            name="ck_llm_project_budget_accounts_policy_version",
+        ),
+        CheckConstraint(
+            "cap_usd > 0 AND window_sec >= 60",
+            name="ck_llm_project_budget_accounts_policy",
+        ),
+    )
+
+
+class LLMBudgetScope(Base):
+    """Crash-durable policy snapshot for optional physical LLM calls.
+
+    The deterministic index-first path does not need a scope.  An opt-in AI
+    operation creates one policy snapshot before dispatch, then advances only
+    the reservation counters so a worker restart cannot reset its hard limits.
+    """
+
+    __tablename__ = "llm_budget_scopes"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    analysis_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    scope_kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    max_calls: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    max_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    max_output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    wall_time_sec: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    calls_reserved: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
+    input_tokens_reserved: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
+    output_tokens_reserved: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
+    exhausted_reason: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    deadline_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_llm_budget_scopes_project_started",
+            "project_id",
+            "started_at",
+        ),
+        Index("ix_llm_budget_scopes_analysis_run", "analysis_run_id"),
+        Index(
+            "ix_llm_budget_scopes_deadline",
+            "deadline_at",
+            "id",
+        ),
+        CheckConstraint(
+            "scope_kind IN ('analysis_run', 'request')",
+            name="ck_llm_budget_scopes_scope_kind",
+        ),
+        CheckConstraint(
+            "(scope_kind = 'analysis_run' AND analysis_run_id IS NOT NULL "
+            "AND id = analysis_run_id) OR "
+            "(scope_kind = 'request' AND analysis_run_id IS NULL)",
+            name="ck_llm_budget_scopes_identity",
+        ),
+        CheckConstraint(
+            "length(policy_version) BETWEEN 1 AND 32",
+            name="ck_llm_budget_scopes_policy_version",
+        ),
+        CheckConstraint(
+            "max_calls > 0 AND max_input_tokens > 0 AND "
+            "max_output_tokens > 0 AND wall_time_sec > 0",
+            name="ck_llm_budget_scopes_limits",
+        ),
+        CheckConstraint(
+            "calls_reserved >= 0 AND calls_reserved <= max_calls AND "
+            "input_tokens_reserved >= 0 AND "
+            "input_tokens_reserved <= max_input_tokens AND "
+            "output_tokens_reserved >= 0 AND "
+            "output_tokens_reserved <= max_output_tokens",
+            name="ck_llm_budget_scopes_reservations",
+        ),
+        CheckConstraint(
+            "deadline_at >= started_at",
+            name="ck_llm_budget_scopes_deadline",
+        ),
+        CheckConstraint(
+            "exhausted_reason IS NULL OR "
+            "length(exhausted_reason) BETWEEN 1 AND 64",
+            name="ck_llm_budget_scopes_exhausted_reason",
         ),
     )
 
@@ -268,6 +451,15 @@ class LLMCall(Base):
     requested_max_output_tokens: Mapped[Optional[int]] = mapped_column(
         BigInteger, nullable=True
     )
+    reserved_input_tokens: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    reserved_output_tokens: Mapped[Optional[int]] = mapped_column(
+        BigInteger, nullable=True
+    )
+    reservation_price_contract_id: Mapped[Optional[str]] = mapped_column(
+        String(96), nullable=True
+    )
     attempt_status: Mapped[Optional[str]] = mapped_column(String(24), nullable=True)
     result_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     failure_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
@@ -325,7 +517,25 @@ class LLMCall(Base):
         Index("ix_llm_calls_project_generated", "project_id", "generated_at"),
         Index("ix_llm_calls_analysis_run", "analysis_run_id"),
         Index("ix_llm_calls_budget_scope", "budget_scope_id"),
+        Index(
+            "ix_llm_calls_open_budget_started",
+            "budget_scope_id",
+            "started_at",
+            postgresql_where=text(
+                "contract_version = 1 AND attempt_status = 'started'"
+            ),
+            sqlite_where=text(
+                "contract_version = 1 AND attempt_status = 'started'"
+            ),
+        ),
         Index("ix_llm_calls_project_started", "project_id", "started_at"),
+        Index(
+            "ix_llm_calls_project_reserved_generated",
+            "project_id",
+            "generated_at",
+            postgresql_where=text("reserved_cost_usd IS NOT NULL"),
+            sqlite_where=text("reserved_cost_usd IS NOT NULL"),
+        ),
         UniqueConstraint(
             "operation_id",
             "attempt_no",
@@ -343,6 +553,8 @@ class LLMCall(Base):
             "(estimated_input_tokens IS NULL OR estimated_input_tokens >= 0) AND "
             "(requested_max_output_tokens IS NULL OR "
             "requested_max_output_tokens >= 0) AND "
+            "(reserved_input_tokens IS NULL OR reserved_input_tokens >= 0) AND "
+            "(reserved_output_tokens IS NULL OR reserved_output_tokens >= 0) AND "
             "(duration_ms IS NULL OR duration_ms >= 0) AND "
             "(input_tokens IS NULL OR input_tokens >= 0) AND "
             "(uncached_input_tokens IS NULL OR uncached_input_tokens >= 0) AND "
@@ -365,6 +577,18 @@ class LLMCall(Base):
             "(estimated_cost_usd IS NULL OR estimated_cost_usd >= 0) AND "
             "(reserved_cost_usd IS NULL OR reserved_cost_usd >= 0)",
             name="ck_llm_calls_cost_values",
+        ),
+        CheckConstraint(
+            "(reserved_input_tokens IS NULL AND reserved_output_tokens IS NULL "
+            "AND reservation_price_contract_id IS NULL "
+            "AND reserved_cost_usd IS NULL) OR "
+            "(reserved_input_tokens > 0 AND reserved_output_tokens > 0 "
+            "AND reservation_price_contract_id IS NOT NULL "
+            "AND length(reservation_price_contract_id) BETWEEN 1 AND 96 "
+            "AND reserved_cost_usd > 0 "
+            "AND estimated_input_tokens <= reserved_input_tokens "
+            "AND requested_max_output_tokens = reserved_output_tokens)",
+            name="ck_llm_calls_cost_reservation_shape",
         ),
         CheckConstraint(
             "(input_tokens IS NULL OR uncached_input_tokens IS NULL OR "
@@ -402,14 +626,16 @@ class LLMCall(Base):
             "cache_write_input_tokens IS NOT NULL OR "
             "reasoning_output_tokens IS NOT NULL OR "
             "tool_input_tokens IS NOT NULL OR provider_total_tokens IS NOT NULL OR "
-            "provider_turn_count IS NOT NULL OR reported_cost_usd IS NOT NULL)) OR "
+            "provider_turn_count IS NOT NULL OR reported_cost_usd IS NOT NULL OR "
+            "estimated_cost_usd IS NOT NULL)) OR "
             "(usage_status = 'legacy_total_only' AND total_tokens IS NOT NULL "
             "AND input_tokens IS NULL AND uncached_input_tokens IS NULL AND "
             "output_tokens IS NULL AND visible_output_tokens IS NULL AND "
             "cache_read_input_tokens IS NULL AND "
             "cache_write_input_tokens IS NULL AND "
             "reasoning_output_tokens IS NULL AND tool_input_tokens IS NULL AND "
-            "provider_turn_count IS NULL AND reported_cost_usd IS NULL) OR "
+            "provider_turn_count IS NULL AND reported_cost_usd IS NULL AND "
+            "estimated_cost_usd IS NULL) OR "
             "(usage_status IN ('unavailable', 'lost_after_dispatch', "
             "'legacy_unknown') AND input_tokens IS NULL AND "
             "uncached_input_tokens IS NULL AND output_tokens IS NULL AND "
@@ -418,7 +644,7 @@ class LLMCall(Base):
             "cache_write_input_tokens IS NULL AND "
             "reasoning_output_tokens IS NULL AND tool_input_tokens IS NULL AND "
             "provider_total_tokens IS NULL AND provider_turn_count IS NULL AND "
-            "reported_cost_usd IS NULL)",
+            "reported_cost_usd IS NULL AND estimated_cost_usd IS NULL)",
             name="ck_llm_calls_usage_status_shape",
         ),
         CheckConstraint(

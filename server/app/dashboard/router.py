@@ -157,12 +157,18 @@ async def login_submit(
         try:
             await db.rollback()
         except Exception:  # noqa: BLE001
-            log.exception("auth.dashboard_login_rollback_failed")
+            log.error(
+                "auth.dashboard_login_rollback_failed "
+                "failure_code=auth_storage_failure"
+            )
         if token is not None:
             try:
                 await delete_session(token)
             except Exception:  # noqa: BLE001
-                log.exception("auth.dashboard_login_session_cleanup_failed")
+                log.error(
+                    "auth.dashboard_login_session_cleanup_failed "
+                    "failure_code=session_cleanup_failed"
+                )
         raise
 
     redirect = RedirectResponse(url="/", status_code=status.HTTP_303_SEE_OTHER)

@@ -27,7 +27,7 @@ from app.extractor.agent_flow import (  # noqa: E402
     build_flow_summary_content,
 )
 from app.mcp.queries import get_module_summary, list_flows  # noqa: E402
-from app.models.findings import Summary  # noqa: E402
+from app.models.findings import LLMCall, Summary  # noqa: E402
 from app.models.graph import AnalysisRun, Edge, GraphHead, Node  # noqa: E402
 from app.models.organization import Organization  # noqa: E402
 from app.models.projects import Project  # noqa: E402
@@ -226,6 +226,7 @@ async def _database():
             Node.__table__,
             Edge.__table__,
             GraphHead.__table__,
+            LLMCall.__table__,
             Summary.__table__,
         ):
             await connection.run_sync(table.create)
@@ -568,6 +569,7 @@ async def test_current_l4_retires_validated_lineage_but_preserves_history(
 
     from app.api import flow as flow_api
     from app.graph_publication import GraphReadStamp
+    from app.llm.contracts import ResultStatus
     from app.source_snapshot import GitSourceSnapshot
 
     engine, Session = await _database()
@@ -576,6 +578,7 @@ async def test_current_l4_retires_validated_lineage_but_preserves_history(
     now = datetime.now(tz=timezone.utc)
     stale_id = uuid.uuid4()
     historical_id = uuid.uuid4()
+    attempt_id = uuid.uuid4()
     canonical_flow = _normalise(
         {
             "summary": "Create an order.",
@@ -620,13 +623,33 @@ async def test_current_l4_retires_validated_lineage_but_preserves_history(
         "truncated": False,
     }
 
-    async def _analyze(**_kwargs):  # noqa: ANN003
+    async def _analyze(**kwargs):  # noqa: ANN003
+        kwargs["attempt_state"].attempt_id = attempt_id
         return {"flow": canonical_flow, "source_scope": source_scope}
+
+    async def _lock_candidate(_db, **_kwargs):  # noqa: ANN001, ANN003
+        return SimpleNamespace(
+            candidate_status="candidate",
+            result_status=ResultStatus.PENDING,
+            payload=canonical_flow,
+            resolved_model="test-provider",
+            requested_model="test-provider",
+            total_tokens=None,
+        )
+
+    async def _classify(_db, **_kwargs):  # noqa: ANN001, ANN003
+        return None
 
     async def _audit(**_kwargs):  # noqa: ANN003
         return None
 
     monkeypatch.setattr(flow_api, "analyze_flow_via_agent_sdk", _analyze)
+    monkeypatch.setattr(
+        flow_api,
+        "lock_semantic_candidate_for_product",
+        _lock_candidate,
+    )
+    monkeypatch.setattr(flow_api, "classify_attempt_result", _classify)
     monkeypatch.setattr(flow_api, "audit_record", _audit)
 
     async with Session() as session:
@@ -662,6 +685,17 @@ async def test_current_l4_retires_validated_lineage_but_preserves_history(
                 overlay_generation=3,
                 state="ready",
                 published_at=now,
+            )
+        )
+        session.add(
+            LLMCall(
+                id=attempt_id,
+                project_id=project_id,
+                analysis_run_id=None,
+                target_id="flow:create-order",
+                level=4,
+                model_used="test-provider",
+                status="completed",
             )
         )
         session.add_all(
@@ -741,6 +775,7 @@ async def test_current_l4_retires_validated_lineage_but_preserves_history(
     assert historical.validated_graph_generation is None
     assert historical.validated_overlay_generation is None
     assert replacement.superseded_by is None
+    assert replacement.llm_attempt_id == attempt_id
     assert replacement.validated_graph_generation == 2
     assert replacement.validated_overlay_generation == 3
     assert [

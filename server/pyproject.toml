@@ -38,10 +38,13 @@ dependencies = [
     "prometheus-client>=0.20",
     "pyjwt[crypto]>=2.9",
     "sqlglot>=25",
-    # PR-125 — Claude Agent SDK lets the L1~L3 extractor use the
-    # operator's Claude Code subscription when ANTHROPIC_API_KEY isn't
-    # configured. Falls back to stub when neither is present.
-    "claude-agent-sdk>=0.2",
+    # The isolated one-shot contract is verified against 0.2.118's explicit
+    # tools/settings/skills, terminal stop_reason, and AssistantMessage
+    # metadata.  Keep the production resolver on that exact wire contract;
+    # upgrade only with contract tests and a deliberate compatibility review.
+    # Runtime auth provenance is recorded separately; SDK presence alone does
+    # not imply subscription billing.
+    "claude-agent-sdk==0.2.118",
 ]
 
 [project.optional-dependencies]
@@ -66,11 +69,9 @@ local = [
     "aiosqlite>=0.20",
     "fakeredis>=2.20",
 ]
-# Vector / semantic search — spec §11.3 "벡터 + BM25 앙상블 (RRF)".
-# Optional so a base install stays slim. Activate with
-# ``pip install mnemos-platform[search]``, run alembic 0022 to add
-# the embedding column, then set MNEMOS_EMBEDDING_PROVIDER + the
-# provider's key (VOYAGE_API_KEY / OPENAI_API_KEY).
+# Reserved vector / semantic-search scaffold. Cloud embedding dispatch stays
+# fail-disabled until it has project-scoped durable accounting and immutable
+# worst-price authorization; installing this extra does not enable a provider.
 search = [
     "pgvector>=0.3",
 ]

@@ -156,7 +156,7 @@ async def test_hard_deadline_covers_blocked_record_ingest(monkeypatch, tmp_path)
     async with sessions() as session:
         stage = (await session.execute(select(AnalysisStage))).scalar_one()
         assert stage.status == "partial"
-        assert "hard deadline" in (stage.error_log or "")
+        assert stage.error_log == "stage_budget_exceeded"
     assert any(event.get("event") == "stage_partial" for event in bus.events)
     await engine.dispose()
 

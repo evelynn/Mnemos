@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import uuid
 from types import SimpleNamespace
@@ -208,6 +210,7 @@ async def test_project_lock_contention_requeues_without_losing_revision(
 @pytest.mark.asyncio
 async def test_project_lock_retry_enqueue_failure_has_no_mixed_snapshot_block(
     monkeypatch,
+    caplog,
 ):
     from app.orchestrator import jobs
 
@@ -216,7 +219,9 @@ async def test_project_lock_retry_enqueue_failure_has_no_mixed_snapshot_block(
 
     class _BrokenQueue:
         async def enqueue_job(self, *args, **kwargs):
-            raise ConnectionError("redis unavailable")
+            raise ConnectionError(
+                "redis unavailable password=lock-retry-secret-value"
+            )
 
     async def _busy(_project_id, _run_id):
         return False
@@ -226,6 +231,7 @@ async def test_project_lock_retry_enqueue_failure_has_no_mixed_snapshot_block(
 
     monkeypatch.setattr(jobs, "_acquire_project_lock", _busy)
     monkeypatch.setattr(jobs, "_reclaim_terminal_project_lock", _not_reclaimable)
+    caplog.set_level(logging.DEBUG, logger=jobs.__name__)
     bus = _Bus()
     await jobs.run_ingest(
         {"progress": bus, "redis": _BrokenQueue()},
@@ -241,10 +247,14 @@ async def test_project_lock_retry_enqueue_failure_has_no_mixed_snapshot_block(
         assert run.status == "failed"
         assert run.started_at is None
         assert run.completed_at is not None
-        assert "lock_retry_enqueue_failed:ConnectionError" in run.error_log
+        assert run.error_log == "analysis_dependency_unavailable"
         assert (
             await find_unpublished_refresh(session, project_id=project_id)
         ) is None
+    projected = json.dumps(bus.events, sort_keys=True)
+    assert "analysis_dependency_unavailable" in projected
+    assert "lock-retry-secret-value" not in projected
+    assert "lock-retry-secret-value" not in caplog.text
     await engine.dispose()
 
 
@@ -331,8 +341,9 @@ async def test_only_definitively_stopped_owner_lock_is_reclaimed(
 
 
 @pytest.mark.asyncio
-async def test_seen_index_init_failure_terminalizes_and_releases_project_lock(
+async def test_secret_bearing_ingest_failure_is_sanitized_in_db_event_and_log(
     monkeypatch,
+    caplog,
 ):
     from app.orchestrator import jobs
 
@@ -348,11 +359,16 @@ async def test_seen_index_init_failure_terminalizes_and_releases_project_lock(
 
     class _BrokenSeenIndex:
         def __init__(self, **_kwargs):
-            raise OSError("temporary index unavailable")
+            raise OSError(
+                "temporary index unavailable "
+                "postgresql://admin:db-secret@db.invalid/mnemos "
+                "api_key=provider-secret source=source-secret"
+            )
 
     monkeypatch.setattr(jobs, "_acquire_project_lock", _acquired)
     monkeypatch.setattr(jobs, "_release_project_lock", _release)
     monkeypatch.setattr(jobs, "SeenFactIndex", _BrokenSeenIndex)
+    caplog.set_level(logging.DEBUG, logger=jobs.__name__)
     bus = _Bus()
     await jobs.run_ingest(
         {"progress": bus},
@@ -368,10 +384,20 @@ async def test_seen_index_init_failure_terminalizes_and_releases_project_lock(
         assert run.status == "failed"
         assert run.started_at is not None
         assert run.completed_at is not None
-        assert run.error_log == "temporary index unavailable"
+        assert run.error_log == "analysis_io_failure"
         assert run.stats["seen_index"]["storage"] == "not_initialized"
     assert released == [(project_id, run_id)]
-    assert any(event.get("event") == "run_failed" for event in bus.events)
+    failed_event = next(event for event in bus.events if event.get("event") == "run_failed")
+    assert failed_event["error"] == "analysis_io_failure"
+    projections = "\n".join(
+        (
+            run.error_log or "",
+            json.dumps(bus.events, sort_keys=True),
+            caplog.text,
+        )
+    )
+    for secret in ("db-secret", "provider-secret", "source-secret"):
+        assert secret not in projections
     await engine.dispose()
 
 

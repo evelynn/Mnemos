@@ -32,6 +32,8 @@ import pytest
 
 from app.extractor.agent import Extractor, ExtractorResult
 
+pytestmark = pytest.mark.usefixtures("fake_llm_attempt_callbacks")
+
 
 # ─── stub path — runs without ANTHROPIC_API_KEY ────────────────────
 
@@ -103,11 +105,16 @@ async def test_real_path_triggered_when_api_key_set():
     class FakeContent:
         def __init__(self, text):
             self.text = text
+            self.type = "text"
 
     class FakeUsage:
+        input_tokens = 0
         output_tokens = 42
 
     class FakeResp:
+        id = "msg-resolved-test"
+        model = "claude-sonnet-4-6"
+        stop_reason = "end_turn"
         content = [FakeContent(json.dumps({
             "summary": "real-mocked summary",
             "detailed": "longer mocked text",

@@ -15,7 +15,12 @@ this PR makes them visible).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
+
+import app.api.health as health_api
 
 _HEALTH = Path(__file__).resolve().parents[1] / "app" / "api" / "health.py"
 
@@ -75,3 +80,39 @@ def test_analyzers_check_uses_registry():
     # actually invokes — otherwise the probe drifts from reality.
     assert "from app.analyzers.registry import _BINARIES" in slab
     assert "shutil" in slab or "_shutil" in slab
+
+
+@pytest.mark.asyncio
+async def test_missing_paid_llm_budget_is_advisory_not_readiness_failure(
+    monkeypatch,
+):
+    monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
+
+    async def healthy_dependency() -> tuple[bool, str]:
+        return True, "ok"
+
+    monkeypatch.setattr(health_api, "_check_db", healthy_dependency)
+    monkeypatch.setattr(health_api, "_check_redis", healthy_dependency)
+    monkeypatch.setattr(health_api, "_check_worker", healthy_dependency)
+    monkeypatch.setattr(health_api, "_check_crypto", lambda: (True, "ok"))
+    monkeypatch.setattr(
+        health_api,
+        "_check_analyzers",
+        lambda: (True, "all_present"),
+    )
+
+    response = await health_api.ready()
+    body = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert body["status"] == "ok"
+    assert body["checks"]["llm_paid_dispatch"] == {
+        "ok": False,
+        "message": "disabled_budget_required",
+    }
+
+
+def test_positive_paid_llm_budget_is_reported_enabled(monkeypatch):
+    monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", "10")
+
+    assert health_api._check_llm_paid_dispatch() == (True, "enabled")

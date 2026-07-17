@@ -91,6 +91,63 @@ def _reset_async_singletons():
     _clear()
 
 
+@pytest.fixture
+def fake_llm_attempt_callbacks():
+    """Install an explicit in-memory accounting capability for adapter tests.
+
+    Product code must never synthesize this capability.  Focused provider
+    unit tests use it only to exercise response/terminal parsing after the
+    no-bypass guard; durable DB lifecycle tests install their real callbacks
+    inside this outer fixture and therefore still verify persistence.
+    """
+
+    from datetime import datetime, timezone
+
+    # Import through the extractor package's normal order. Importing lifecycle
+    # first would reverse the existing agent -> lifecycle dependency and create
+    # a partially-initialized module only in this test fixture.
+    from app.extractor import agent as _agent  # noqa: F401
+    from app.llm.lifecycle import (
+        AttemptCallbacks,
+        AttemptTicket,
+        LLMSemanticCandidateUnavailable,
+        _ATTEMPT_CALLBACKS,
+    )
+
+    async def start(metadata):  # noqa: ANN001
+        return AttemptTicket(
+            attempt_id=uuid.uuid4(),
+            operation_id=metadata.operation_id,
+            budget_scope_id=uuid.uuid4(),
+            started_at=datetime.now(tz=timezone.utc),
+            remaining_seconds=3_600.0,
+        )
+
+    async def finish(_ticket, _outcome):  # noqa: ANN001
+        return None
+
+    async def finish_candidate(_ticket, _outcome, _candidate):  # noqa: ANN001
+        return None
+
+    async def replay_candidate(_request):  # noqa: ANN001
+        raise LLMSemanticCandidateUnavailable(
+            "in-memory adapter fixture has no terminal candidate"
+        )
+
+    callbacks = AttemptCallbacks(
+        start=start,
+        finish=finish,
+        finish_candidate=finish_candidate,
+        replay_candidate=replay_candidate,
+        mark_provider_dispatch=lambda: None,
+    )
+    token = _ATTEMPT_CALLBACKS.set(callbacks)
+    try:
+        yield callbacks
+    finally:
+        _ATTEMPT_CALLBACKS.reset(token)
+
+
 @pytest.fixture(scope="session")
 def event_loop():
     """Session-scoped loop so async fixtures can share resources."""

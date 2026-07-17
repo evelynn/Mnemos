@@ -65,12 +65,12 @@ def test_stale_run_cron_covers_running_and_expired_queued_rows():
 
 def test_stale_run_cron_sets_error_log():
     body = _read(_CRON)
-    # The error log must explain what happened so an operator
-    # debugging a wedged-then-failed run knows it was the sweep,
-    # not the analyzer itself.
-    assert "[reset_stale_runs]" in body
-    assert "heartbeat lost" in body
-    assert "queued job expired before worker pickup" in body
+    # Durable diagnostics are closed codes: exception text can include
+    # credentials, connection strings, or provider payloads.
+    assert "error_log = 'analysis_timeout'" in body
+    assert 'run.error_log = "postprocess_timeout"' in body
+    assert "heartbeat lost" not in body
+    assert "queued job expired before worker pickup" not in body
 
 
 def test_stale_run_cutoff_is_longer_than_worker_timeout():
@@ -382,9 +382,7 @@ async def test_create_mr_rejects_hook_changed_commit_before_push(
 
 @pytest.mark.asyncio
 async def test_create_mr_surfaces_git_step_failure_clearly():
-    """When a git step fails the handler must say *which* step and
-    include the captured output so an operator can diagnose without
-    rerunning the failing job."""
+    """Git failures expose a stable step code without raw subprocess output."""
     from app.gitlab_client import mr as mr_mod
 
     async def fake_get_setting(session, key):
@@ -417,17 +415,13 @@ async def test_create_mr_surfaces_git_step_failure_clearly():
         )
 
     assert result.ok is False
-    assert "git_step_failed" in result.message
-    # The git output is preserved (truncated to 400 chars) so the
-    # operator can read the actual failure reason.
-    assert "not a git repository" in result.message
+    assert result.message == "git_step_failed:prepare_index"
+    assert "not a git repository" not in result.message
 
 
 @pytest.mark.asyncio
 async def test_create_mr_surfaces_gitlab_api_failure():
-    """python-gitlab raising an exception (network, auth, project
-    not found) must surface as ok=False with the cause in the
-    message — never a 500 to the operator."""
+    """GitLab failures expose a static code without upstream response text."""
     from app.gitlab_client import mr as mr_mod
 
     async def fake_get_setting(session, key):
@@ -462,5 +456,5 @@ async def test_create_mr_surfaces_gitlab_api_failure():
         )
 
     assert result.ok is False
-    assert "gitlab_api_failed" in result.message
-    assert "401" in result.message
+    assert result.message == "gitlab_api_failed"
+    assert "401" not in result.message

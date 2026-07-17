@@ -39,11 +39,13 @@ class _FakeDB:
         self,
         run,
         *,
+        graph_head_run=None,
         changed_generation: int | None = None,
         changed_overlay_generation: int | None = None,
         change_on_graph_head_read: int = 2,
     ) -> None:
         self.run = run
+        self.graph_head_run = run if graph_head_run is None else graph_head_run
         self.changed_generation = changed_generation
         self.changed_overlay_generation = changed_overlay_generation
         self.change_on_graph_head_read = change_on_graph_head_read
@@ -53,20 +55,21 @@ class _FakeDB:
     async def execute(self, statement):
         self.calls += 1
         # Default reads first pin the ready GraphHead, load exactly that run,
-        # then revalidate the head. Explicit historical reads select only the
-        # requested AnalysisRun. Keep this fake query-aware so repeated reads
-        # do not accidentally consume a positional response queue.
+        # then revalidate the head. Explicit selectors probe the head once;
+        # genuinely historical reads then load only the requested AnalysisRun.
+        # Keep this fake query-aware so repeated reads do not accidentally
+        # consume a positional response queue.
         selected_entities = [
             description.get("expr")
             for description in statement.column_descriptions
         ]
         if selected_entities == [GraphHead, AnalysisRun]:
             self.graph_head_reads += 1
-            if self.run is None:
+            if self.graph_head_run is None:
                 return _Result(None)
             generation = 1
             overlay_generation = 0
-            joined_run = self.run
+            joined_run = self.graph_head_run
             if (
                 self.graph_head_reads >= self.change_on_graph_head_read
                 and self.changed_generation is not None
@@ -74,16 +77,16 @@ class _FakeDB:
                 generation = self.changed_generation
                 changed_fields = published_run_fields(
                     generation=generation,
-                    published_at=self.run.completed_at,
-                    authoritative_sources=self.run.graph_authoritative_sources,
+                    published_at=self.graph_head_run.completed_at,
+                    authoritative_sources=self.graph_head_run.graph_authoritative_sources,
                     stats={
                         key: value
-                        for key, value in self.run.stats.items()
+                        for key, value in self.graph_head_run.stats.items()
                         if key != "graph_publication"
                     },
                 )
                 joined_run = SimpleNamespace(
-                    **{**self.run.__dict__, **changed_fields}
+                    **{**self.graph_head_run.__dict__, **changed_fields}
                 )
             if (
                 self.graph_head_reads >= self.change_on_graph_head_read
@@ -91,11 +94,11 @@ class _FakeDB:
             ):
                 overlay_generation = self.changed_overlay_generation
             head = SimpleNamespace(
-                project_id=self.run.project_id,
-                current_run_id=self.run.id,
+                project_id=self.graph_head_run.project_id,
+                current_run_id=self.graph_head_run.id,
                 generation=generation,
                 overlay_generation=overlay_generation,
-                published_at=self.run.completed_at,
+                published_at=self.graph_head_run.completed_at,
                 state="ready",
             )
             return _Result((head, joined_run))
@@ -389,7 +392,10 @@ async def test_default_read_discards_post_io_overlay_revision_change(tmp_path):
 
 async def test_explicit_historical_run_bypasses_current_graph_mixed_guard(tmp_path):
     repo = _make_repo(tmp_path)
-    db = _FakeDB(_run(repo))
+    historical_run = _run(repo)
+    current_run = _run(repo)
+    current_run.id = uuid.uuid4()
+    db = _FakeDB(historical_run, graph_head_run=current_run)
     result = await read_project_file(
         db,
         project_id=repo.project_id,
@@ -399,10 +405,13 @@ async def test_explicit_historical_run_bypasses_current_graph_mixed_guard(tmp_pa
     )
 
     assert "error" not in result
+    assert result["run_id"] == str(repo.run_id)
     assert result["revision"] == repo.revision
-    # Explicit historical reads select only the requested completed run; the
-    # current GraphHead probe is intentionally not issued.
-    assert db.calls == 1
+    # An explicit selector is probed against the ready head exactly once. This
+    # requested run is genuinely historical, so only its AnalysisRun is then
+    # loaded and no current-snapshot revalidation is issued around Git I/O.
+    assert db.graph_head_reads == 1
+    assert db.calls == 2
 
 
 async def test_explicit_historical_run_rejects_bool_generation_receipt(tmp_path):

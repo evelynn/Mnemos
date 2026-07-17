@@ -313,7 +313,7 @@ async def _git_show_window(
             await _terminate_process(process)
         else:
             await asyncio.wait_for(process.wait(), timeout=_GIT_TIMEOUT_SECONDS)
-        stderr = await stderr_task
+        await stderr_task
     except TimeoutError as exc:
         await _terminate_process(process)
         await stderr_task
@@ -326,16 +326,15 @@ async def _git_show_window(
         raise
 
     if not stopped_early and process.returncode != 0:
-        detail = stderr.decode("utf-8", errors="replace").strip()
         raise _GitReadError(
-            "source_read_failed", detail[-500:] or "git show failed"
+            "source_read_failed", "source_read_failed"
         )
     return window
 
 
 def _json_size(value: dict[str, Any]) -> int:
     # Match the MCP server's serializer defaults exactly.
-    return len(json.dumps(value, default=str).encode("utf-8"))
+    return len(json.dumps(value, allow_nan=False).encode("utf-8"))
 
 
 def _fit_text_payload(

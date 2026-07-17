@@ -79,9 +79,9 @@ async def record(
         try:
             await session.flush()
         except Exception:
-            log.exception(
-                "audit.write_failed (caller session) actor=%s action=%s target=%s",
-                actor, action, target,
+            log.error(
+                "audit.write_failed caller_session=true "
+                "failure_code=audit_storage_unavailable"
             )
             raise
         return
@@ -99,9 +99,9 @@ async def record(
             # Loud failure path — visible in centralised logs and
             # Prometheus (the caller's request still succeeds, but the
             # operator can see the audit-gap rate).
-            log.exception(
-                "audit.write_failed actor=%s action=%s target=%s",
-                actor, action, target,
+            log.error(
+                "audit.write_failed caller_session=false "
+                "failure_code=audit_storage_unavailable"
             )
             try:
                 from app.obs.metrics import audit_write_failures_total

@@ -88,10 +88,13 @@ async def create_mr_from_worktree(
         ["git", "checkout", "-b", branch],
         ["git", "add", "-A"],
     ]:
-        code, output = await _run(cmd)
+        code, _output = await _run(cmd)
         if code != 0:
             return MRResult(
-                ok=False, iid=None, url=None, message=f"git_step_failed: {' '.join(cmd)}: {output[:400]}"
+                ok=False,
+                iid=None,
+                url=None,
+                message="git_step_failed:prepare_index",
             )
 
     if expected_diff is not None:
@@ -120,13 +123,13 @@ async def create_mr_from_worktree(
         "-m",
         f"{plan_title} ({task_id})",
     ]
-    code, output = await _run(commit_cmd)
+    code, _output = await _run(commit_cmd)
     if code != 0:
         return MRResult(
             ok=False,
             iid=None,
             url=None,
-            message=f"git_step_failed: {' '.join(commit_cmd)}: {output[:400]}",
+            message="git_step_failed:commit",
         )
     if expected_diff is not None:
         try:
@@ -145,13 +148,13 @@ async def create_mr_from_worktree(
             )
 
     push_cmd = ["git", "push", "-u", "origin", branch]
-    code, output = await _run(push_cmd)
+    code, _output = await _run(push_cmd)
     if code != 0:
         return MRResult(
             ok=False,
             iid=None,
             url=None,
-            message=f"git_step_failed: {' '.join(push_cmd)}: {output[:400]}",
+            message="git_step_failed:push",
         )
 
     # Create MR via python-gitlab
@@ -170,5 +173,5 @@ async def create_mr_from_worktree(
             },
         )
         return MRResult(ok=True, iid=mr.iid, url=mr.web_url, message="created")
-    except Exception as exc:  # noqa: BLE001
-        return MRResult(ok=False, iid=None, url=None, message=f"gitlab_api_failed: {exc}")
+    except Exception:  # noqa: BLE001
+        return MRResult(ok=False, iid=None, url=None, message="gitlab_api_failed")

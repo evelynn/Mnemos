@@ -40,7 +40,16 @@ def test_env_example_documents_every_actual_env_var():
     used = _collect_env_uses()
     declared = _env_example_keys()
     # OS-standard 는 제외.
-    skip = {"PYTHONPATH", "PATH", "HOME", "PWD", "USER", "LANG", "LC_ALL"}
+    skip = {
+        "PYTHONPATH",
+        "PATH",
+        "HOME",
+        "PWD",
+        "USER",
+        "LANG",
+        "LC_ALL",
+        "WINDIR",
+    }
     relevant = used - skip
     missing = relevant - declared
     assert not missing, (

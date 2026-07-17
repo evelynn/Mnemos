@@ -24,7 +24,9 @@ async def test_readiness_returns_structured_checks(http_client):
     body = r.json()
     # PR-99 added "crypto" and "analyzers"; the LB contract guarantees
     # the original three keys remain present, not that the set is closed.
-    assert {"database", "redis", "worker"} <= set(body["checks"].keys())
+    assert {"database", "redis", "worker", "llm_paid_dispatch"} <= set(
+        body["checks"].keys()
+    )
     for part in body["checks"].values():
         assert {"ok", "message"} <= part.keys()
 

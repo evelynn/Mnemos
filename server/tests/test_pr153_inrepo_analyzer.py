@@ -66,9 +66,11 @@ def test_analyzer_available_uses_inrepo_when_flagged(_flag_on):
     # python analyzer is "available" (verified), so the Claude fallback for
     # python must not fire in the basic config.
     assert reg.analyzer_available("python") is True
-    # languages with no in-repo entrypoint stay on the Claude fallback path
-    # (cpp→PR-191, ruby→PR-195 now have analyzers; scala remains uncovered)
-    assert reg.analyzer_available("scala") is False
+    # An unregistered language stays on the Agent fallback path.  Use an
+    # explicit sentinel instead of a real language whose deterministic
+    # coverage can legitimately expand (Scala joined ggoss-treesitter in
+    # PR-199).
+    assert reg.analyzer_available("__mnemos_unregistered_test__") is False
     importlib.reload(reg)  # restore module state for other tests
 
 

@@ -17,7 +17,6 @@ Tests
 from __future__ import annotations
 
 import uuid as _uuid
-from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import AsyncIterator
 
@@ -48,15 +47,150 @@ def _pin_graph(monkeypatch) -> None:  # noqa: ANN001
 
 install_polyglot()
 
+import app.extractor.runner as runner_module  # noqa: E402
+from app.extractor.agent import Extractor, ExtractorResult  # noqa: E402
+from app.extractor.agent_sdk import (  # noqa: E402
+    SUMMARY_CANDIDATE_CONTRACT,
+    current_summary_candidate_context,
+    normalize_summary_candidate_payload,
+)
+from app.extractor.cost import LLMRunBudget  # noqa: E402
+from app.llm.contracts import (  # noqa: E402
+    AttemptKind,
+    AttemptStatus,
+    LLMUsageV1,
+    ResultStatus,
+    UsageSource,
+    UsageStatus,
+)
+from app.llm.lifecycle import (  # noqa: E402
+    AttemptOutcome,
+    AttemptStartMetadata,
+    SemanticCandidate,
+    fingerprint_input,
+    require_attempt_callbacks,
+)
 from app.models.base import Base  # noqa: E402
 from app.models import auth as _auth  # noqa: E402,F401
 from app.models import audit as _audit  # noqa: E402,F401
 from app.models import findings as _findings  # noqa: E402,F401
 from app.models import graph as _graph  # noqa: E402,F401
 from app.models import organization as _org  # noqa: E402,F401
-from app.models.findings import LLMCall, Summary  # noqa: E402
+from app.models.findings import Summary  # noqa: E402
 from app.models.graph import Node  # noqa: E402
 from app.models.projects import Project  # noqa: E402
+
+
+_PRODUCTION_BEGIN_ATTEMPT = runner_module.begin_attempt
+
+
+def _use_generic_test_lifecycle(monkeypatch) -> None:  # noqa: ANN001
+    """Keep product-only assertions independent of deployment dollar policy."""
+
+    async def generic_test_begin_attempt(*args, **kwargs):  # noqa: ANN002, ANN003
+        assert kwargs.pop("require_atomic_dollar_reservation") is True
+        return await _PRODUCTION_BEGIN_ATTEMPT(
+            *args,
+            **kwargs,
+            require_atomic_dollar_reservation=False,
+        )
+
+    monkeypatch.setattr(
+        runner_module,
+        "begin_attempt",
+        generic_test_begin_attempt,
+    )
+
+
+async def _finish_summary_candidate(
+    result: ExtractorResult,
+    *,
+    target_id: str,
+) -> ExtractorResult:
+    """Finalize a deterministic mock through the real Summary candidate ledger."""
+
+    callbacks = require_attempt_callbacks("PR-138b test provider")
+    context = current_summary_candidate_context()
+    assert context is not None
+    assert callbacks.finish_candidate is not None
+    ticket = await callbacks.start(
+        AttemptStartMetadata(
+            operation_id=_uuid.uuid4(),
+            attempt_no=1,
+            attempt_kind=AttemptKind.PRIMARY,
+            provider="test",
+            provider_mode="api",
+            requested_model=result.model_used,
+            input_fingerprint=fingerprint_input(
+                "pr138b-test-system",
+                target_id,
+            ),
+            estimated_input_tokens=10,
+            input_estimate_method="fixed_test_estimate_v1",
+            requested_max_output_tokens=1_024,
+            usage_source=UsageSource.PROVIDER_API,
+        )
+    )
+    if callbacks.mark_provider_dispatch is not None:
+        callbacks.mark_provider_dispatch()
+    tokens = int(result.tokens_used or 0)
+    payload = normalize_summary_candidate_payload(
+        {
+            "contract": SUMMARY_CANDIDATE_CONTRACT,
+            "summary": result.summary,
+            "detailed": result.detailed,
+            "claims": result.claims,
+            "open_questions": result.open_questions,
+        }
+    )
+    await callbacks.finish_candidate(
+        ticket,
+        AttemptOutcome(
+            attempt_status=AttemptStatus.COMPLETED,
+            result_status=ResultStatus.PENDING,
+            usage=LLMUsageV1(
+                status=UsageStatus.REPORTED_COMPLETE,
+                source=UsageSource.PROVIDER_API,
+                input_tokens=tokens,
+                output_tokens=0,
+                total_tokens=tokens,
+            ),
+            resolved_model=result.model_used,
+        ),
+        SemanticCandidate(
+            contract_name=SUMMARY_CANDIDATE_CONTRACT,
+            binding_fingerprint=context.binding_fingerprint,
+            payload=payload,
+        ),
+    )
+    result._llm_call_id = ticket.attempt_id
+    return result
+
+
+class _PaidExtractor(Extractor):
+    async def summarize(self, _level, target_id, evidence):  # noqa: ANN001
+        return await _finish_summary_candidate(
+            ExtractorResult(
+                summary="paid result",
+                detailed="paid result",
+                claims=[
+                    {
+                        "claim": "The symbol exists.",
+                        "evidence": [
+                            {
+                                "kind": "node",
+                                "node_id": evidence[0]["node_id"],
+                                "certainty": evidence[0]["certainty"],
+                            }
+                        ],
+                    }
+                ],
+                open_questions=[],
+                model_used="test-model",
+                tokens_used=10,
+            ),
+            target_id=target_id,
+        )
 
 
 @pytest_asyncio.fixture
@@ -101,14 +235,11 @@ def test_migration_0024_is_present_and_round_trippable():
 
 
 @pytest.mark.asyncio
-async def test_l1_runner_persists_fallback_reason_when_budget_trips(
+async def test_l1_runner_persists_reason_when_dollar_policy_is_absent(
     session, monkeypatch,
 ):
     _pin_graph(monkeypatch)
-    monkeypatch.setenv("MNEMOS_LLM_USD_PER_MTOK", "3.0")
-    monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", "0.01")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv("MNEMOS_DISABLE_AGENT_SDK", "1")
+    monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
 
     proj = Project(
         id=_uuid.uuid4(), name="x", gitlab_project_id=1,
@@ -119,33 +250,17 @@ async def test_l1_runner_persists_fallback_reason_when_budget_trips(
         id="sym:f", project_id=proj.id, kind="Symbol",
         certainty="asserted", data={"name": "f"}, created_by=["t"],
     ))
-    # 5M tokens already spent → over the $0.01 cap.
-    old_summary = Summary(
-        id=_uuid.uuid4(), project_id=proj.id, level=1,
-        target_id="sym:old", summary="x", detailed="x",
-        claims=[], open_questions=[],
-        model_used="claude-sonnet-4-6", tokens_used=5_000_000,
-        generated_at=datetime.now(tz=timezone.utc) - timedelta(minutes=5),
-    )
-    session.add(old_summary)
-    session.add(
-        LLMCall(
-            id=old_summary.id,
-            project_id=proj.id,
-            target_id=old_summary.target_id,
-            level=old_summary.level,
-            model_used=old_summary.model_used,
-            tokens_used=old_summary.tokens_used,
-            status="legacy_summary",
-            generated_at=old_summary.generated_at,
-        )
-    )
     await session.commit()
 
-    from app.extractor.agent import Extractor
     from app.extractor.runner import summarise_l1
 
-    await summarise_l1(session, Extractor(), project_id=proj.id, limit=5)
+    await summarise_l1(
+        session,
+        _PaidExtractor(),
+        project_id=proj.id,
+        limit=5,
+        run_budget=LLMRunBudget(),
+    )
 
     fresh = (await session.execute(
         select(Summary).where(
@@ -155,9 +270,9 @@ async def test_l1_runner_persists_fallback_reason_when_budget_trips(
         )
     )).scalar_one()
     # Structured column carries the reason.
-    assert fresh.fallback_reason == "budget_exceeded"
+    assert fresh.fallback_reason == "project_dollar_budget_required"
     # Encoded model_used stays for back-compat consumers.
-    assert fresh.model_used == "stub:budget_exceeded"
+    assert fresh.model_used == "stub:project_dollar_budget_required"
 
 
 @pytest.mark.asyncio
@@ -166,6 +281,7 @@ async def test_happy_path_leaves_fallback_reason_null(session, monkeypatch):
     We simulate success by patching the extractor to return a
     populated ExtractorResult with no fallback_reason."""
     _pin_graph(monkeypatch)
+    _use_generic_test_lifecycle(monkeypatch)
     monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
 
     proj = Project(
@@ -179,29 +295,36 @@ async def test_happy_path_leaves_fallback_reason_null(session, monkeypatch):
     ))
     await session.commit()
 
-    from app.extractor.agent import Extractor, ExtractorResult
     from app.extractor.runner import summarise_l1
 
     class _GoodExtractor(Extractor):
         async def summarize(self, level, target_id, evidence):
-            return ExtractorResult(
-                summary="ok", detailed="ok",
-                claims=[{
-                    "claim": "The symbol exists.",
-                    "evidence": [{
-                        "kind": "node",
-                        "node_id": evidence[0]["node_id"],
-                        "certainty": evidence[0]["certainty"],
+            return await _finish_summary_candidate(
+                ExtractorResult(
+                    summary="ok",
+                    detailed="ok",
+                    claims=[{
+                        "claim": "The symbol exists.",
+                        "evidence": [{
+                            "kind": "node",
+                            "node_id": evidence[0]["node_id"],
+                            "certainty": evidence[0]["certainty"],
+                        }],
                     }],
-                }],
-                open_questions=[],
-                model_used="claude-sonnet-4-6",
-                tokens_used=1234,
-                fallback_reason="",
+                    open_questions=[],
+                    model_used="claude-sonnet-4-6",
+                    tokens_used=1234,
+                    fallback_reason="",
+                ),
+                target_id=target_id,
             )
 
     await summarise_l1(
-        session, _GoodExtractor(), project_id=proj.id, limit=5,
+        session,
+        _GoodExtractor(),
+        project_id=proj.id,
+        limit=5,
+        run_budget=LLMRunBudget(),
     )
 
     row = (await session.execute(

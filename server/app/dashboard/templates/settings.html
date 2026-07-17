@@ -474,20 +474,16 @@ function _statusDot(p) {
 function renderProviderCard(p) {
   const st = _statusDot(p);
   const isClaude = p.id === "claudecode";
-  const mode = p.mode || "subscription";
-  const subMode = isClaude && mode === "subscription";
+  const subMode = false;
   const keyPlaceholder = p.has_key
     ? MnemosUI.t("key stored — type to replace")
     : MnemosUI.t("paste API key");
-  // Claude defaults to the local Claude Code subscription; "API key" mode
-  // switches it to the direct Anthropic API.
+  // Ordinary Claude chat is deliberately API-key-only.  The local Agent SDK
+  // has no per-request output cap or positive auth/cost attestation; internal
+  // SDK calls require an explicit full 128K physical reservation.
   const modeRow = isClaude
-    ? `<label><span data-i18n="Method">Method</span>
-         <select id="pmode-${p.id}" class="chat-provider" onchange="onClaudeModeChange('${p.id}')">
-           <option value="subscription"${mode === "subscription" ? " selected" : ""} data-i18n="Subscription (Claude Code)">Subscription (Claude Code)</option>
-           <option value="api"${mode === "api" ? " selected" : ""} data-i18n="API key">API key</option>
-         </select></label>
-       <p id="subnote-${p.id}" class="muted provider-keyhint"${subMode ? "" : " hidden"} data-i18n="Uses this machine's Claude Code subscription — no API key needed.">Uses this machine's Claude Code subscription — no API key needed.</p>`
+    ? `<input type="hidden" id="pmode-${p.id}" value="api" />
+       <p class="muted provider-keyhint" data-i18n="Anthropic API key required. Agent SDK chat is disabled unless auth/cost attribution is known and the full 128K output ceiling is reserved.">Anthropic API key required. Agent SDK chat is disabled unless auth/cost attribution is known and the full 128K output ceiling is reserved.</p>`
     : "";
   const baseRow = p.needs_base_url
     ? `<label><span data-i18n="Base URL">Base URL</span>
@@ -521,16 +517,6 @@ function renderProviderCard(p) {
     </div>
     <div id="pr-${p.id}" class="provider-result-box" hidden></div>
   </div>`;
-}
-
-function onClaudeModeChange(id) {
-  const sel = document.getElementById("pmode-" + id);
-  if (!sel) return;
-  const sub = sel.value === "subscription";
-  const wrap = document.getElementById("keywrap-" + id);
-  const note = document.getElementById("subnote-" + id);
-  if (wrap) wrap.hidden = sub;
-  if (note) note.hidden = !sub;
 }
 
 function toggleKey(id) {

@@ -1,238 +1,231 @@
-# 속도·토큰 근본 개선 연구와 설계 — 2026-07-16
+# 속도·토큰 근본 개선 연구·설계·검증 — 2026-07-16
 
 > 범위: deterministic source indexing, optional Agent/L1–L3, grounded Chat,
-> run-scoped graph staging. Mnemos의 일반 제품 기능이 아니라 `CLAUDE.md`의
-> scale/grounding/determinism/AI-reuse 목적만 다룬다.
+> Flow, Second Opinion, durable LLM accounting, PostgreSQL publication, MCP
+> re-query. 이 문서는 구현 전 추정이 아니라 현재 코드와 실행 증거를 기록한다.
 
 ## 1. 결론
 
-이번 조사에서 서로 다른 세 문제가 확인됐다.
+이번 작업으로 닫은 문제는 “LLM을 덜 쓴다”는 홍보 문구가 아니라 다음 실패 모드다.
 
-1. Agent extraction과 게시 후 L1–L3가 **같은 분석 실행인데도 각각 새
-   `LLMRunBudget`을 만들어** 구성상 64 calls/120 K estimated-input ceiling을 두 번
-   받을 수 있다.
-2. Chat의 rewrite와 answer, Claude의 retry/fallback은 bounded prompt/output은
-   갖지만 **요청 전체의 물리 호출 예산과 공통 원장**이 없다. provider adapter가
-   반환한 usage도 버린다.
-3. analyzer JSONL ingest는 staged fact마다 `session.get()`을 실행한다. live graph의
-   atomic publication은 보존되지만, staging DB round trip이 fact 수에 비례한다.
+1. provider 호출이 durable 원장보다 먼저 나가는 crash window;
+2. 동시에 시작한 호출이 같은 project dollar cap을 각각 통과하는 check-then-act;
+3. retry/restart가 같은 의미의 작업을 다시 과금하는 문제;
+4. 공식 가격으로 승인했지만 custom proxy나 환경 override로 실제 목적지가 바뀌는 문제;
+5. 후보는 저장됐지만 최종 제품 게시와 시도 분류가 갈라지는 문제;
+6. opaque Agent SDK/Atlas/cloud embedding의 비용·출력·사용량을 증명하지 못하면서
+   실행 가능하다고 취급하던 문제.
 
-해결 경계는 다음과 같다.
+고정된 안전·회계 완료 기준에서는 새 root blocker가 없다. 기본 source index는 여전히
+LLM client를 만들지 않고 0 call/0 token이다. 선택적 유료 생성은 이제 양수 project cap,
+immutable worst-case price/route contract, 원자 예약, durable `STARTED`, provider-enforced
+output cap을 모두 만족해야 한다. 하나라도 없으면 네트워크 전에 실패한다.
 
-- 기본 full/incremental은 계속 `summarize=false`, `agent_extract_limit=0`이며 LLM
-  client와 budget을 만들지 않는다. 최초 LLM token 비용은 구조적으로 0이다.
-- 한 번의 중단 없는 source worker 실행에서는 Agent와 L1–L3가 하나의 유한 budget을
-  공유한다. budget은 첫 실제 provider 필요 시점 전에만 만든다.
-- provider usage는 provider별 원본 구성요소를 잃지 않고 저장한 뒤 canonical 합계를
-  파생한다. estimated input은 actual/billed usage로 가장하지 않는다.
-- staging은 50개 단위 identity 조회와 동일 reducer로 바꾼다. graph publication CAS,
-  coverage seal, certainty, owner union, conflict, semantic hash 의미는 바꾸지 않는다.
+이 결과는 실제 사용 토큰 절감률이나 `codebase-memory-mcp`(CBM) 대비 성능 우위를
+증명하지 않는다. 오히려 전체 model input ceiling을 no-refund로 예약하므로 실제 prompt보다
+크게 과예약될 수 있다. 이는 비용 폭주 방지의 안전성 개선이며 utilization 개선이 아니다.
 
-## 2. 확인한 실행 경로
+## 2. 최종 설계
 
-### 2.1 optional analysis budget
+### 2.1 index first, AI on demand
 
-`run_ingest`는 unavailable-language Agent를 실행할 때 budget A를 만들고 전달한다.
-그러나 source receipt가 durable해진 뒤 `_run_published_postprocess`가 summary용 budget
-B를 새로 만든다. Agent와 summary를 모두 켜면 하나의 opt-in run이 두 ceiling을 받는다.
+- 정상 full/incremental source analysis는 LLM backend를 구성하지 않는다.
+- analyzer JSONL, bounded queue, batch staging, generation CAS, bitemporal publication이 먼저다.
+- Chat/Summary/Second Opinion 등 AI 제품은 이미 게시된 project/run/revision/evidence에
+  결합된다.
+- prompt와 provider output은 공통 attempt row에 저장하지 않는다. 입력은 fingerprint,
+  결과는 암호화된 schema-normalized candidate로만 보존한다.
 
-올바른 수명은 다음과 같다.
+### 2.2 하나의 physical-attempt lifecycle
 
-| 실행 경로 | budget 계약 |
+모든 production paid-generation owner는 공통 lifecycle capability를 설치한다.
+
+| 제품 경로 | network transport | production 판정 |
+|---|---|---|
+| Chat OpenAI | official Chat Completions | price-attested, policy가 있을 때 실행 가능 |
+| Chat Gemini | official generateContent | price-attested, policy가 있을 때 실행 가능 |
+| Chat/summary/Second Opinion Anthropic | official Messages API, SDK retry 0 | price-attested, policy가 있을 때 실행 가능 |
+| Agent SDK Summary/Flow/AI extraction | opaque `query()` | immutable price/route/output 계약 부재로 pre-network 차단 |
+| Atlas generation | session + message 2-POST | output/usage/price receipt 부재로 pre-network 차단 |
+| Voyage/OpenAI cloud embedding | legacy scaffold | project attempt/settlement/price 계약 부재로 실행 함수에서 차단 |
+
+한 attempt의 순서는 다음과 같다.
+
+1. stable operation/input/product binding 계산;
+2. exact terminal candidate replay 확인;
+3. project policy와 price-catalog version 확인;
+4. project row serialization 아래 worst-case USD 원자 예약;
+5. reservation과 `STARTED`를 commit;
+6. DB가 반환한 remaining wall time 안에서 한 번만 dispatch;
+7. usage/model/finish reason/schema/grounding 검증;
+8. encrypted canonical candidate와 terminal outcome commit;
+9. 제품 소유자가 exact binding을 다시 검증하고 product + classification을 원자 commit.
+
+재시작 시 `STARTED`는 완료로 추측하지 않는다. terminal candidate가 있으면 provider를
+호출하지 않고 replay하고, terminal-without-candidate는 같은 실패를 재현한다. 정책이 나중에
+삭제되거나 cap이 소진되어도 이미 승인·완료된 terminal replay는 가능하다.
+
+### 2.3 immutable worst-case dollar policy
+
+`server/app/llm/pricing.py`의 계약은 exact provider, billing route, model id, official API
+base, 공식 input ceiling, 공식 output ceiling, 보수적 input/output 가격을 하나의 versioned
+fact로 묶는다. catalog canonical form의 SHA-256에서 project policy version을 파생하므로
+가격·model ceiling·목적지가 바뀌면 기존 worker/policy 조합은 자동으로 fail closed한다.
+
+- Anthropic Sonnet 4.6: 1M input 전체와 requested output을 보수적 장문 가격으로 예약;
+- OpenAI GPT-4o dated model: 128K input 전체와 requested output 예약;
+- Gemini 2.5 Flash: 1,048,576 input 전체와 requested output 예약;
+- unknown alias, custom proxy, opaque subscription route: 계약 없음, dispatch 없음;
+- reservation은 환불하지 않는다. provider usage는 실제 비용 관측용이지 과거 승인을
+  소급해서 느슨하게 만드는 근거가 아니다.
+
+unset/0 cap은 “무제한”이 아니라 `project_dollar_budget_required`다. 동시에 들어온 호출은
+같은 project account row와 advisory/row lock 아래 직렬화되어 각각의 worst-case 금액을
+합산한다.
+
+### 2.4 목적지 attestation
+
+- OpenAI는 HTTPS, exact `api.openai.com`, exact `/v1`, default/443 port, no userinfo/query/
+  fragment인 의미적으로 동일한 공식 root만 가격 계약을 가진다.
+- custom/http/wrong path/port/userinfo/query URL은 billing route를 잃고 lifecycle start에서
+  network 전에 거절된다. 모델 목록 probe도 `httpx` client 생성 전에 거절되어 API key를
+  custom host로 보내지 않는다.
+- 세 Anthropic client는 contract-derived `https://api.anthropic.com`을 명시하므로
+  ambient `ANTHROPIC_BASE_URL`이 source-bearing request를 우회하지 못한다.
+- Gemini endpoint도 같은 price contract에서 파생한다.
+
+### 2.5 candidate와 제품 게시 원자성
+
+- Chat answer, Summary, Flow, Agent extraction, Second Opinion candidate는 contract name과
+  project/run/revision/evidence binding을 가진다.
+- Summary/Flow/Second Opinion은 exact candidate lock → binding/schema 검증 → product upsert
+  → attempt classification을 한 transaction으로 수행한다.
+- product insert가 실패하면 classification도 rollback된다. 재시작은 저장된 candidate를
+  사용하며 provider call을 반복하지 않는다.
+- `Summary.tokens_used`/`model_used`는 선택된 최종 candidate receipt만 가리킨다. 전체
+  map/reduce 물리 호출량은 component `LLMCall` ledger가 source of truth다.
+
+## 3. 검증 게이트
+
+| 게이트 | 2026-07-16 결과 |
 |---|---|
-| Agent off, summary off | 생성하지 않음 |
-| summary only | 첫 summary 직전에 하나 생성 |
-| Agent only | 첫 실제 non-skipped Agent stage 직전에 하나 생성 |
-| Agent + summary | Agent에서 만든 같은 객체를 L1–L3까지 전달 |
-| Agent 옵션 on, 실제 fallback 없음 | Agent 때문에 생성하지 않음 |
-| published hard-crash resume | 새 worker execution budget; 이전 physical calls는 ledger에 보존 |
-| continuation | 새 `AnalysisRun`의 하나의 fresh budget을 L1–L3가 공유 |
+| 계약 변경 집중 회귀 | 192 passed |
+| 최종 전체 비통합 회귀 | 2,749 passed, 26 skipped, 39 deselected, 0 failed, 446.43 s |
+| 실제 PostgreSQL migration | PostgreSQL 17.10, `0041_summary_llm_provenance (head)` |
+| 실제 PostgreSQL ledger/replay/concurrency 묶음 | 85 passed, 62.80 s |
+| provider route/price 집중 묶음 | 147 passed |
+| provider route/price 넓은 회귀 | 130 passed, 3 skipped; 별도 실제 PostgreSQL atomic-dollar 3 passed |
+| static | production/tests/benchmark Ruff green, compileall green, `git diff --check` green |
+| E3 live provider | 환경 차단: OpenAI/Anthropic/Gemini/Google/Atlas/OAuth key 모두 없음 |
+| Redis integration tier | 환경 차단: Redis/Docker/Podman/redis-server 없음 |
 
-현재 budget은 process-local이다. 따라서 worker crash 뒤 같은 published run을 resume할
-때 AnalysisRun 전체에 걸친 영구 reservation ceiling을 복원하지는 못한다. 이를
-해결하려면 DB atomic reservation counter가 필요하다. 이번 변경에서 “run 전체 영구
-상한”이라고 과장하지 않고 **한 worker execution의 hard ceiling**으로 명시한다.
+전체 회귀의 유일한 warning은 사용자 소유 voice test의 Starlette `TestClient` deprecation
+warning이었다. provider credential를 제거한 프로세스에서 전체 회귀를 실행했다.
 
-### 2.2 physical provider attempts
+## 4. 실제 PostgreSQL 50K component soak
 
-하나의 논리 Chat 요청이 다음 물리 시도를 만들 수 있다.
+Raw artifact:
+[`evidence/postgres-50k-soak-2026-07-16.json`](evidence/postgres-50k-soak-2026-07-16.json)
+(SHA-256 `d32e00f3c9498145493a2d592533f73e6d09e0546afdf3f4d70778de82b88243`).
 
-```text
-grounded chat request
-  ├─ optional search-term rewrite
-  │    └─ selected backend attempt(s)
-  └─ answer
-       ├─ selected backend attempt
-       └─ retry or API↔subscription fallback attempt
+실행 조건:
+
+```powershell
+.\server\.venv\Scripts\python.exe scripts\benchmarks\postgres_50k_soak.py `
+  --database-url postgresql+asyncpg://postgres@127.0.0.1:55432/mnemos_test `
+  --files 50000 --batch-size 50 `
+  --output-json docs\04-eval\evidence\postgres-50k-soak-2026-07-16.json
 ```
 
-예산과 원장은 논리 `provider_chat()` 호출이 아니라 실제 network/SDK 시도 직전에
-reservation/start를 기록해야 한다. init 실패 뒤 동일 prompt를 다시 보내는 시도도
-별도 physical attempt다. process가 중단돼 finish update가 없으면 `started`가 남아야
-미지 비용을 0으로 오인하지 않는다.
+- Windows 11 Pro 10.0.26200, Intel i5-1340P, 16 logical processors, 약 31.7 GiB RAM;
+- Python 3.12.12, PostgreSQL 17.10;
+- base HEAD `91456141f63760e7b56352c43af7af2f4e501db7`, working-tree implementation;
+- 100 directories, 50,000 Python files, 파일당 함수 하나, 약 100K LOC/1.89 MB source;
+- production worker flush와 같은 batch 50, analyzer queue max 64.
 
-## 3. provider usage 정규화 계약
+실측 결과:
 
-공식 API 계약을 확인한 결과 provider별 필드를 하나의 `total_tokens` 숫자로 먼저
-뭉개면 cache/reasoning 차이를 복구할 수 없다.
+| 지표 | 결과 |
+|---|---:|
+| corpus 생성 | 86.005 s |
+| 최초 analyzer + stage | 152.836 s, 327.147 records/s |
+| 최초 stage DB 누적 | 31.494 s, 1,000 batches |
+| 최초 atomic promotion | 65.945 s, 50,000 nodes inserted |
+| same-content analyzer + stage | 125.987 s, 396.865 records/s |
+| same-content promotion | 11.355 s, 50,000 nodes unchanged |
+| same-content 전체 refresh | 137.387 s, semantic no-op true |
+| 최대 in-memory candidates | 50 |
+| controller + direct analyzer sampled peak RSS | 111,190,016 bytes(약 106.0 MiB) |
+| LLM | 0 calls, 모든 token field 0 |
+| 전체 script wall | 541.037 s |
+| cleanup | private schema drop + temporary source removal 성공 |
 
-| provider | 보존할 원본 구성요소 | canonical 파생 규칙 |
-|---|---|---|
-| OpenAI Chat Completions | `prompt_tokens`, `completion_tokens`, `prompt_tokens_details.cached_tokens`, completion reasoning tokens, provider total | input=`prompt_tokens`, output=`completion_tokens`; cached/reasoning은 subset으로 별도 보존 |
-| Anthropic Messages | `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens` | total input은 세 input 구성요소의 합; 각 cache 구성요소 보존 |
-| Gemini generateContent | `promptTokenCount`, `cachedContentTokenCount`, `candidatesTokenCount`, `thoughtsTokenCount`, `totalTokenCount` | prompt/candidate를 input/output으로 정규화하되 cached/thoughts는 subset으로 보존 |
-| subscription/Atlas/unknown proxy | usage가 없으면 actual fields는 `NULL` | request 직전 estimate만 별도 필드에 저장 |
+`total_wall_seconds`는 corpus 생성, schema setup, 두 번의 분석/게시, cleanup 전체다. 이를
+“50K 단일 index 시간”으로 인용하지 않는다. RSS는 controller와 direct analyzer child의
+표본이며 PostgreSQL server RSS를 포함하지 않는다.
 
-참고한 공식 계약:
+이 soak가 증명하는 범위는 `AnalyzerRunner → bounded stage → seal → O(graph) promotion`과
+동일-content bitemporal no-op이다. calls/contracts/data-access/edge sweep, deletion write,
+mixed language, real Git checkout, Redis, HTTP/MCP query, optional LLM은 포함하지 않는다.
+따라서 CBM의 Linux kernel 28M LOC/75K files/수백만 nodes·edges 결과와 직접 비교할 수 없다.
 
-- OpenAI Chat Completions API와 prompt caching:
-  <https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create>,
-  <https://developers.openai.com/api/docs/guides/prompt-caching>
-- Anthropic Messages와 rate-limit token counting:
-  <https://platform.claude.com/docs/en/api/messages/create>,
-  <https://platform.claude.com/docs/en/api/rate-limits>
-- Gemini generateContent와 token counting:
-  <https://ai.google.dev/api/generate-content>,
-  <https://ai.google.dev/api/tokens>
+## 5. 속도와 토큰 문제에 대한 정확한 답
 
-### 3.1 네 층의 structured boundary
+### 개선된 것
 
-| 층 | 소유 계약 |
-|---|---|
-| outer envelope | bounded HTTP/SDK response object와 provider request/response id |
-| provider dialect | OpenAI/Anthropic/Gemini의 documented usage fields만 adapter가 읽음 |
-| canonical schema | physical attempt, provider/backend/model, operation, actual raw components, estimated input, output cap, status/reason |
-| consumers | request/run hard budget, project cost view, audit/diagnostics; unknown usage를 0으로 간주하지 않음 |
+- 기본 index의 LLM 비용은 구조적으로 0이며 50K 실제 PostgreSQL 경계에서도 0이었다.
+- retry/restart가 terminal candidate를 재사용하므로 완료된 동일 작업의 추가 provider
+  call은 0이다.
+- provider SDK retry를 0으로 고정하고 logical fallback을 durable physical attempts로
+  분리했다.
+- batch staging과 bounded queue로 50K 레코드를 메모리에 모으지 않았다.
+- same-content refresh는 graph row를 새로 만들지 않고 50K 전부 `unchanged`였다.
+- 비용 상한은 동시성 아래에서도 원자적이며 unknown route를 0원으로 간주하지 않는다.
 
-필드가 없거나 타입/범위가 잘못되면 adapter는 추측하지 않는다. provider가 준 total과
-구성요소가 모순되면 raw evidence를 보존하고 usage를 `invalid`로 표시하며, 비용
-계산의 authoritative input으로 쓰지 않는다.
+### 아직 측정하지 않은 것
 
-## 4. graph staging 성능 설계
+- unseen-repository 질문 A/B의 input/output token 절감률;
+- answer correctness, evidence precision/recall, tool calls, query p50/p95;
+- 실제 provider usage dialect와 latency의 live canary;
+- CBM과 같은 corpus/하드웨어/질문 세트의 head-to-head 결과.
 
-첫 slice는 schema나 publication 의미를 바꾸지 않는 bounded batch merge다.
+전체 input ceiling 예약 때문에 small prompt도 Anthropic 1M/OpenAI 128K/Gemini 1,048,576
+input 최악가격으로 승인된다. 이 방식은 under-reservation을 막지만 cap utilization을 낮춰
+후속 호출을 일찍 차단할 수 있다. 더 정밀한 예약은 provider가 실제 hard input limit 또는
+검증 가능한 request-specific ceiling을 제공할 때만 안전하게 도입한다.
 
-1. immutable node/edge candidate를 최대 50개 모은다.
-2. batch transaction에서 owning `AnalysisRun`을 lock/check한다.
-3. batch identities의 기존 stage rows를 table별 한 번에 조회한다.
-4. 입력 순서대로 기존 singleton reducer와 같은 규칙을 적용한다.
-5. flush/commit 뒤에만 progress를 게시한다.
+## 6. CBM과의 현재 판정
 
-반드시 보존할 불변식:
+Mnemos가 전체적으로 더 좋다는 판정은 아니다. CBM은 현재 README 기준 158개 언어,
+15개 MCP tool, 43개 client surface, bundled local semantic embedding, single static binary,
+Linux kernel 처리량과 sub-ms structural query 수치를 공개한다. 논문은 31개 real repository에서
+explorer 대비 10배 적은 tokens와 2.1배 적은 tool calls를 보고했지만 quality는 83% 대
+92%였다. README의 120배 예시는 논문 결과와 구분해야 한다.
 
-- 동일 payload의 producer owner는 canonical union이다.
-- 다중 owner identity에 다른 payload가 오면 전체 batch는 conflict로 실패한다.
-- 같은 producer의 certainty downgrade는 무시한다.
-- durable runtime overlay field는 stage hash에 들어가지 않는다.
-- coverage seal 뒤의 모든 write는 거부한다.
-- promotion 전 live `nodes`/`edges`는 변하지 않는다.
-- singleton API와 batch API의 최종 row/semantic hash가 동일하다.
+Mnemos의 현재 우위는 속도/언어 폭이 아니라 bitemporal history, atomic publication,
+verified/asserted/inferred 분리, runtime reconciliation, encrypted crash-safe candidate replay,
+mandatory worst-case cost authorization이다. 상세 판정은
+[`codebase-memory-comparison-2026-07-16.md`](codebase-memory-comparison-2026-07-16.md)에 있다.
 
-PostgreSQL 전용 upsert는 첫 slice에 사용하지 않는다. bounded `IN`/tuple-`IN`, generic
-SQLAlchemy ORM insert/update로 SQLite와 PostgreSQL 의미를 같이 유지한다.
+## 7. 고정 완료 기준과 분리된 Phase-2 backlog
 
-O(graph) omission sweep을 없애는 contribution ledger는 별도 migration/cutover가
-필요하다. 안전한 순서는 shadow contribution schema → dual-write/materialization
-검증 → producer-indexed omission → generation-pinned deletion intent다. batch staging과
-한 번에 섞어 배포하지 않는다.
+다음은 실제 product gap이지만 이번 안전·회계 root gate를 다시 열 이유와 혼동하지 않는다.
 
-## 5. 수용 기준과 증거 수준
+- L2/L3 summary는 target limit을 적용하기 전에 current lower-level summary/node 전체를
+  materialize한다. token/call은 bounded지만 pre-call DB/RAM work는 O(project)다.
+- lexical search는 unanchored `ILIKE` 후보를 ORDER BY 없이 2,000개에서 자른 뒤 점수화해
+  대형 graph에서 globally best result를 놓칠 수 있다.
+- authoritative omission sweep는 paged/bounded memory지만 여전히 O(graph) DB work다.
+- analyzer success에는 signed terminal coverage record/scanned-file count가 없다.
+- hard process-kill fault injection, edge-rich mixed-language 50K+, retained Git content archive,
+  contribution history, automatic history pruning은 별도 production-qualification 과제다.
 
-### 5.1 correctness
+## 8. 현재 운영 차단 증거
 
-- Agent 10 calls 뒤 summary 20 calls면 최종 shared budget은 30 calls다.
-- exhausted supplied budget을 postprocess가 새 객체로 교체하지 않는다.
-- Chat retry/fallback 각각이 별도 physical attempt와 reservation이다.
-- usage가 없는 subscription path의 actual token columns는 `NULL`이며 estimate와
-  분리된다.
-- 1,000 staged facts에서 identity SELECT 수는 row 수가 아니라 batch 수에 비례한다.
-- singleton/batch owner union, conflict, downgrade, seal 결과가 동일하다.
+- live-provider E3: 모든 지원 provider key/OAuth token 부재로 실행 불가;
+- Redis integration: `127.0.0.1:6379`와 Docker/Podman/redis-server 부재;
+- GitHub publish: 이 환경에 `gh`가 없어 repository 변경의 commit/push/PR 단계는
+  `github:yeet` 안전 절차상 진행할 수 없음.
 
-### 5.2 성능 측정
-
-wall-clock 단독 CI gate는 host noise 때문에 사용하지 않는다. 다음을 같이 기록한다.
-
-- SQL statement/identity SELECT count;
-- facts/sec와 batch 수;
-- peak RSS;
-- 10 K/50 K fixture stage/promotion time;
-- cancellation/rollback과 commit-before-progress.
-
-### 5.3 E0–E4 honesty
-
-| 수준 | 이 변경의 목표 |
-|---|---|
-| E0 | migration/model/adapter/budget 계약 정적 일치 |
-| E1 | provider usage parser, shared budget, batch reducer unit regression |
-| E2 | mock provider → physical ledger → Chat/summary consumer, analyzer JSONL → stage batch → promotion |
-| E3 | credential가 있는 작은 real-provider canary; 없으면 미실행으로 명시 |
-| E4 | representative repository + real PostgreSQL + 50 K soak/A-B token 비교; 현재 미실행 |
-
-E1/E2를 통과해도 live provider 비용 정확도나 50 K production 성능을 완료했다고
-주장하지 않는다.
-
-## 6. 개발 순서
-
-1. shared Agent/L1–L3 budget과 회귀 테스트;
-2. portable stage batch reducer와 analyzer buffer integration;
-3. provider raw usage canonicalization과 durable physical-attempt schema;
-4. Chat rewrite/answer/retry/fallback의 request-scoped budget/ledger 연결;
-5. focused + broad regression, query-count benchmark;
-6. commit/push와 GitHub PR 검증;
-7. 후속 contribution ledger와 real PostgreSQL/50 K soak.
-
-## 7. 2026-07-16 구현 결과
-
-### 7.1 완료된 변경
-
-- source run의 Agent extraction과 게시 후 L1–L3가 동일한
-  `LLMRunBudget`을 공유한다. deterministic fallback이 실제로 필요하지 않으면 budget을
-  만들지 않는다.
-- Chat rewrite, answer, Claude SDK init retry, API↔subscription fallback은 요청 하나의
-  call/input/output/wall budget을 공유한다. 실제 dispatch 직전에 매번 reservation하며
-  fallback은 ceiling이나 deadline을 초기화하지 않는다.
-- `LLMRunBudget`은 기존 call/input/wall에 cumulative requested-output ceiling을
-  추가했다. legacy caller는 output reservation 0으로 호환되고, Chat처럼 provider cap을
-  아는 caller는 dispatch 전에 전량 예약한다.
-- deterministic analyzer stage는 최대 50 fact를 buffer하고 node/edge batch reducer를
-  실행한 뒤 commit하고 progress를 게시한다.
-- `mnemos.llm_usage.v1` / `mnemos.llm_physical_attempt.v1` 정규형과 0036 expand-only
-  `llm_calls` schema를 추가했다. 기존 writer/reader와 legacy columns는 유지된다.
-
-### 7.2 재현 가능한 개선 폭
-
-| 항목 | 변경 전 | 변경 후 | 해석 |
-|---|---:|---:|---|
-| Agent + L1–L3 한 worker 실행의 구성상 ceiling | 128 calls / 240 K estimated input / 두 600 s budget | 64 calls / 120 K estimated input / 하나의 600 s deadline | 상한 중복 제거: call/input 50% 감소 |
-| Chat Claude rewrite+answer의 구성상 physical attempts | 각 논리 호출당 API/SDK retry·fallback 최대 3, 합계 최대 6 | 요청 전체 최대 4 | fallback 최악 호출 수 33.3% 감소; 일반 단일 성공 호출 수는 변하지 않음 |
-| Chat cumulative reservation | 없음 | input 120 K, requested output 4,800, wall 10–300 s | provider usage가 없어도 finite; UTF-8 byte 기반 input은 billed-token 주장이 아님 |
-| 120 unique symbol staging identity SELECT | 120 | 3 (`ceil(120/50)`) | test에서 97.5% 감소; 전체 wall time 개선률로 일반화하지 않음 |
-
-batch reducer 자체는 table별 batch당 identity SELECT 한 번을 검증했다. 실제 처리량은
-DB latency, insert volume, analyzer subprocess 비중에 따라 달라지므로 97.5%를 전체 분석
-시간 단축률이라고 부르지 않는다.
-
-### 7.3 검증 결과
-
-- 변경 focused suites: shared budget/Chat, graph batch/deadline/publication, provider usage
-  contract/migration/legacy compatibility 모두 통과;
-- non-integration 전체 suite를 파일 기준 네 shard로 정확히 한 번씩 실행:
-  **2,318 passed, 26 skipped, 29 integration deselected, 0 failed**;
-- Ruff와 Python 3.12 compileall 통과;
-- Alembic single head: `0036_llm_physical_attempt`;
-- `git diff --check` 통과.
-
-### 7.4 정직한 미완료 범위
-
-- 0036은 expand-only contract/schema와 strict normalizer까지다. 현재 기존 summary,
-  Agent, Flow, Chat writer를 전부 v1 started/finalized row로 전환하지 않았으므로 durable
-  physical-attempt ledger coverage가 완성됐다고 주장하지 않는다.
-- 실제 PostgreSQL upgrade/downgrade와 concurrent dollar reservation은 실행하지 않았다.
-- live OpenAI/Anthropic/Gemini call로 usage component를 확인하지 않았다. E3 미실행이다.
-- real PostgreSQL 50 K-file soak, contribution-ledger omission, unseen-repository direct-AI
-  대비 A/B token·latency·정답률은 E4 후속 gate다.
-
-따라서 이번 결과는 **주요 call/input budget 중복과 per-fact staging 조회의 직접 원인을
-제거하고, 전면 호출 원장 전환을 위한 손실 없는 schema를 배포 가능하게 만든 단계**다.
-Phase-2의 contribution ledger와 모든 AI surface의 v1 dual-write까지 완료한 것으로
-확대 해석하지 않는다.
+첫 두 항목은 구현 실패가 아니라 환경 검증 공백이며 문서에서 pass로 바꾸지 않는다. 마지막
+항목은 로컬 코드/검증 결과와 별개인 게시 도구 차단이다.

@@ -47,11 +47,11 @@ async def enforce(
     pipe.expire(key, window_sec + 1)
     try:
         _, _, count, _ = await pipe.execute()
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"rate_limit_unavailable: {exc.__class__.__name__}",
-        )
+            detail="rate_limit_unavailable",
+        ) from None
 
     if int(count) > limit:
         # Scope is usually in ``key`` as the second segment ``rl:<scope>:<actor>``.

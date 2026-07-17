@@ -838,8 +838,8 @@ def _producer_runtime_marker(analyzer: str) -> str:
             if lock.is_file():
                 parts.append(_hash_file(lock))
         return ":".join(parts)
-    except OSError as exc:
-        return f"unreadable:{type(exc).__name__}"
+    except OSError:
+        return "unreadable"
 
 
 def _git_output(repository: Path, *args: str) -> bytes:
@@ -866,10 +866,9 @@ def _git_output(repository: Path, *args: str) -> bytes:
     except OSError as exc:
         raise ValueError("source_manifest_git_unavailable") from exc
     if completed.returncode != 0:
-        detail = completed.stderr.decode("utf-8", errors="replace").strip()
-        raise ValueError(
-            f"source_manifest_git_failed:{detail[-500:] or completed.returncode}"
-        )
+        # Git stderr can contain credential-bearing remotes and host paths.
+        # The manifest consumer needs only the closed failure category.
+        raise ValueError("source_manifest_git_failed")
     return completed.stdout
 
 
@@ -1173,15 +1172,14 @@ def build_source_manifest(
                         + b"\0"
                         + content_digest.digest()
                     )
-                except OSError as exc:
+                except OSError:
                     # Do not silently reuse an old graph when a relevant file is
                     # unreadable.  The error marker changes the fingerprint and
                     # lets the analyzer surface the actual coverage failure.
                     size = 0
                     marker = (
                         relative.encode("utf-8", errors="surrogateescape")
-                        + b"\0unreadable\0"
-                        + type(exc).__name__.encode()
+                        + b"\0unreadable"
                     )
                 for analyzer in owners:
                     digesters[analyzer].update(marker)

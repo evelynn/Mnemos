@@ -94,7 +94,7 @@ async def test_manual_enqueue_exception_terminalizes_run(
     )
     assert out.status == "failed"
     assert out.completed_at is not None
-    assert out.error_log == "analysis_enqueue_failed:ConnectionError"
+    assert out.error_log == "analysis_enqueue_failed"
     assert db.commits == 2
 
 

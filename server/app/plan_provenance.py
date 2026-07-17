@@ -84,7 +84,9 @@ async def lock_current_plan_source_revision(
             project_id=project_id,
         )
     except GraphPublicationError as exc:
-        raise PlanSourceRevisionUnavailable(str(exc)) from exc
+        raise PlanSourceRevisionUnavailable(
+            PLAN_SOURCE_REVISION_UNAVAILABLE_CODE
+        ) from exc
 
     run = (
         await session.execute(

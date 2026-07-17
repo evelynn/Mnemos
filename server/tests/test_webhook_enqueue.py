@@ -134,7 +134,7 @@ async def test_enqueue_exception_terminalizes_webhook_run(monkeypatch):
     assert result["skip_reason"] == "analysis_enqueue_failed"
     assert db.run.status == "failed"
     assert db.run.completed_at is not None
-    assert db.run.error_log == "analysis_enqueue_failed:ConnectionError"
+    assert db.run.error_log == "analysis_enqueue_failed"
     assert db.run.stats["webhook_ref"] == "refs/heads/main"
     assert db.run.stats["default_branch_ref"] == "refs/heads/main"
     assert db.commits == 2

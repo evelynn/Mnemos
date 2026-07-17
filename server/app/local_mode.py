@@ -289,6 +289,7 @@ async def ensure_sqlite_schema() -> None:
     from app.models import comments as _comments  # noqa: F401
     from app.models import findings as _findings  # noqa: F401
     from app.models import graph as _graph  # noqa: F401
+    from app.models import llm as _llm  # noqa: F401
     from app.models import onboarding as _onboarding  # noqa: F401
     from app.models import organization as _org  # noqa: F401
     from app.models import overlays as _overlays  # noqa: F401

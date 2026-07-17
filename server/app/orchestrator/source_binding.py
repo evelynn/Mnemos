@@ -11,8 +11,45 @@ from typing import Any
 from app.config import get_settings
 
 
+PROJECT_SOURCE_BINDING_CODES = frozenset(
+    {
+        "source_binding_invalid",
+        "source_allowed_root_link_rejected",
+        "source_allowed_root_not_configured",
+        "source_allowed_root_not_directory",
+        "source_allowed_root_not_found",
+        "source_path_alias_rejected",
+        "source_path_link_rejected",
+        "source_path_must_be_absolute",
+        "source_path_not_directory",
+        "source_path_not_found",
+        "source_path_outside_project_root",
+        "source_path_parent_rejected",
+        "source_project_root_empty",
+        "source_project_root_escape_rejected",
+        "source_project_root_must_be_relative",
+        "source_project_root_not_configured",
+        "source_project_root_not_directory",
+        "source_project_root_not_found",
+        "source_project_root_parent_rejected",
+        "source_project_roots_duplicate_key",
+        "source_project_roots_duplicate_project_id",
+        "source_project_roots_invalid_entry",
+        "source_project_roots_invalid_json",
+        "source_project_roots_invalid_project_id",
+        "source_project_roots_not_configured",
+    }
+)
+
+
 class ProjectSourceBindingError(ValueError):
-    """Manual source configuration or a requested path is not trustworthy."""
+    """Manual source failure carrying one closed, public validation code."""
+
+    def __init__(self, code: str) -> None:
+        if code not in PROJECT_SOURCE_BINDING_CODES:
+            code = "source_binding_invalid"
+        self.code = code
+        super().__init__(code)
 
 
 @dataclass(frozen=True)
@@ -187,6 +224,7 @@ def resolve_project_source_path(
 
 
 __all__ = [
+    "PROJECT_SOURCE_BINDING_CODES",
     "ProjectSourceBindingError",
     "ResolvedProjectSource",
     "parse_project_source_roots",

@@ -29,15 +29,16 @@ import asyncio
 import logging
 from unittest.mock import patch
 
+import pytest
 
 from app.extractor.agent import (
     FALLBACK_AGENT_SDK_ERROR,
     FALLBACK_AGENT_SDK_TIMEOUT,
-    FALLBACK_ANTHROPIC_HTTP,
     FALLBACK_NO_BACKEND,
     Extractor,
     ExtractorResult,
 )
+from app.llm.lifecycle import LLMLifecycleError
 
 
 # ─── ExtractorResult.fallback_reason is plumbed ───────────────────
@@ -96,10 +97,8 @@ def test_agent_sdk_generic_error_surfaces_distinct_reason(monkeypatch):
     assert "agent_sdk_error" in out.model_used
 
 
-def test_anthropic_http_error_falls_through_to_stub_with_reason(monkeypatch):
-    """ANTHROPIC_API_KEY set but HTTP call fails (network / quota) —
-    we fall through to agent-sdk; when that's also unavailable the
-    stub carries the anthropic error reason so the operator can act."""
+def test_direct_anthropic_cannot_reach_http_without_accounting(monkeypatch):
+    """A standalone Extractor cannot use an API key as dispatch authority."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
     monkeypatch.setenv("MNEMOS_DISABLE_AGENT_SDK", "1")
 
@@ -109,14 +108,13 @@ def test_anthropic_http_error_falls_through_to_stub_with_reason(monkeypatch):
         class messages:  # noqa: D401 — match SDK shape
             @staticmethod
             async def create(**_):
-                raise RuntimeError("connection refused")
+                raise AssertionError("provider dispatch must be unreachable")
 
     fake_mod = type("anthropic", (), {"AsyncAnthropic": _DummyAsyncAnthropic})
     with patch.dict("sys.modules", {"anthropic": fake_mod}):
         ext = Extractor()
-        out = asyncio.run(ext.summarize(level=1, target_id="t", evidence=[]))
-    assert out.fallback_reason == FALLBACK_ANTHROPIC_HTTP
-    assert "anthropic_http_error" in out.model_used
+        with pytest.raises(LLMLifecycleError, match="accounting capability"):
+            asyncio.run(ext.summarize(level=1, target_id="t", evidence=[]))
 
 
 # ─── Prometheus counter wiring ─────────────────────────────────────
@@ -213,48 +211,15 @@ def test_startup_verify_embeddings_quiet_when_unset(monkeypatch, caplog):
     assert not any("MISCONFIGURED" in m for m in msgs)
 
 
-def test_startup_verify_embeddings_warns_when_pgvector_missing(
+def test_startup_verify_embeddings_reports_fail_closed_contract(
     monkeypatch, caplog,
 ):
-    """Most common cold-deploy mistake: provider set, pgvector not
-    installed. Boot logs a loud MISCONFIGURED line with the fix."""
     monkeypatch.setenv("MNEMOS_EMBEDDING_PROVIDER", "voyage")
     monkeypatch.setenv("VOYAGE_API_KEY", "x")
     caplog.set_level(logging.WARNING, logger="app.startup_verify")
-    with patch.dict("sys.modules", {"pgvector": None}):
-        # Force ImportError by patching builtins.__import__ for pgvector.
-        real_import = __builtins__["__import__"] \
-            if isinstance(__builtins__, dict) \
-            else __builtins__.__import__
-
-        def fake_import(name, *a, **kw):
-            if name == "pgvector":
-                raise ImportError("not installed")
-            return real_import(name, *a, **kw)
-
-        with patch("builtins.__import__", fake_import):
-            from app.startup_verify import _check_embeddings_soft
-            _check_embeddings_soft()
-    msgs = [r.getMessage() for r in caplog.records]
-    assert any("MISCONFIGURED" in m and "pgvector" in m for m in msgs), (
-        f"expected MISCONFIGURED+pgvector warning, got: {msgs}"
-    )
-    assert any("mnemos-platform[search]" in m for m in msgs)
-
-
-def test_startup_verify_embeddings_warns_on_missing_api_key(
-    monkeypatch, caplog,
-):
-    monkeypatch.setenv("MNEMOS_EMBEDDING_PROVIDER", "voyage")
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    caplog.set_level(logging.WARNING, logger="app.startup_verify")
-    # pgvector import path must succeed for the API-key check to fire.
-    import sys
-    if "pgvector" not in sys.modules:
-        sys.modules["pgvector"] = type(sys)("pgvector")  # tiny stub
     from app.startup_verify import _check_embeddings_soft
     _check_embeddings_soft()
     msgs = [r.getMessage() for r in caplog.records]
-    assert any(
-        "MISCONFIGURED" in m and "VOYAGE_API_KEY" in m for m in msgs
-    ), f"expected key-missing warning, got: {msgs}"
+    assert any("DISABLED" in m and "project_scoped" in m for m in msgs), (
+        f"expected explicit cloud-embedding disable warning, got: {msgs}"
+    )

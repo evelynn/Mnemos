@@ -18,7 +18,8 @@ the evidence level is not uniform and the Phase-2 gaps below are part of the pro
    That index is the useful product and the default first pass uses **zero LLM tokens**. Optional
    **L1(symbol) → L2(file) → L3(module)** narration may condense graph evidence afterward; at
    L2+ it never re-reads raw files. All opt-in AI extraction/narration shares finite call/input/
-   wall budgets; Chat has a system-inclusive 24K-character input ceiling. `pack_by_budget` bounds
+   output/wall budgets; Agent + L1–L3 analysis scopes persist reservations/deadlines across worker
+   restart. Chat has a system-inclusive 24K-character input ceiling. `pack_by_budget` bounds
    oversized items and priority ranking covers the important surface first. → `server/app/extractor/runner.py`,
    `extractor/packing.py`, `orchestrator/source_manifest.py`.
 2. **Hallucination.** Mnemos grounds **structured LLM claims**: malformed or evidence-free claims,
@@ -44,8 +45,10 @@ the evidence level is not uniform and the Phase-2 gaps below are part of the pro
    (`merge/runtime.py`); risk scoring weights blast-radius + exercised (`merge/findings.py`).
 
 It then **presents results as clear tables/views** in the dashboard, and answers questions in the
-**Chat tab** grounded in the analysis (multi-provider: Claude/OpenAI/Gemini/Atlas — `api/chat.py`,
-`api/llm_providers.py`, configured in Settings → AI 제공자).
+**Chat tab** grounded in the analysis (price-attested direct Claude/OpenAI/Gemini routes —
+`api/chat.py`, `api/llm_providers.py`, configured in Settings → AI 제공자). Atlas remains a
+configuration surface, but generation is fail-disabled until it has a provider-enforced output,
+usage, immutable price, and durable-attempt contract.
 
 ## Hard guardrails — do NOT drift
 
@@ -96,14 +99,16 @@ It then **presents results as clear tables/views** in the dashboard, and answers
   readable while runtime reconciliation, findings, and optional summaries finish. Those derived
   stages close the run as `completed` or explicitly `partial`; they do not roll the head back.
   Current HTTP/MCP/source readers pin and revalidate both source and durable-overlay generations.
-  This contract has local SQLite/unit/mock integration evidence; real-Postgres CI, hard worker-kill
-  fault injection, and a 50 K-file soak are still required before a production-atomicity claim.
+  This contract has SQLite/unit/mock evidence plus a PostgreSQL 17.10 migration/ledger suite and a
+  50 K-file/50 K-node component soak. Hard process-kill fault injection and a representative
+  end-to-end repository workload are still required before a production-atomicity claim.
 - `created_by` materializes the canonical union of identical current producer contributions, but
   there is not yet a durable per-producer contribution history. Deletion authority therefore stays
   conservative and is granted only to producers whose complete coverage was sealed for the run.
 - Authoritative refresh keeps run identities in bounded memory and spills them to a private
-  temporary disk index; current-row sweep is paged. The sweep is still **O(graph) DB work** and
-  has not been proven on a 50 K-file repository.
+  temporary disk index; current-row sweep is paged. The sweep is still **O(graph) DB work**. It
+  passed a narrow 50 K-file/50 K-node/zero-edge PostgreSQL component soak, which is not evidence
+  for Linux-kernel complexity, mixed analyzer verbs, or production query latency.
 - Analyzer success is inferred from bounded process/JSONL/verb completion; the contract does not
   yet include a signed terminal coverage record with scanned-file counts. An analyzer bug that
   exits 0 and emits zero valid facts cannot always be distinguished from legitimately empty source.
@@ -120,15 +125,52 @@ It then **presents results as clear tables/views** in the dashboard, and answers
 - Project-lock contention preserves the queued run and retries it, but a hard-crashed owner cannot
   be safely pre-empted without a fencing token/DB advisory lock. The fail-safe Redis lease can delay
   the next run for up to its nine-hour TTL rather than risking two current-graph writers.
-- The remediated optional LLM path has static/unit/mock coverage only in this environment. A live
-  provider canary, real Postgres run, 50 K-file soak, and representative E4 workflow remain unrun.
+- The remediated optional LLM path has static/unit/mock and real-PostgreSQL accounting evidence.
+  No provider credential is present in this environment, so a live OpenAI/Anthropic/Gemini canary
+  and a representative E4 answer-quality/token workflow remain unrun. Do not convert hard budget
+  safety into a claim of measured token savings or provider interoperability.
+- Cloud embeddings (Voyage/OpenAI) are deliberately non-executable even when legacy environment
+  variables are populated. The old adapter had no project-scoped durable attempt identity, usage
+  settlement, or immutable worst-price reservation, so MCP search remains deterministic lexical/
+  BM25 until that full accounting contract is implemented. RRF/cosine helpers and the opt-in
+  pgvector schema remain scaffolding, not evidence of a live vector-search product path.
+- Every production paid-generation owner (Chat, direct Anthropic Summary, Second Opinion, Agent
+  extraction, and Flow) requires a positive project-dollar policy and an atomic worst-case
+  reservation before network dispatch. Immutable contracts bind the exact provider, model,
+  official API base, full documented input ceiling, requested provider-enforced output cap, and
+  conservative input/output prices. Project-row serialization makes concurrent reservations
+  atomic; STARTED is committed before dispatch; terminal replay is allowed after policy removal.
+  Unknown models, routes, catalogs, and zero/unset caps fail before network. This deliberately
+  over-reserves and never refunds, so it is a safety invariant rather than a utilization claim.
+- Direct OpenAI/Gemini/Anthropic routes are the only price-attested generation routes. OpenAI must
+  use the official HTTPS `api.openai.com/v1` root; Anthropic clients explicitly use the official
+  base and disable SDK retries. Opaque Claude Agent SDK summary/extraction/Flow has no immutable
+  price/route contract and is therefore fail-disabled before `query()`, even if the SDK is
+  importable or an operator raises token limits. Atlas generation is likewise disabled.
+- Chat, Summary, Flow, Agent extraction, and Second Opinion all use durable stable operation/input
+  identities, encrypted normalized candidates, terminal-aware replay, and privacy-safe failure
+  codes. Summary/Flow/Second Opinion validate the exact candidate binding and commit accepted
+  product publication with attempt classification in one transaction. A committed candidate is
+  replayed without provider redispatch after a crash; a STARTED attempt is never guessed complete.
 - Optional `trace_flow` L4 narration is pinned to bounded files from one atomically published Git
-  snapshot and uses the canonical `mnemos.flow_result.v1` contract. Its step/flag prose is not yet
-  grounded to graph node/edge or line-range evidence. Treat valid output as a hypothesis-bearing
-  explanation and malformed output as invalid, never as a verified graph fact.
-- AI extraction for uncovered languages is explicit opt-in and `certainty="inferred"` only —
-  lower trust than deterministic analyzers. Go/Rust/Ruby have a deterministic tree-sitter path
-  when its optional dependency is installed; C/C++ is deterministic.
+  snapshot and uses the canonical `mnemos.flow_result.v1` contract. Its current Agent SDK
+  transport is production-fail-disabled by the missing immutable route/price contract. If a
+  price-attested transport is added, its step/flag prose still lacks graph node/edge or line-range
+  grounding and must remain a hypothesis-bearing explanation, never a verified graph fact.
+- L2/L3 narration currently materializes all current lower-level summaries/nodes before applying
+  its target limit. Calls and prompt size remain bounded, but pre-call DB/RAM work is O(project);
+  a deterministic bounded SQL selection is Phase-2 work.
+- Lexical symbol search uses an unanchored `ILIKE` candidate scan capped at 2,000 rows before
+  application scoring. On a very large graph this can miss the globally best result; cloud vector
+  search stays disabled, so do not claim CBM-like local semantic-search coverage or latency.
+- Gate-B Second Opinion selects bounded diff-line evidence, but `DiffSubmit.diff` has no explicit
+  size limit and the deterministic review passes process the full submitted string. A request/body
+  and deterministic-pass input ceiling is still Phase-2 hardening.
+- AI extraction for uncovered languages is `certainty="inferred"` only and lower trust than
+  deterministic analyzers. Its current Agent SDK transport is fail-disabled by the immutable
+  price/route requirement; explicit opt-in alone does not enable network dispatch. Go/Rust/Ruby
+  have a deterministic tree-sitter path when its optional dependency is installed; C/C++ is
+  deterministic.
 
 ## Stack quick-map
 

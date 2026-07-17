@@ -7,10 +7,10 @@ Commands:
 - create-admin <username> <password>
     Legacy shorthand kept for scripts. Prefer ``create-user``.
 - rotate-fernet-key --old-key K1 --new-key K2 [--dry-run]
-    Re-encrypt every stored secret from the old Fernet key to the new
-    one. Safe to run while the platform is live (writes row-by-row in
-    its own transaction); prefer a scheduled maintenance window anyway
-    so a newly-created secret isn't missed mid-rotation.
+    Re-encrypt every stored secret and encrypted LLM semantic candidate
+    from the old Fernet key to the new one. Safe to run while the platform
+    is live (one transaction); prefer a maintenance window so no new row is
+    missed mid-rotation.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from sqlalchemy import select
 from app.auth.passwords import hash_password
 from app.db import SessionLocal
 from app.models.auth import Secret, User
+from app.models.llm import LLMSemanticCandidate
 
 _VALID_ROLES = {"admin", "operator", "viewer"}
 
@@ -34,6 +35,7 @@ async def _rotate_fernet_key(old_key: str, new_key: str, dry_run: bool) -> int:
     old_fernet = Fernet(old_key.encode() if isinstance(old_key, str) else old_key)
     new_fernet = Fernet(new_key.encode() if isinstance(new_key, str) else new_key)
     rewrapped = 0
+    candidates_rewrapped = 0
     skipped = 0
     async with SessionLocal() as session:
         result = await session.execute(select(Secret))
@@ -48,10 +50,29 @@ async def _rotate_fernet_key(old_key: str, new_key: str, dry_run: bool) -> int:
             if not dry_run:
                 secret.ciphertext = new_ciphertext
             rewrapped += 1
+        candidates = await session.execute(select(LLMSemanticCandidate))
+        for candidate in candidates.scalars().all():
+            try:
+                plaintext = old_fernet.decrypt(candidate.payload_ciphertext)
+            except InvalidToken:
+                skipped += 1
+                print(
+                    f"skip candidate {candidate.attempt_id}: decrypt_failed "
+                    "(already rotated?)",
+                    file=sys.stderr,
+                )
+                continue
+            new_ciphertext = new_fernet.encrypt(plaintext)
+            if not dry_run:
+                candidate.payload_ciphertext = new_ciphertext
+            candidates_rewrapped += 1
         if not dry_run:
             await session.commit()
     verb = "would rewrap" if dry_run else "rewrapped"
-    print(f"{verb} {rewrapped} secrets (skipped {skipped})")
+    print(
+        f"{verb} {rewrapped} secrets and {candidates_rewrapped} "
+        f"LLM candidates (skipped {skipped})"
+    )
     return 0 if skipped == 0 else 2
 
 
@@ -103,8 +124,8 @@ async def _verify() -> int:
     # 1) config — get_settings re-runs the PR-97 SECRET_KEY guard.
     try:
         s = get_settings()
-    except RuntimeError as exc:
-        print(f"FAIL  config: {exc}", file=_sys.stderr)
+    except RuntimeError:
+        print("FAIL  config: invalid_configuration", file=_sys.stderr)
         return 1
     print(f"ok    config: mnemos_env={s.mnemos_env}")
 
@@ -116,8 +137,8 @@ async def _verify() -> int:
         async with SessionLocal() as db:
             await db.execute(text("SELECT 1"))
         print("ok    database")
-    except Exception as exc:  # noqa: BLE001
-        print(f"FAIL  database: {exc.__class__.__name__}: {exc}", file=_sys.stderr)
+    except Exception:  # noqa: BLE001
+        print("FAIL  database: database_unavailable", file=_sys.stderr)
         failures.append("database")
 
     # 3) Redis connect.
@@ -129,8 +150,8 @@ async def _verify() -> int:
         if not pong:
             raise RuntimeError("no pong")
         print("ok    redis")
-    except Exception as exc:  # noqa: BLE001
-        print(f"FAIL  redis: {exc.__class__.__name__}: {exc}", file=_sys.stderr)
+    except Exception:  # noqa: BLE001
+        print("FAIL  redis: redis_unavailable", file=_sys.stderr)
         failures.append("redis")
 
     # 4) Crypto round-trip — catches a wrong-rotated FERNET_KEY.
@@ -142,8 +163,8 @@ async def _verify() -> int:
         if decrypt(ct, iv) != probe:
             raise RuntimeError("round_trip_mismatch")
         print("ok    crypto: round_trip")
-    except Exception as exc:  # noqa: BLE001
-        print(f"FAIL  crypto: {exc.__class__.__name__}: {exc}", file=_sys.stderr)
+    except Exception:  # noqa: BLE001
+        print("FAIL  crypto: crypto_unavailable", file=_sys.stderr)
         failures.append("crypto")
 
     # 5) Analyzer binaries on PATH (advisory).
@@ -188,7 +209,10 @@ def main() -> None:
 
     rotate = sub.add_parser(
         "rotate-fernet-key",
-        help="re-encrypt stored secrets from --old-key to --new-key",
+        help=(
+            "re-encrypt stored secrets and LLM candidates from --old-key "
+            "to --new-key"
+        ),
     )
     rotate.add_argument("--old-key", required=True, help="current FERNET_KEY")
     rotate.add_argument("--new-key", required=True, help="new FERNET_KEY to store under")

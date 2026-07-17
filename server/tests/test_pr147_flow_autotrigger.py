@@ -43,15 +43,14 @@ async def test_gather_files_from_graph_spans_tiers():
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
     from app.api.flow import _gather_files_from_graph
-    from app.models.base import Base
     from app.models.graph import Edge, Node
-    from app.models.organization import Organization  # noqa: F401
     from app.testing.sqlite_polyglot import install_polyglot
 
     install_polyglot()
     eng = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with eng.begin() as c:
-        await c.run_sync(Base.metadata.create_all)
+        await c.run_sync(Node.__table__.create)
+        await c.run_sync(Edge.__table__.create)
 
     pid = uuid.uuid4()
     async with AsyncSession(eng, expire_on_commit=False) as s:
@@ -72,6 +71,12 @@ async def test_gather_files_from_graph_spans_tiers():
         await s.commit()
 
         files = await _gather_files_from_graph(s, pid, "place order", max_files=10)
+        repeated = await _gather_files_from_graph(
+            s, pid, "place order", max_files=10
+        )
+        top_match = await _gather_files_from_graph(
+            s, pid, "place order", max_files=1
+        )
 
     # FE + BE matched by name; DB file reached via the WRITES edge.
     assert "frontend/checkout.js" in files
@@ -79,3 +84,5 @@ async def test_gather_files_from_graph_spans_tiers():
     assert "db/schema.sql" in files
     # the unrelated symbol (no name/edge match) is not pulled in
     assert "backend/other.py" not in files
+    assert repeated == files
+    assert top_match == ["frontend/checkout.js"]

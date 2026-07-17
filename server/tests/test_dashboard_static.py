@@ -76,6 +76,16 @@ def test_settings_412_no_longer_silent():
     assert "Failed to load DB bindings" in settings
 
 
+def test_claude_chat_ui_does_not_advertise_key_free_subscription():
+    settings = _read(_TPL / "settings.html")
+    chat = _read(_TPL / "chat.html")
+    assert "Uses this machine's Claude Code subscription" not in settings
+    assert "Anthropic API key required" in settings
+    assert "full 128K output ceiling" in settings
+    assert "Agent SDK-only" in chat
+    assert "not advertised as available" in chat
+
+
 def test_gdpr_uses_class_not_inline_style():
     gdpr = _read(_TPL / "gdpr.html")
     assert 'style="background:#c62828' not in gdpr

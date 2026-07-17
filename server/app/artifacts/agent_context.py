@@ -9,6 +9,7 @@ builds those two artifacts from the current graph snapshot.
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -40,6 +41,7 @@ from app.models.graph import AnalysisRun, Edge, GraphHead, Node
 from app.models.overlays import GraphEdgeHumanOverlay, GraphNodeHumanOverlay
 from app.models.projects import Project
 from app.models.stages import AnalysisStage
+from app.orchestrator.failure_codes import sanitize_public_failure_code
 
 SCHEMA_PROJECT_INDEX = "mnemos.agent.project_index.v1"
 SCHEMA_TASK_PACK = "mnemos.agent.task_context_pack.v1"
@@ -59,12 +61,24 @@ _RAW_DATA_KEYS = {
     "code",
     "content",
     "content_base64",
+    "contract_errors",
+    "error",
+    "error_log",
+    "errors",
+    "exception",
     "file_text",
     "full_text",
     "payload",
+    "prompt",
     "raw",
+    "request",
+    "request_body",
+    "response",
+    "response_body",
     "snippet",
     "source_text",
+    "system_prompt",
+    "traceback",
 }
 _MAX_DATA_DEPTH = 4
 _MAX_DATA_KEYS = 80
@@ -141,7 +155,7 @@ def _measure(value: Any) -> dict[str, Any]:
         return {"type": "list", "items": len(value)}
     if isinstance(value, dict):
         return {"type": "dict", "keys": len(value)}
-    return {"type": type(value).__name__}
+    return {"type": "other"}
 
 
 def _is_raw_key(key: str | None) -> bool:
@@ -153,6 +167,9 @@ def _is_raw_key(key: str | None) -> bool:
         or normalized.endswith("_raw")
         or normalized.endswith("_content")
         or normalized.endswith("_blob")
+        or normalized.endswith("_prompt")
+        or normalized.endswith("_request")
+        or normalized.endswith("_response")
     )
 
 
@@ -175,7 +192,11 @@ def _bounded_value(value: Any, *, key: str | None = None, depth: int = 0) -> Any
         for index, (child_key, child_value) in enumerate(value.items()):
             if index >= _MAX_DATA_KEYS:
                 break
-            safe_key = str(child_key)
+            safe_key = (
+                child_key
+                if isinstance(child_key, str)
+                else f"__non_string_key_{index}__"
+            )
             if len(safe_key) > _MAX_DATA_KEY_CHARS:
                 safe_key = (
                     f"{safe_key[:120]}... "
@@ -195,7 +216,15 @@ def _bounded_value(value: Any, *, key: str | None = None, depth: int = 0) -> Any
         if len(value) > _MAX_DATA_LIST_ITEMS:
             out.append({"__truncated_items__": len(value) - _MAX_DATA_LIST_ITEMS})
         return out
-    return value
+    if value is None or type(value) in {bool, int}:
+        return value
+    if type(value) is float:
+        return value if math.isfinite(value) else {"omitted": "non_finite_number"}
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return {"omitted": "unsupported_type"}
 
 
 def _agent_data(data: dict[str, Any] | None) -> dict[str, Any]:
@@ -218,7 +247,7 @@ def _bounded_text(value: Any, *, max_chars: int) -> tuple[Any, int | None]:
 
 def _serialized_size(value: Any) -> int:
     """Measure exactly as the MCP transport serialises an object."""
-    return len(json.dumps(value, default=str).encode("utf-8"))
+    return len(json.dumps(value, allow_nan=False).encode("utf-8"))
 
 
 def _normalise_serialized_budget(value: int) -> int:
@@ -915,7 +944,7 @@ def _run_payload(run: AnalysisRun) -> dict[str, Any]:
         "completed_at": _iso(run.completed_at),
         "created_at": _iso(run.created_at),
         "stats": _agent_data(run.stats),
-        "error_log": _bounded_value(run.error_log, key="error_log"),
+        "error_log": sanitize_public_failure_code(run.error_log),
     }
 
 
@@ -1279,7 +1308,7 @@ async def build_project_index(
         GraphHeadMissing,
         GraphHeadNeedsRebuild,
         GraphPublicationInvariantError,
-    ) as exc:
+    ):
         # The compact index remains available to explain how to create the
         # first trusted graph. It deliberately omits all live Node/Edge rows.
         return _apply_serialized_budget(
@@ -1294,7 +1323,7 @@ async def build_project_index(
                     "snapshot_consistency": "unavailable",
                     "graph_queries_safe": False,
                     "diagnostic_only": True,
-                    "graph_head_error": str(exc),
+                    "graph_head_error": "graph_snapshot_unavailable",
                     "graph_data_omitted": "no_atomic_publication",
                 },
                 "repair": {
@@ -1432,14 +1461,14 @@ async def build_project_index(
     _annotate_relative_files(index, root_prefix)
     try:
         await revalidate_graph_stamp(session, stamp=graph_stamp)
-    except GraphGenerationChanged as exc:
+    except GraphGenerationChanged:
         # PostgreSQL READ COMMITTED may cross a promotion between the many
         # bounded index queries. Never serialize that mixed materialization.
         return _apply_serialized_budget(
             {
                 "schema": SCHEMA_PROJECT_INDEX,
                 "error": "graph_snapshot_changed_retry",
-                "reason": str(exc),
+                "reason": "graph_snapshot_changed_retry",
                 "retryable": True,
                 "snapshot": {
                     "generation": graph_stamp.generation,

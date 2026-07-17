@@ -54,6 +54,62 @@ async def read_review_graph_stamp(
     return await read_graph_stamp(session, project_id=project_id)
 
 
+async def resolve_review_revision_from_stamp(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    stamp: GraphReadStamp,
+) -> CanonicalReviewRevision:
+    """Resolve immutable review provenance for a previously read graph stamp.
+
+    This does not lock the graph.  It is the pre-provider binding used by the
+    Gate-B product identity; callers still perform
+    :func:`lock_review_graph_revision` after the review and keep that lock
+    through the decision write.  A publication race therefore wastes at most
+    one old-revision product and can never authorize it for the new revision.
+    """
+
+    if (
+        stamp.project_id != project_id
+        or type(stamp.generation) is not int
+        or stamp.generation < 1
+        or type(stamp.overlay_generation) is not int
+        or stamp.overlay_generation < 0
+    ):
+        raise GraphPublicationInvariantError(
+            "Gate-B graph stamp is not a canonical ready revision"
+        )
+    current_run_id = stamp.current_run_id
+    if not isinstance(current_run_id, uuid.UUID):
+        try:
+            run_id = uuid.UUID(str(current_run_id))
+        except (TypeError, ValueError) as exc:
+            raise GraphPublicationInvariantError(
+                "canonical graph revision has an invalid run id"
+            ) from exc
+    else:
+        run_id = current_run_id
+    git_sha = (
+        await session.execute(
+            select(AnalysisRun.git_sha).where(
+                AnalysisRun.id == run_id,
+                AnalysisRun.project_id == project_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not isinstance(git_sha, str) or _CANONICAL_GIT_SHA.fullmatch(git_sha) is None:
+        raise GraphPublicationInvariantError(
+            "canonical graph revision has no full lowercase hexadecimal git_sha"
+        )
+    return CanonicalReviewRevision(
+        project_id=project_id,
+        run_id=run_id,
+        source_generation=stamp.generation,
+        overlay_generation=stamp.overlay_generation,
+        git_sha=git_sha,
+    )
+
+
 async def lock_review_graph_revision(
     session: AsyncSession,
     *,
@@ -88,34 +144,10 @@ async def lock_review_graph_revision(
             f"{current_stamp.overlay_generation}"
         )
 
-    git_sha = (
-        await session.execute(
-            select(AnalysisRun.git_sha).where(
-                AnalysisRun.id == head.current_run_id,
-                AnalysisRun.project_id == project_id,
-            )
-        )
-    ).scalar_one_or_none()
-    if not isinstance(git_sha, str) or _CANONICAL_GIT_SHA.fullmatch(git_sha) is None:
-        raise GraphPublicationInvariantError(
-            "canonical graph revision has no full lowercase hexadecimal git_sha"
-        )
-    if not isinstance(head.current_run_id, uuid.UUID):
-        try:
-            run_id = uuid.UUID(str(head.current_run_id))
-        except (TypeError, ValueError) as exc:
-            raise GraphPublicationInvariantError(
-                "canonical graph revision has an invalid run id"
-            ) from exc
-    else:
-        run_id = head.current_run_id
-
-    return CanonicalReviewRevision(
+    return await resolve_review_revision_from_stamp(
+        session,
         project_id=project_id,
-        run_id=run_id,
-        source_generation=receipt.generation,
-        overlay_generation=head.overlay_generation,
-        git_sha=git_sha,
+        stamp=current_stamp,
     )
 
 

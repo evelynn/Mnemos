@@ -27,7 +27,7 @@ from app.models import runtime as _runtime  # noqa: E402,F401
 from app.models import samples as _samples  # noqa: E402,F401
 from app.models import stages as _stages  # noqa: E402,F401
 from app.models.base import Base  # noqa: E402
-from app.models.findings import LLMCall, Summary  # noqa: E402
+from app.models.findings import LLMCall, LLMBudgetScope, Summary  # noqa: E402
 from app.models.graph import AnalysisRun, Edge, Node  # noqa: E402
 from app.models.projects import Project  # noqa: E402
 from app.testing.sqlite_polyglot import install_polyglot  # noqa: E402
@@ -138,6 +138,13 @@ async def test_full_index_is_zero_llm_and_same_content_incremental_is_noop(
         assert edge_count >= 1
         assert int((await session.execute(select(func.count()).select_from(Summary))).scalar_one()) == 0
         assert int((await session.execute(select(func.count()).select_from(LLMCall))).scalar_one()) == 0
+        assert int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(LLMBudgetScope)
+                )
+            ).scalar_one()
+        ) == 0
         first_history = int(
             (
                 await session.execute(
@@ -406,9 +413,17 @@ async def test_agent_option_does_not_allocate_budget_when_analyzer_is_available(
                 await session.execute(select(func.count()).select_from(LLMCall))
             ).scalar_one()
         )
+        budget_scopes = int(
+            (
+                await session.execute(
+                    select(func.count()).select_from(LLMBudgetScope)
+                )
+            ).scalar_one()
+        )
         assert run is not None and run.status == "completed"
         assert run.stats["ai_narration"]["run_budget"] is None
         assert llm_calls == 0
+        assert budget_scopes == 0
 
     await engine.dispose()
 
@@ -446,7 +461,9 @@ async def test_source_run_forwards_agent_budget_to_published_postprocess(
     agent_budgets: list[LLMRunBudget] = []
     postprocess_budgets: list[LLMRunBudget | None] = []
 
-    def one_budget_per_source_run():
+    def one_budget_per_source_run(*, scope_id=None):  # noqa: ANN001
+        assert scope_id == run_id
+        budget.scope_id = scope_id
         factory_calls.append(budget)
         return budget
 

@@ -247,6 +247,28 @@ def _bounded_text(
         )
         return None
     normalized = value.strip()
+    if "\x00" in normalized:
+        _issue(
+            issues,
+            path=path,
+            rule="text contains a database-incompatible NUL",
+            expected="NUL-free UTF-8 text",
+            actual=value,
+            hint="Remove U+0000; PostgreSQL text and JSONB cannot store it.",
+        )
+        return None
+    try:
+        normalized.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        _issue(
+            issues,
+            path=path,
+            rule="text is not valid Unicode scalar data",
+            expected="strictly UTF-8-encodable text",
+            actual=value,
+            hint="Remove unpaired UTF-16 surrogate code points.",
+        )
+        return None
     if not normalized:
         _issue(
             issues,

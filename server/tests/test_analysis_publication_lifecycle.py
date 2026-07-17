@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -519,8 +520,10 @@ async def test_findings_failure_is_bounded_partial_and_preserves_head(
     async def _runtime(*_args: Any, **_kwargs: Any) -> dict[str, int]:
         return {"matched": 2, "unmatched": 0}
 
+    secret = "provider-token=postprocess-secret source=private-source-fragment"
+
     async def _findings(*_args: Any, **_kwargs: Any) -> dict[str, int]:
-        raise RuntimeError("x" * 5000)
+        raise RuntimeError(f"{secret} {'x' * 5000}")
 
     async def _supersede(*_args: Any, **_kwargs: Any) -> int:
         return 0
@@ -557,13 +560,28 @@ async def test_findings_failure_is_bounded_partial_and_preserves_head(
         ).scalar_one()
         assert run is not None and run.status == "partial"
         assert run.stats["postprocess"]["findings_freshness"]["status"] == "unknown"
-        assert len(run.stats["postprocess_error"]["message"]) <= 2048
+        assert run.stats["postprocess_error"]["type"] == "internal_failure"
+        assert run.stats["postprocess_error"]["code"] == "postprocess_internal_failure"
+        assert run.stats["postprocess_error"]["message"] == "postprocess_internal_failure"
+        assert run.error_log == "postprocess_internal_failure"
         assert head is not None and head.current_run_id == run_id
         assert head.generation == 1
-        assert finding_stage.error_log is not None
-        assert len(finding_stage.error_log) <= 2048
+        assert finding_stage.error_log == "stage_internal_failure"
     partial_event = next(event for event in bus.events if event["event"] == "run_partial")
-    assert len(partial_event["error"]) <= 2048
+    assert partial_event["error"] == "postprocess_internal_failure"
+    stage_event = next(event for event in bus.events if event["event"] == "stage_failed")
+    assert stage_event["error"] == "stage_internal_failure"
+    projections = json.dumps(
+        {
+            "run_error": run.error_log,
+            "run_stats": run.stats,
+            "stage_error": finding_stage.error_log,
+            "events": bus.events,
+        },
+        sort_keys=True,
+    )
+    assert "postprocess-secret" not in projections
+    assert "private-source-fragment" not in projections
     baseline = await jobs._current_published_stats(project_id, uuid.uuid4())
     assert baseline is not None
     assert baseline["graph_publication"]["generation"] == 1

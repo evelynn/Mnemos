@@ -15,6 +15,7 @@ os.environ.setdefault("MNEMOS_SKIP_STARTUP_VERIFY", "1")
 
 from app.extractor.packing import evidence_hash  # noqa: E402
 from app.extractor.agent import Extractor  # noqa: E402
+from app.extractor.cost import LLMRunBudget  # noqa: E402
 from app.extractor.runner import summarise_l1  # noqa: E402
 from app.graph_overlays import record_human_confirmation  # noqa: E402
 from app.models.findings import Summary  # noqa: E402
@@ -30,6 +31,7 @@ from app.orchestrator.jobs import (  # noqa: E402
     _supersede_stale_graph_summaries,
 )
 from app.testing.graph_publication import published_run_fields  # noqa: E402
+from app.testing.llm_adapter import create_llm_ledger_tables  # noqa: E402
 from app.testing.sqlite_polyglot import install_polyglot  # noqa: E402
 
 install_polyglot()
@@ -47,6 +49,7 @@ async def _summary_database():
         await connection.run_sync(GraphNodeHumanOverlay.__table__.create)
         await connection.run_sync(GraphEdgeHumanOverlay.__table__.create)
         await connection.run_sync(GraphEdgeRuntimeOverlay.__table__.create)
+        await create_llm_ledger_tables(connection)
         await connection.run_sync(Summary.__table__.create)
     return engine, sessionmaker(
         engine,
@@ -301,6 +304,7 @@ async def test_edge_confirmation_invalidates_l1_evidence_cache():
             project_id=project_id,
             limit=1,
             analysis_run_id=run_id,
+            run_budget=LLMRunBudget(scope_id=run_id),
         ) == 1
         first_hash = (
             await session.execute(
@@ -328,6 +332,7 @@ async def test_edge_confirmation_invalidates_l1_evidence_cache():
             project_id=project_id,
             limit=1,
             analysis_run_id=run_id,
+            run_budget=LLMRunBudget(scope_id=run_id),
         ) == 1
         current = (
             await session.execute(
@@ -354,6 +359,7 @@ async def test_edge_confirmation_invalidates_l1_evidence_cache():
 async def test_large_retain_set_is_restored_in_portable_sqlite_batches():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
+        await create_llm_ledger_tables(connection)
         await connection.run_sync(Summary.__table__.create)
 
     update_binds: list[tuple[str, int]] = []

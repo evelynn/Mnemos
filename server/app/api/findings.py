@@ -487,18 +487,19 @@ async def findings_roi(
         (await db.execute(open_risk_stmt)).scalar_one()
     )
 
-    from app.models.findings import LLMCall
+    from app.extractor.cost import project_budget_exposure
 
-    token_stmt = select(func.coalesce(func.sum(LLMCall.tokens_used), 0)).where(
-        LLMCall.project_id == project_id,
+    cost = await project_budget_exposure(
+        db,
+        project_id,
+        since=(
+            window_start
+            if window_start is not None
+            else datetime(1970, 1, 1, tzinfo=timezone.utc)
+        ),
     )
-    if window_start is not None:
-        token_stmt = token_stmt.where(LLMCall.generated_at >= window_start)
-    total_tokens = int((await db.execute(token_stmt)).scalar_one())
-    from app.extractor.cost import rate_usd_per_mtok
-
-    rate = rate_usd_per_mtok()
-    estimated_usd = round((total_tokens / 1_000_000.0) * rate, 4)
+    estimated_usd = cost.known_spend_usd
+    cost_indeterminate = cost.unknown_provider_calls > 0
 
     triaged = findings_resolved + false_positive_count
     return {
@@ -508,9 +509,17 @@ async def findings_roi(
         "open_risk_remaining": open_risk_remaining,
         "false_positive_count": false_positive_count,
         "estimated_usd": estimated_usd,
+        "known_spend_usd": estimated_usd,
+        "unknown_provider_calls": cost.unknown_provider_calls,
+        "unknown_provider_reservation_usd": (
+            cost.unknown_provider_exposure_usd
+        ),
+        "authorized_reservation_usd": cost.authorized_reservation_usd,
+        "unpriced_provider_calls": cost.unpriced_provider_calls,
+        "cost_indeterminate": cost_indeterminate,
         "risk_per_usd": (
             round(risk_eliminated / estimated_usd, 1)
-            if estimated_usd > 0
+            if estimated_usd > 0 and not cost_indeterminate
             else None
         ),
         "precision": (

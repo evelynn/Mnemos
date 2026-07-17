@@ -10,13 +10,18 @@ product, and it does not ask an LLM to form an
 expensive opinion about the whole repository up front.
 
 **Status**: beta, not production-qualified. The core source-index/MCP workflow
-has unit, mock-integration, and one external-repository evaluation. Run-scoped
-staging, atomic graph-head publication, durable evidence overlays, and
-source/overlay generation-pinned readers are connected to ingest; real
-Postgres/provider validation, hard-kill fault injection, and a 50 K-file soak
-remain.
+has unit, mock-integration, one external-repository evaluation, real PostgreSQL
+ledger/concurrency validation, and a narrow 50 K-file/50 K-node publication
+soak. Run-scoped staging, atomic graph-head publication, durable evidence
+overlays, and source/overlay generation-pinned readers are connected to ingest.
+Live-provider validation, hard process-kill fault injection, and representative
+unseen-repository quality/token comparisons remain.
 See the [Phase-B contract and evidence report](docs/04-eval/atomic-graph-publication-phase-b-2026-07-15.md)
 and [`docs/architecture.md`](docs/architecture.md) for the delivered architecture.
+The current hard-budget/PostgreSQL evidence is in the
+[speed/token root report](docs/04-eval/speed-token-root-design-2026-07-16.md), and the honest
+[comparison with codebase-memory-mcp](docs/04-eval/codebase-memory-comparison-2026-07-16.md)
+records where Mnemos still does not lead.
 The [token/refresh research](docs/04-eval/token-refresh-architecture-research-2026-07-15.md)
 and [July 14 remediation assessment](docs/04-eval/source-analysis-purpose-and-remediation-2026-07-14.md)
 are historical checkpoints that explain the original failure modes;
@@ -62,8 +67,10 @@ product into a generic workflow platform.
    no writes to operational DBs, no production deploys. Bypass switches
    are **not** built.
 6. Deterministic index first: a normal first pass uses zero LLM tokens.
-   Optional agent extraction and narration share hard call/input/wall budgets;
-   no LLM call sees the whole codebase.
+   Optional AI work has hard call/input/output/wall bounds. Every production
+   paid generation also requires a positive project cap and an atomic
+   worst-case dollar reservation before dispatch; no LLM call sees the whole
+   codebase. Opaque/unpriced transports are fail-disabled.
 7. The platform is designed as an always-on service. Analyzer output is isolated
    by run and becomes current through one atomic publication receipt; optional
    post-publication products may finish as explicitly `partial` without corrupting
@@ -104,12 +111,16 @@ product into a generic workflow platform.
 - **Optional LLM narration** — explicit L1 (function) → L2 (file) → L3
   (module) pass over bounded graph evidence. Semantic evidence hashes skip
   unchanged targets; this layer is not required for source lookup or MCP.
+  The price-attested direct Anthropic route is crash-accounted. The opaque
+  Claude Agent SDK route is intentionally disabled until it has an immutable
+  route/price/output contract.
 - **Ask (Q&A)** — `POST /projects/{id}/ask` answers from graph evidence.
   Arbitrary host-path deepening is disabled; agents can verify a selected range
   through the bounded MCP reader tied to the latest completed Git snapshot.
-- **Hybrid search scaffold** — `search_symbols` is BM25/lexical by default;
-  set `MNEMOS_EMBEDDING_PROVIDER` (`voyage` or `openai`) to enable the vector
-  half of the spec's vector + BM25 ensemble.
+- **Search** — `search_symbols` is deterministic lexical/BM25. Legacy
+  Voyage/OpenAI vector scaffolding is deliberately non-executable even when
+  `MNEMOS_EMBEDDING_PROVIDER` is set because it lacks project-scoped durable
+  accounting and an immutable worst-price contract.
 - **Data path safety** — per-project DB bindings with `sensitive_tables`,
   regex-based `masking_rules`, Korean PII validators (RRN / foreigner ID /
   Luhn / driver's licence), Oracle `allow_awr` consent, and cron-expression
@@ -121,7 +132,11 @@ product into a generic workflow platform.
 - **Plan / diff / MR flow** — AI-driven changes land as plans, run through a
   multi-pass ultrareview (Gate A + Gate B), and open GitLab MRs when
   approved. Worktrees are real `git worktree`s with read-only bind mounts;
-  `run_in_sandbox` executes commands under an allowlist.
+  the current build has no OS containment backend, so `run_in_sandbox` is
+  fail-disabled by default and always disabled in production. Its allowlisted
+  local argv fallback is available only for explicitly opted-in development
+  against repositories the developer trusts; it is never treated as a
+  filesystem or network sandbox.
 - **Runtime observation** — OTLP trace receiver assembles trace trees into
   `runtime_observations`, reconciles `EXPOSES`/`CALLS` evidence into durable
   logical-edge overlays, and materializes it onto the current graph version

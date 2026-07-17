@@ -34,9 +34,10 @@ from app.review_revision import (
     bind_review_revision,
     lock_review_graph_revision,
     read_review_graph_stamp,
+    resolve_review_revision_from_stamp,
 )
 from app.safety.review import run_pipeline
-from app.sandbox.runner import run_in_sandbox
+from app.sandbox.runner import SandboxResult, run_in_sandbox
 from app.sandbox.worktree import (
     WorktreeRevisionError,
     WorktreeRevisionMismatch,
@@ -59,7 +60,7 @@ def _revision_error(exc: Exception) -> dict[str, Any]:
     return {
         "schema": "mnemos.error.v1",
         "error": code,
-        "reason": str(exc),
+        "reason": code,
         "retryable": isinstance(exc, PlanSourceRevisionUnavailable),
     }
 
@@ -131,7 +132,11 @@ def _worktree_revision_error(exc: WorktreeRevisionError) -> dict[str, Any]:
             if mismatch
             else "plan_worktree_revision_unavailable"
         ),
-        "reason": str(exc),
+        "reason": (
+            "plan_worktree_revision_mismatch"
+            if mismatch
+            else "plan_worktree_revision_unavailable"
+        ),
         "retryable": not mismatch,
     }
 
@@ -227,7 +232,7 @@ async def submit_plan(
         "plan_id": str(plan.id),
         "status": plan.status,
         "gate_a_url": f"/plans#{plan.id}",
-        "worktree_path": plan.worktree_path,
+        "worktree_path": "plan_scoped",
         "impact_report": plan.impact_report,
         "source_revision": {
             "run_id": str(revision.run_id),
@@ -282,9 +287,9 @@ async def edit_file_in_worktree(
         return _worktree_revision_error(exc)
     try:
         path = resolve_in_worktree(plan_id, file_path)
-    except ValueError as exc:
+    except ValueError:
         await session.rollback()
-        return {"error": str(exc)}
+        return {"error": "path_escapes_worktree"}
 
     existed = path.exists()
     original = path.read_text() if existed else ""
@@ -295,7 +300,7 @@ async def edit_file_in_worktree(
         if old is not None and new is not None:
             if old not in text:
                 await session.rollback()
-                return {"error": f"old_str_not_found: {old[:60]}"}
+                return {"error": "old_str_not_found"}
             text = text.replace(old, new, 1)
         elif "replace_range" in edit and "new_text" in edit:
             rng = edit["replace_range"]
@@ -411,11 +416,17 @@ async def submit_diff(
             session,
             project_id=project_id,
         )
+        product_revision = await resolve_review_revision_from_stamp(
+            session,
+            project_id=project_id,
+            stamp=review_stamp,
+        )
         review = await run_pipeline(
             session,
             project_id=project_id,
             plan_id=plan_id,
             diff=diff,
+            review_revision=product_revision,
         )
         # Gate-B deliberately releases its pre-review transaction.  Rebind the
         # immutable identity now, before GraphHead/Plan locks, and retain this
@@ -436,20 +447,20 @@ async def submit_diff(
     except MCPAuthenticationError:
         await session.rollback()
         return mcp_authentication_error()
-    except GraphGenerationChanged as exc:
+    except GraphGenerationChanged:
         await session.rollback()
         return {
             "schema": "mnemos.error.v1",
             "error": "graph_revision_changed_during_review",
-            "reason": str(exc),
+            "reason": "graph_revision_changed_during_review",
             "retryable": True,
         }
-    except GraphPublicationError as exc:
+    except GraphPublicationError:
         await session.rollback()
         return {
             "schema": "mnemos.error.v1",
             "error": "canonical_graph_revision_unavailable",
-            "reason": str(exc),
+            "reason": "canonical_graph_revision_unavailable",
             "retryable": True,
         }
     try:
@@ -510,6 +521,41 @@ async def submit_diff(
             "git_sha": review_revision.git_sha,
             "source_generation": review_revision.source_generation,
             "overlay_generation": review_revision.overlay_generation,
+        },
+        "source_revision": {
+            "run_id": str(revision.run_id),
+            "git_sha": revision.git_sha,
+            "source_generation": revision.source_generation,
+            "overlay_generation": revision.overlay_generation,
+        },
+    }
+
+
+def _sandbox_result_payload(
+    result: SandboxResult,
+    revision: PlanSourceRevision,
+) -> dict[str, Any]:
+    """Build the one bounded, privacy-safe MCP sandbox result envelope."""
+
+    return {
+        "schema": "mnemos.sandbox_result.v1",
+        "status": result.status,
+        "failure_code": result.failure_code,
+        "exit_code": result.exit_code,
+        "stdout": {
+            "text": result.stdout,
+            "bytes_seen": result.stdout_bytes,
+            "truncated": result.stdout_truncated,
+        },
+        "stderr": {
+            "text": result.stderr,
+            "bytes_seen": result.stderr_bytes,
+            "truncated": result.stderr_truncated,
+        },
+        "duration_ms": result.duration_ms,
+        "command": {
+            "program": result.program,
+            "subcommand": result.subcommand,
         },
         "source_revision": {
             "run_id": str(revision.run_id),
@@ -588,15 +634,4 @@ async def run_in_sandbox_tool(
     except Exception:
         await session.rollback()
         raise
-    return {
-        "exit_code": result.exit_code,
-        "stdout": result.stdout[:20000],
-        "stderr": result.stderr[:20000],
-        "duration_ms": result.duration_ms,
-        "source_revision": {
-            "run_id": str(revision.run_id),
-            "git_sha": revision.git_sha,
-            "source_generation": revision.source_generation,
-            "overlay_generation": revision.overlay_generation,
-        },
-    }
+    return _sandbox_result_payload(result, revision)

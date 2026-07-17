@@ -205,9 +205,9 @@ async def test_secret(
     secret = await _secret_in_user_org(db, user, secret_id, for_update=True)
     try:
         plaintext = decrypt(secret.ciphertext, secret.iv)
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         ok = False
-        message = f"decrypt_failed: {exc.__class__.__name__}"
+        message = "decrypt_failed"
         now = datetime.utcnow()
         await db.execute(
             update(Secret)

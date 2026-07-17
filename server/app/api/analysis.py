@@ -50,6 +50,7 @@ from app.models.projects import Project
 from app.models.stages import AnalysisStage
 from app.orchestrator.progress import ProgressBus
 from app.orchestrator.queue import get_queue
+from app.orchestrator.failure_codes import sanitize_public_failure_code
 from app.orchestrator.source_binding import (
     ProjectSourceBindingError,
     resolve_project_source_path,
@@ -65,12 +66,9 @@ _SSE_DB_RECHECK_SEC = 5.0
 
 
 def _bounded_error_log(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value)
-    if len(text) <= _MAX_ERROR_LOG_CHARS:
-        return text
-    return text[: _MAX_ERROR_LOG_CHARS - 16] + "\n...[truncated]"
+    """Compatibility name for the closed public failure-code projection."""
+
+    return sanitize_public_failure_code(value)
 
 
 class AnalysisTriggerRequest(BaseModel):
@@ -166,7 +164,7 @@ async def trigger_analysis(
     except ProjectSourceBindingError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
+            detail=exc.code,
         ) from exc
     canonical_source_path = str(source_binding.source_path)
 
@@ -211,13 +209,14 @@ async def trigger_analysis(
         run.error_log = "analysis_enqueue_cancelled"
         await asyncio.shield(db.commit())
         raise
-    except Exception as exc:  # noqa: BLE001 — persist a terminal run first
-        log.exception("analysis enqueue failed run_id=%s", run.id)
+    except Exception:  # noqa: BLE001 — persist a terminal run first
+        log.error(
+            "analysis enqueue failed run_id=%s failure_code=analysis_enqueue_failed",
+            run.id,
+        )
         run.status = "failed"
         run.completed_at = datetime.now(tz=timezone.utc)
-        run.error_log = _bounded_error_log(
-            f"analysis_enqueue_failed:{type(exc).__name__}"
-        )
+        run.error_log = "analysis_enqueue_failed"
         await db.commit()
     else:
         if job is None:
@@ -231,8 +230,8 @@ async def trigger_analysis(
         target=str(run.id),
         project_id=project_id,
         details={
-            "git_sha": body.git_sha,
-            "ref": body.ref,
+            "git_sha_chars": len(body.git_sha),
+            "ref_supplied": body.ref is not None,
             "scope": body.scope,
             "summarize": body.summarize,
             "agent_extract_limit": body.agent_extract_limit,
@@ -333,10 +332,11 @@ def _terminal_payload(status_value: str, error_log: str | None) -> dict[str, Any
         "event": f"run_{status_value}",
         "status": status_value,
     }
-    if error_log:
-        payload["error_log"] = error_log
+    public_error = _bounded_error_log(error_log)
+    if public_error:
+        payload["error_log"] = public_error
         # Backward compatibility for the dashboard notification path.
-        payload["error"] = error_log
+        payload["error"] = public_error
     return payload
 
 
@@ -382,7 +382,10 @@ async def run_events(
                 except StopAsyncIteration:
                     return
                 except Exception:  # noqa: BLE001 — retain DB terminal polling
-                    log.exception("analysis SSE progress subscription failed")
+                    log.error(
+                        "analysis SSE progress subscription failed "
+                        "failure_code=analysis_progress_unavailable"
+                    )
                     next_event = None
                     continue
 
@@ -500,7 +503,11 @@ async def cancel_run(
             },
         )
     except Exception:  # noqa: BLE001 — DB cancellation is authoritative
-        log.exception("analysis cancellation publish failed run_id=%s", run_id)
+        log.error(
+            "analysis cancellation publish failed run_id=%s "
+            "failure_code=analysis_progress_unavailable",
+            run_id,
+        )
 
     job_id = (
         (run_stats or {}).get("job_id")
@@ -518,7 +525,11 @@ async def cancel_run(
 
                 await Job(job_id, queue).abort(timeout=2.0)
         except Exception:  # noqa: BLE001 — cooperative DB cancellation remains active
-            log.exception("analysis job abort failed run_id=%s job_id=%s", run_id, job_id)
+            log.error(
+                "analysis job abort failed run_id=%s "
+                "failure_code=analysis_job_abort_failed",
+                run_id,
+            )
     await audit_record(
         actor=f"user:{user.id}",
         action=(
@@ -561,7 +572,7 @@ async def get_run_stages(
             "completed_at": s.completed_at.isoformat() if s.completed_at else None,
             "time_budget_sec": s.time_budget_sec,
             "stats": s.stats,
-            "error_log": s.error_log,
+            "error_log": _bounded_error_log(s.error_log),
         }
         for s in rows
     ]
@@ -1143,19 +1154,42 @@ async def project_llm_cost(
 
     Physical calls (including map/reduce partials and rejected model output)
     live in ``LLMCall``; Summary rows are products and would undercount them.
-    This applies a coarse per-million-token rate. The rate is configurable via
-    ``MNEMOS_LLM_USD_PER_MTOK`` (default 3.0, ~Sonnet input).
+    Known token usage applies a coarse per-million-token estimate; exact
+    provider-reported cost wins when available. Unknown attempts stay explicit
+    so the report cannot present them as free; v1 currently attests no
+    subscription call for API-dollar exclusion.
     """
-    from app.extractor.cost import rate_usd_per_mtok
+    from app.extractor.cost import (
+        canonical_subscription_call_predicate,
+        project_budget_exposure,
+        rate_usd_per_mtok,
+    )
     from app.models.findings import LLMCall, Summary
 
-    physical_call_count, total_tokens, unknown_token_calls = (
+    (
+        physical_call_count,
+        total_tokens,
+        unknown_token_calls,
+        subscription_call_count,
+    ) = (
         await db.execute(
             select(
                 func.count(LLMCall.id),
                 func.coalesce(func.sum(LLMCall.tokens_used), 0),
                 func.coalesce(
                     func.sum(case((LLMCall.tokens_used.is_(None), 1), else_=0)),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                canonical_subscription_call_predicate(),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
                     0,
                 ),
             ).where(LLMCall.project_id == project_id)
@@ -1181,15 +1215,31 @@ async def project_llm_cost(
     physical_call_count = int(physical_call_count or 0)
     total_tokens = int(total_tokens or 0)
     unknown_token_calls = int(unknown_token_calls or 0)
+    subscription_call_count = int(subscription_call_count or 0)
     rate = rate_usd_per_mtok()
-    est_usd = round((total_tokens / 1_000_000.0) * rate, 4)
+    cost = await project_budget_exposure(
+        db,
+        project_id,
+        since=datetime(1970, 1, 1, tzinfo=timezone.utc),
+    )
     return {
         "summary_count": summary_count,
         "physical_call_count": physical_call_count,
         "unknown_token_calls": unknown_token_calls,
+        "subscription_call_count": subscription_call_count,
         "total_tokens": total_tokens,
         "rate_usd_per_mtok": rate,
-        "estimated_usd": est_usd,
+        # Backward-compatible name: this is the known lower-bound spend, not
+        # an assertion that unknown physical attempts cost zero.
+        "estimated_usd": cost.known_spend_usd,
+        "known_spend_usd": cost.known_spend_usd,
+        "unknown_provider_calls": cost.unknown_provider_calls,
+        "unknown_provider_reservation_usd": (
+            cost.unknown_provider_exposure_usd
+        ),
+        "authorized_reservation_usd": cost.authorized_reservation_usd,
+        "unpriced_provider_calls": cost.unpriced_provider_calls,
+        "cost_indeterminate": cost.unknown_provider_calls > 0,
     }
 
 

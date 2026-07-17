@@ -8,14 +8,41 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
+import app.extractor.runner as runner_module
 from app.extractor.agent import FALLBACK_AGENT_SDK_ERROR, Extractor, ExtractorResult
+from app.extractor.cost import LLMRunBudget
 from app.extractor.runner import FALLBACK_UNGROUNDED_RESPONSE, summarise_l2
 from app.models.findings import LLMCall, Summary
 from app.models.graph import Node
+from app.models.organization import Organization
 from app.models.overlays import GraphNodeHumanOverlay
+from app.models.projects import Project
 from app.testing.sqlite_polyglot import install_polyglot
+from app.testing.llm_adapter import (
+    create_llm_ledger_tables,
+    finish_test_provider_result,
+)
 
 install_polyglot()
+
+_PRODUCTION_BEGIN_ATTEMPT = runner_module.begin_attempt
+
+
+@pytest.fixture(autouse=True)
+def _summary_contract_lifecycle_mode(monkeypatch):
+    async def generic_test_begin_attempt(*args, **kwargs):  # noqa: ANN002, ANN003
+        assert kwargs.pop("require_atomic_dollar_reservation") is True
+        return await _PRODUCTION_BEGIN_ATTEMPT(
+            *args,
+            **kwargs,
+            require_atomic_dollar_reservation=False,
+        )
+
+    monkeypatch.setattr(
+        runner_module,
+        "begin_attempt",
+        generic_test_begin_attempt,
+    )
 
 
 def _pin_graph(monkeypatch) -> None:  # noqa: ANN001
@@ -50,13 +77,18 @@ class CountingExtractor:
 
     async def summarize(self, level, target_id, evidence):
         self.calls += 1
-        return ExtractorResult(
+        result = ExtractorResult(
             summary="bounded file summary",
             detailed="bounded file summary",
             claims=self.claims,
             open_questions=[],
             model_used="fake",
             tokens_used=7,
+        )
+        return await finish_test_provider_result(
+            result,
+            target_id=target_id,
+            input_text=repr(evidence),
         )
 
 
@@ -89,10 +121,12 @@ async def test_one_chunk_l2_uses_exactly_one_provider_call(
     monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
+        await connection.run_sync(Organization.__table__.create)
+        await connection.run_sync(Project.__table__.create)
         await connection.run_sync(Node.__table__.create)
         await connection.run_sync(GraphNodeHumanOverlay.__table__.create)
+        await create_llm_ledger_tables(connection)
         await connection.run_sync(Summary.__table__.create)
-        await connection.run_sync(LLMCall.__table__.create)
     Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     project_id = uuid.uuid4()
     run_id = uuid.uuid4()
@@ -134,6 +168,7 @@ async def test_one_chunk_l2_uses_exactly_one_provider_call(
             project_id=project_id,
             limit=1,
             analysis_run_id=run_id,
+            run_budget=LLMRunBudget(scope_id=run_id),
         )
         saved = await session.get(Summary, next(
             row.id for row in (await session.execute(
@@ -172,10 +207,15 @@ class FailSecondChunkExtractor:
     async def summarize(self, level, target_id, evidence):
         self.calls += 1
         if self.calls == 2:
-            return Extractor._stub(
+            result = Extractor._stub(
                 level, target_id, evidence, FALLBACK_AGENT_SDK_ERROR
             )
-        return ExtractorResult(
+            return await finish_test_provider_result(
+                result,
+                target_id=target_id,
+                input_text=repr(evidence),
+            )
+        result = ExtractorResult(
             summary="map succeeded",
             detailed="map succeeded",
             claims=[
@@ -194,6 +234,11 @@ class FailSecondChunkExtractor:
             model_used="fake",
             tokens_used=7,
         )
+        return await finish_test_provider_result(
+            result,
+            target_id=target_id,
+            input_text=repr(evidence),
+        )
 
 
 @pytest.mark.asyncio
@@ -202,10 +247,12 @@ async def test_partial_failure_blocks_reduce_and_closes_stale_current_summary(mo
     monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
+        await connection.run_sync(Organization.__table__.create)
+        await connection.run_sync(Project.__table__.create)
         await connection.run_sync(Node.__table__.create)
         await connection.run_sync(GraphNodeHumanOverlay.__table__.create)
+        await create_llm_ledger_tables(connection)
         await connection.run_sync(Summary.__table__.create)
-        await connection.run_sync(LLMCall.__table__.create)
     Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     project_id = uuid.uuid4()
     old_id = uuid.uuid4()
@@ -269,6 +316,7 @@ async def test_partial_failure_blocks_reduce_and_closes_stale_current_summary(mo
             extractor,  # type: ignore[arg-type]
             project_id=project_id,
             limit=1,
+            run_budget=LLMRunBudget(),
         )
         rows = (
             await session.execute(

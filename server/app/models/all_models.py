@@ -12,7 +12,19 @@ from app.models.overlays import (  # noqa: F401
 )
 from app.models.projects import Project  # noqa: F401
 from app.models.runtime import RuntimeObservation  # noqa: F401
-from app.models.findings import Finding, Summary  # noqa: F401
-from app.models.plans import DiffBreakGlassGrant, DiffSubmission, Plan  # noqa: F401
+from app.models.findings import (  # noqa: F401
+    Finding,
+    LLMCall,
+    LLMBudgetScope,
+    LLMProjectBudgetAccount,
+    Summary,
+)
+from app.models.llm import LLMSemanticCandidate  # noqa: F401
+from app.models.plans import (  # noqa: F401
+    DiffBreakGlassGrant,
+    DiffSubmission,
+    Plan,
+    SecondOpinionProduct,
+)
 from app.models.stages import AnalysisStage  # noqa: F401
 from app.models.samples import DataQueryLog, DataSample  # noqa: F401

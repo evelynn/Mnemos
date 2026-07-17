@@ -1,17 +1,11 @@
-"""Embedding provider adapter (spec §11.3, §15).
+"""Deterministic embedding helpers and a fail-closed cloud boundary.
 
-The Q&A reviewer flagged that ``search_symbols`` was BM25-only — the
-vector half of the spec's "벡터 + BM25 앙상블 (RRF)" was unimplemented.
-This module is the scaffold a deployment turns on: set
-``MNEMOS_EMBEDDING_PROVIDER`` to ``voyage`` (spec default —
-``voyage-code-3``) or ``openai``, plus the matching API key, and
-``embed_query`` / ``embed_batch`` start returning real vectors. The
-search layer's RRF fusion is the next hook (PR-91).
-
-When no provider is configured the adapters return ``None``, so
-``search_symbols`` keeps its current pure-lexical behaviour and the
-existing tests stay green — there is no regression risk in shipping
-the scaffold ahead of an embedding budget.
+The RRF/cosine helpers and pgvector schema remain useful, but the former
+Voyage/OpenAI HTTP adapter had no project identity, durable physical-attempt
+ledger, provider usage settlement, or immutable worst-price reservation.
+Environment opt-in therefore cannot authorize a cloud request.  Until that
+full contract exists, every search remains lexical and ``embed_*`` returns
+``None`` without opening a network client.
 """
 
 from __future__ import annotations
@@ -21,14 +15,16 @@ import os
 from dataclasses import dataclass
 from typing import Sequence
 
-import httpx
-
 log = logging.getLogger(__name__)
 
 # Output dimensionality the platform pins. Voyage ``voyage-code-3`` is
 # 1024 dims; OpenAI ``text-embedding-3-small`` is 1536. Provider
 # implementations truncate / pad to this when configured to.
 EMBEDDING_DIM = 1024
+CLOUD_EMBEDDING_EXECUTION_ENABLED = False
+CLOUD_EMBEDDING_DISABLED_REASON = (
+    "project_scoped_embedding_accounting_contract_unavailable"
+)
 
 
 @dataclass(frozen=True)
@@ -61,43 +57,35 @@ def _load_config() -> EmbeddingConfig | None:
             ),
             base_url="https://api.openai.com/v1/embeddings",
         )
-    log.warning("unknown MNEMOS_EMBEDDING_PROVIDER=%r — embeddings disabled", provider)
+    log.warning(
+        "unknown embedding provider configured; embeddings disabled "
+        "failure_code=embedding_provider_unsupported"
+    )
     return None
 
 
 def is_enabled() -> bool:
-    cfg = _load_config()
-    return bool(cfg and cfg.api_key)
+    """Cloud embeddings cannot be enabled by environment configuration."""
+
+    return False
 
 
 async def embed_batch(texts: Sequence[str]) -> list[list[float]] | None:
-    """Return one vector per input text, or None if no provider is
-    configured. Each adapter swallows network / API errors and returns
-    None — embeddings are an enhancement, never a hard dependency."""
+    """Return no cloud vectors until durable project accounting exists.
+
+    A configured provider is logged explicitly for direct callers.  Normal
+    MCP search checks :func:`is_enabled` and stays on deterministic lexical
+    ranking, so it never reaches this boundary or emits one warning per query.
+    """
+
     cfg = _load_config()
-    if cfg is None or not cfg.api_key or not texts:
-        return None
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            if cfg.provider == "voyage":
-                payload = {"input": list(texts), "model": cfg.model}
-            else:  # openai-compatible
-                payload = {"input": list(texts), "model": cfg.model}
-            r = await client.post(
-                cfg.base_url,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {cfg.api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            r.raise_for_status()
-            data = r.json()
-        # Both providers return ``{data: [{embedding: [...]}, ...]}``.
-        return [item["embedding"] for item in data.get("data", [])]
-    except Exception as exc:  # noqa: BLE001
-        log.warning("embedding call failed (%s): %s", cfg.provider, exc)
-        return None
+    if cfg is not None and cfg.api_key and texts:
+        log.warning(
+            "cloud embedding dispatch refused (%s): %s",
+            cfg.provider,
+            CLOUD_EMBEDDING_DISABLED_REASON,
+        )
+    return None
 
 
 async def embed_query(text: str) -> list[float] | None:

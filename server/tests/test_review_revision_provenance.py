@@ -30,7 +30,7 @@ from app.models.graph import AnalysisRun, GraphHead
 from app.models.organization import Organization
 from app.models.plans import DiffBreakGlassGrant, DiffSubmission, Plan
 from app.models.projects import Project
-from app.safety.review.pipeline import ReviewReport
+from app.safety.review.pipeline import PassResult, ReviewReport
 from app.safety.tokens import hash_token
 from app.review_revision import lock_review_graph_revision
 from app.testing.graph_publication import published_run_fields
@@ -207,6 +207,49 @@ async def _seed(
 
 async def _noop_audit(**_kwargs) -> None:
     return None
+
+
+@pytest.mark.asyncio
+async def test_break_glass_refuses_clean_but_incomplete_rerun(
+    database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _project_id, _run_id, _, user, _plan, submission = await _seed(
+        database,
+        submission_status="blocked",
+    )
+    assert submission is not None
+
+    async def incomplete_pipeline(*_args, **_kwargs) -> ReviewReport:
+        return ReviewReport(
+            verdict="clean",
+            passes=[
+                PassResult(
+                    name="second_opinion",
+                    position=1,
+                    coverage="incomplete",
+                    error="second_opinion_terminal_without_product",
+                )
+            ],
+            findings=[],
+        )
+
+    monkeypatch.setattr(
+        break_glass_api,
+        "run_pipeline",
+        incomplete_pipeline,
+    )
+    async with database() as session:
+        with pytest.raises(HTTPException) as exc_info:
+            await break_glass_api.issue_break_glass_grant(
+                submission.id,
+                break_glass_api.BreakGlassRequest(rationale="r" * 200),
+                session,
+                user,
+            )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "rerun_review_incomplete"
 
 
 async def _fake_mr(*_args, **_kwargs) -> MRResult:

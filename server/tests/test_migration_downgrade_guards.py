@@ -142,6 +142,22 @@ _GUARDS = {
             "restore a pre-0034 backup",
         ),
     ),
+    "0039_second_opinion_products.py": (
+        "cannot downgrade 0039",
+        (
+            "from second_opinion_products",
+            "canonical second-opinion products exist",
+            "safe replay impossible",
+        ),
+    ),
+    "0040_llm_semantic_products.py": (
+        "cannot downgrade 0040",
+        (
+            "from llm_semantic_products",
+            "encrypted llm candidates exist",
+            "terminal-attempt-without-product gap",
+        ),
+    ),
 }
 
 
@@ -330,6 +346,18 @@ async def test_postgres_guards_reject_blockers_in_connection_local_temp_tables()
                 ),
             ),
             ("data_samples",),
+        ),
+        (
+            "0039_second_opinion_products.py",
+            ("CREATE TEMP TABLE second_opinion_products (id integer)",),
+            ("INSERT INTO second_opinion_products VALUES (1)",),
+            ("second_opinion_products",),
+        ),
+        (
+            "0040_llm_semantic_products.py",
+            ("CREATE TEMP TABLE llm_semantic_products (id integer)",),
+            ("INSERT INTO llm_semantic_products VALUES (1)",),
+            ("llm_semantic_products",),
         ),
     )
 

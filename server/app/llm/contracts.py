@@ -18,7 +18,7 @@ import math
 import re
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -195,6 +195,8 @@ class LLMUsageV1:
     provider_total_tokens: int | None = None
     provider_turn_count: int | None = None
     reported_cost_usd: Decimal | None = None
+    estimated_cost_usd: Decimal | None = None
+    pricing_version: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, UsageStatus):
@@ -207,6 +209,24 @@ class LLMUsageV1:
             if not isinstance(self.reported_cost_usd, Decimal):
                 raise LLMUsageContractError("reported_cost_usd must be canonical Decimal")
             _strict_optional_decimal(self.reported_cost_usd, "reported_cost_usd")
+        if self.estimated_cost_usd is not None:
+            if not isinstance(self.estimated_cost_usd, Decimal):
+                raise LLMUsageContractError(
+                    "estimated_cost_usd must be canonical Decimal"
+                )
+            _strict_optional_decimal(
+                self.estimated_cost_usd, "estimated_cost_usd"
+            )
+        if (self.estimated_cost_usd is None) != (self.pricing_version is None):
+            raise LLMUsageContractError(
+                "estimated cost requires a pricing version"
+            )
+        if self.pricing_version is not None and (
+            not isinstance(self.pricing_version, str)
+            or not 1 <= len(self.pricing_version) <= 64
+            or self.pricing_version.strip() != self.pricing_version
+        ):
+            raise LLMUsageContractError("pricing_version is invalid")
 
         if self.input_tokens is not None:
             for name in (
@@ -270,6 +290,7 @@ class LLMUsageV1:
         measurements = [getattr(self, name) for name in _TOKEN_FIELDS]
         has_measurement = any(value is not None for value in measurements) or (
             self.reported_cost_usd is not None
+            or self.estimated_cost_usd is not None
         )
         if self.status == UsageStatus.REPORTED_COMPLETE:
             if any(
@@ -296,6 +317,8 @@ class LLMUsageV1:
                 self.tool_input_tokens,
                 self.provider_turn_count,
                 self.reported_cost_usd,
+                self.estimated_cost_usd,
+                self.pricing_version,
             )
             if self.total_tokens is None or any(
                 value is not None for value in legacy_details
@@ -541,9 +564,31 @@ def normalize_anthropic_usage(
 def normalize_agent_sdk_usage(result_message: Any) -> LLMUsageV1:
     """Normalize a Claude Agent SDK ``ResultMessage`` without importing it."""
 
-    return normalize_anthropic_usage(
+    estimate = _strict_optional_decimal(
+        _member(result_message, "total_cost_usd"),
+        "total_cost_usd",
+    )
+    usage = normalize_anthropic_usage(
         result_message,
         source=UsageSource.AGENT_SDK,
+        # SDK total_cost_usd is a client-side price-table estimate, not a
+        # provider billing fact.
+        reported_cost_usd=None,
+    )
+    if estimate is None:
+        return usage
+    pricing_version = "claude-agent-sdk-0.2.118-client-estimate"
+    if usage.status == UsageStatus.UNAVAILABLE:
+        return LLMUsageV1(
+            status=UsageStatus.REPORTED_PARTIAL,
+            source=UsageSource.AGENT_SDK,
+            estimated_cost_usd=estimate,
+            pricing_version=pricing_version,
+        )
+    return replace(
+        usage,
+        estimated_cost_usd=estimate,
+        pricing_version=pricing_version,
     )
 
 

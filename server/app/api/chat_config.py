@@ -32,7 +32,6 @@ from app.api.llm_providers import (
 from app.audit.logger import record as audit_record
 from app.auth.rbac import require_admin
 from app.db import get_session
-from app.extractor.agent_sdk import is_agent_sdk_available
 from app.models.auth import PlatformSetting, Secret, User
 from app.safety.crypto import encrypt
 
@@ -68,11 +67,15 @@ def _status(provider: str, cfg: dict[str, dict], by_label: dict | None = None) -
         "available": is_provider_available(provider, cfg),
         "needs_base_url": provider == "atlas",
         "needs_agent_id": provider == "atlas",
-        # claudecode needs a key only in explicit "api" mode; the default
-        # "subscription" mode uses the local Claude Code login (no key).
-        "needs_key": provider != "claudecode" or c.get("mode") == "api",
+        # Ordinary Claude chat is API-key-only.  Merely finding the local
+        # Agent SDK does not attest auth/billing provenance, and its opaque
+        # query requires a full 128K physical output reservation.
+        "needs_key": True,
         "mode": c.get("mode"),
-        "subscription_available": is_agent_sdk_available(),
+        # Retained for older dashboards, but never claim a key-free path is
+        # available under the current fail-closed policy.
+        "subscription_available": False,
+        "agent_sdk_policy": "explicit_128k_reservation_and_attribution_required",
         "suggested_models": SUGGESTED_MODELS.get(provider, []),
         # Persisted last-test outcome (drives the status dot). OK-prefixed
         # messages mean success (see llm_providers.test_provider).

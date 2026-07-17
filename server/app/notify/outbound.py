@@ -103,14 +103,15 @@ async def notify_new_findings(findings: list[Any]) -> int:
                     sent += 1
                 else:
                     log.warning(
-                        "notify.non_2xx status=%s url=%s kind=%s",
-                        resp.status_code, url, envelope["kind"],
+                        "notify.non_2xx status=%s kind=%s",
+                        resp.status_code, envelope["kind"],
                     )
                     _bump_failure(envelope["kind"])
-            except (httpx.HTTPError, httpx.TimeoutException) as exc:
+            except (httpx.HTTPError, httpx.TimeoutException):
                 log.warning(
-                    "notify.send_failed exc=%s kind=%s",
-                    exc.__class__.__name__, envelope["kind"],
+                    "notify.send_failed failure_code=notification_unavailable "
+                    "kind=%s",
+                    envelope["kind"],
                 )
                 _bump_failure(envelope["kind"])
     return sent

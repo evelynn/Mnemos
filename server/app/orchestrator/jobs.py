@@ -32,13 +32,15 @@ from app.audit.logger import record as audit_record
 from app.config import get_settings
 from app.db import SessionLocal
 from app.extractor.agent import Extractor
+from app.extractor.agent_sdk import (
+    AGENT_SDK_BUDGETED_MODEL,
+    AGENT_SDK_MAX_PROVIDER_INPUT_TOKENS,
+    AGENT_SDK_MAX_PROVIDER_OUTPUT_TOKENS,
+)
 from app.extractor.cost import (
-    BudgetExceeded,
     LLMRunBudget,
     RunBudgetExceeded,
-    require_budget,
 )
-from app.extractor.packing import _approx_tokens
 from app.extractor.runner import summarise_l1, summarise_l2, summarise_l3
 from app.graph_publication import (
     GRAPH_HEAD_NEEDS_REBUILD,
@@ -58,10 +60,33 @@ from app.graph_publication import (
     stage_nodes_batch,
     validate_graph_publication_receipt,
 )
+from app.llm.contracts import (
+    AttemptStatus,
+    LLMPurpose,
+    ResultStatus,
+    UsageSource,
+    unavailable_usage,
+)
+from app.llm.lifecycle import (
+    AttemptCallbacks,
+    AttemptOutcome,
+    AttemptStartMetadata,
+    AttemptTicket,
+    BudgetScopeKind,
+    LLMLifecycleError,
+    LLMSemanticCandidateError,
+    SemanticCandidate,
+    SemanticCandidateReplay,
+    SemanticCandidateReplayRequest,
+    begin_attempt,
+    classify_attempt_result,
+    finalize_attempt,
+    load_terminal_semantic_candidate,
+)
 from app.merge.contract_id import http_contract_id
 from app.merge.findings import run_all as rebuild_findings
 from app.merge.runtime import reconcile_observations
-from app.models.findings import LLMCall, Summary
+from app.models.findings import Summary
 from app.models.graph import (
     ANALYSIS_RUN_TERMINAL_STATUSES,
     AnalysisRun,
@@ -71,6 +96,12 @@ from app.models.graph import (
     Node,
 )
 from app.models.projects import Project
+from app.orchestrator.failure_codes import (
+    AnalysisCancelled,
+    AnalysisFailure,
+    exception_category,
+    exception_failure_code,
+)
 from app.orchestrator.progress import ProgressBus
 from app.orchestrator.seen_index import SeenFactIndex, configured_memory_limit
 from app.orchestrator.source_checkout import PreparedSource, prepare_source
@@ -88,13 +119,13 @@ from app.source_snapshot import (
 log = logging.getLogger(__name__)
 _settings = get_settings()
 _ANALYZER_STAGE_TIMEOUT_SEC = 30 * 60.0
-_AGENT_EXTRACT_MODEL = "claude-sonnet-4-6"
+_AGENT_EXTRACT_MODEL = AGENT_SDK_BUDGETED_MODEL
 _AGENT_EXTRACT_FAILED = "agent_extract_failed"
 _AGENT_EXTRACT_TIMEOUT = "agent_extract_timeout"
 _AGENT_EXTRACT_CANCELLED = "agent_extract_cancelled"
+_AGENT_BUDGET_RESERVATION_FAILED = "durable_budget_reservation_failed"
 _SUMMARY_RETENTION_BATCH = 900
 _AGENT_RUN_DEADLINE = "run_deadline_exceeded"
-_MAX_POSTPROCESS_ERROR_CHARS = 2048
 _MAX_POSTPROCESS_ERRORS = 4
 _ANALYZER_STAGE_BATCH_SIZE = 50
 
@@ -146,6 +177,18 @@ class _GraphStageBuffer:
         return candidate_count, changed_count
 
 
+def _agent_provider_input_estimate(
+    *, language: str, file_rel: str, code: str
+) -> int:
+    """Reserve opaque SDK input at the model's full context ceiling."""
+
+    # Keep the arguments in the signature because callers/tests use this
+    # boundary to prove the exact source scope, while never pretending that
+    # Mnemos can see the SDK's hidden subscription-side context.
+    del language, file_rel, code
+    return AGENT_SDK_MAX_PROVIDER_INPUT_TOKENS
+
+
 def _reserve_agent_provider_call(
     run_budget: LLMRunBudget,
     *,
@@ -156,49 +199,13 @@ def _reserve_agent_provider_call(
     """Reserve one complete-file agent call from the shared AI budget."""
 
     return run_budget.reserve(
-        _approx_tokens(
-            {
-                "language": language,
-                "file": file_rel,
-                "code": code,
-            }
-        )
-        + 512
+        _agent_provider_input_estimate(
+            language=language,
+            file_rel=file_rel,
+            code=code,
+        ),
+        requested_output_tokens=AGENT_SDK_MAX_PROVIDER_OUTPUT_TOKENS,
     )
-
-
-async def _record_agent_llm_call(
-    *,
-    project_id: uuid.UUID,
-    run_id: uuid.UUID,
-    language: str,
-    file_rel: str,
-    status: str,
-    fallback_reason: str | None,
-) -> None:
-    """Durably ledger one physical Agent SDK invocation.
-
-    Agent extraction has no trustworthy token-usage signal, so usage remains
-    ``NULL`` instead of pretending the call was free.  The ledger commits
-    independently of inferred graph ingest because a rejected provider reply
-    still consumed a real call.
-    """
-
-    async with SessionLocal() as session:
-        session.add(
-            LLMCall(
-                project_id=project_id,
-                analysis_run_id=run_id,
-                target_id=f"agent:{language}:{file_rel}",
-                level=0,
-                model_used=_AGENT_EXTRACT_MODEL,
-                tokens_used=None,
-                status=status,
-                fallback_reason=fallback_reason,
-                generated_at=datetime.now(tz=timezone.utc),
-            )
-        )
-        await session.commit()
 
 
 async def _set_run_status(
@@ -240,10 +247,6 @@ async def _set_run_status(
     result = await session.execute(stmt.values(**values))
     await session.commit()
     return bool(result.rowcount)
-
-
-class AnalysisCancelled(RuntimeError):
-    """Cooperative stop requested through the analysis-run API."""
 
 
 _PROJECT_LOCK_TTL_SEC = 9 * 60 * 60
@@ -361,18 +364,23 @@ async def _recover_prelock_failure(
             cancelled=cancelled,
         )
     if status == "queued":
+        error_code = exception_failure_code(
+            exc,
+            domain="analysis",
+            cancelled=cancelled,
+        )
         async with SessionLocal() as session:
             failed = await _set_run_status(
                 session,
                 run_id,
                 status="failed",
                 completed_at=datetime.now(tz=timezone.utc),
-                error_log=str(exc),
+                error_log=error_code,
             )
         if failed:
             await bus.publish(
                 run_id,
-                {"event": "run_failed", "status": "failed", "error": str(exc)},
+                {"event": "run_failed", "status": "failed", "error": error_code},
             )
             return "failed"
     return await _publish_current_terminal(bus, run_id)
@@ -448,16 +456,18 @@ async def _defer_project_lock_retry(
         )
         raise
     except Exception as exc:  # noqa: BLE001 — never leave a queued ghost
-        log.exception("analysis project lock retry enqueue failed run_id=%s", run_id)
+        error_code = exception_failure_code(exc, domain="analysis")
+        log.error(
+            "analysis project lock retry enqueue failed run_id=%s failure_code=%s",
+            run_id,
+            error_code,
+        )
         await _recover_prelock_failure(
             bus,
             project_id=project_id,
             run_id=run_id,
             stage="project_lock_retry_enqueue",
-            exc=RuntimeError(
-                "analysis_project_lock_retry_enqueue_failed:"
-                f"{type(exc).__name__}"
-            ),
+            exc=exc,
         )
         return False
 
@@ -512,8 +522,12 @@ def _seen_stats(index: SeenFactIndex | None) -> dict[str, Any]:
     try:
         return index.stats()
     except Exception as exc:  # noqa: BLE001 — diagnostics must not mask a run result
-        log.exception("analysis seen-index stats unavailable")
-        return {"storage": "unavailable", "error": type(exc).__name__}
+        error_code = exception_failure_code(exc, domain="analysis")
+        log.error(
+            "analysis seen-index stats unavailable failure_code=%s",
+            error_code,
+        )
+        return {"storage": "unavailable", "error": error_code}
 
 
 def _git_manifest_options(source: PreparedSource) -> dict[str, Any]:
@@ -1352,13 +1366,11 @@ async def _run_analyzer_stage(
                         async for rec in record_stream:
                             if rec.stream == "stderr":
                                 totals["errors"] += 1
-                                message = str(
-                                    rec.payload.get("message")
-                                    or rec.payload.get("raw")
-                                    or "analyzer_stderr"
-                                )
                                 if len(contract_errors) < 8:
-                                    contract_errors.append(message[:500])
+                                    # Analyzer stderr may contain source text,
+                                    # credentials, or host paths. Durable stage
+                                    # stats retain only the static category.
+                                    contract_errors.append("analyzer_stderr")
                                 continue
                             before = sum(totals.values())
                             accepted = await _record_payload(
@@ -1576,8 +1588,11 @@ def _restore_agent_totals_after_failure(
     totals.clear()
     totals.update(snapshot)
     # Exception messages/tracebacks from an SDK or DB driver may contain raw
-    # source values.  The class is sufficient to route the operational error.
-    log.warning("agent_extract: ingest failed: %s", exc.__class__.__name__)
+    # source values.  The allowlisted category is sufficient for operations.
+    log.warning(
+        "agent_extract: ingest failed failure_code=%s",
+        exception_failure_code(exc, domain="analysis"),
+    )
 
 
 async def _run_agent_extraction_stage(
@@ -1595,12 +1610,13 @@ async def _run_agent_extraction_stage(
 ) -> AnalyzerStageOutcome:
     """PR-140 — Claude-Code source extraction for a language with no
     deterministic ggoss analyzer (spec principle #4: delegate to Claude
-    Code). Hands each source file to the operator's Claude Code
-    subscription and ingests the inferred symbols/edges through the same
+    Code). Hands each source file to the operator's Claude Code credential
+    context and ingests the inferred symbols/edges through the same
     graph path as the analyzers. Degrades to a recorded skip when the
     Agent SDK isn't available or the language has no known file types."""
     from app.extractor.agent_extract import (
         AGENT_LANGUAGE_EXTENSIONS,
+        AgentExtractSemanticBinding,
         MAX_AGENT_CODE_CHARS,
         discover_source_files,
         extract_file_via_agent_sdk,
@@ -1645,10 +1661,12 @@ async def _run_agent_extraction_stage(
     accept = {"symbol", "data_entity", "edge"}
     files_done = 0
     files_failed = 0
+    replayed_files = 0
+    replay_blocked_files = 0
     dangling_edges_dropped = 0
     budget_exhausted_reason: str | None = None
     if run_budget is None:
-        run_budget = LLMRunBudget.from_env()
+        run_budget = LLMRunBudget.from_env(scope_id=run_id)
     deadline = time.monotonic() + 3600.0
     async with StageTracker(
         bus, run_id, project_id, stage_name,
@@ -1672,48 +1690,128 @@ async def _run_agent_extraction_stage(
             if len(code) > MAX_AGENT_CODE_CHARS:
                 files_failed += 1
                 continue
-            file_rel = str(fpath.relative_to(path)) if str(fpath).startswith(
-                str(path)
-            ) else fpath.name
+            file_rel = (
+                str(fpath.relative_to(path))
+                if str(fpath).startswith(str(path))
+                else fpath.name
+            ).replace("\\", "/")
+            target_id = f"agent:{language}:{file_rel}"
             provider_timeout = remaining
             run_deadline_owns_timeout = False
             physical_call_started = False
+            started_ticket: AttemptTicket | None = None
+            replayed_candidate: SemanticCandidateReplay | None = None
+            attempt_finalized = False
+            timeout_guard: asyncio.Timeout | None = None
+
+            async def start_agent_attempt(
+                metadata: AttemptStartMetadata,
+            ) -> AttemptTicket:
+                """Commit one stable v1 STARTED row before SDK dispatch."""
+
+                nonlocal run_deadline_owns_timeout, started_ticket
+                if run_budget is None:
+                    raise LLMLifecycleError(
+                        "agent provider dispatch requires a run budget"
+                    )
+                async with SessionLocal() as budget_session:
+                    ticket = await begin_attempt(
+                        budget_session,
+                        project_id=project_id,
+                        analysis_run_id=run_id,
+                        purpose=LLMPurpose.AGENT_EXTRACT,
+                        target_id=target_id,
+                        level=0,
+                        run_budget=run_budget,
+                        scope_kind=BudgetScopeKind.ANALYSIS_RUN,
+                        metadata=metadata,
+                        require_atomic_dollar_reservation=True,
+                    )
+                started_ticket = ticket
+                # Tighten the active provider guard to the DB-owned deadline.
+                if timeout_guard is not None:
+                    local_deadline = timeout_guard.when()
+                    durable_deadline = (
+                        asyncio.get_running_loop().time()
+                        + ticket.remaining_seconds
+                    )
+                    if (
+                        local_deadline is None
+                        or durable_deadline < local_deadline
+                    ):
+                        run_deadline_owns_timeout = True
+                        timeout_guard.reschedule(durable_deadline)
+                return ticket
+
+            async def finish_agent_attempt(
+                ticket: AttemptTicket,
+                outcome: AttemptOutcome,
+            ) -> None:
+                """Finalize the exact STARTED row in an independent session."""
+
+                nonlocal attempt_finalized
+                async with SessionLocal() as attempt_session:
+                    await finalize_attempt(
+                        attempt_session,
+                        ticket=ticket,
+                        outcome=outcome,
+                    )
+                attempt_finalized = True
+
+            async def finish_agent_candidate(
+                ticket: AttemptTicket,
+                outcome: AttemptOutcome,
+                candidate: SemanticCandidate,
+            ) -> None:
+                """Atomically finish transport and persist strict output."""
+
+                nonlocal attempt_finalized
+                async with SessionLocal() as attempt_session:
+                    await finalize_attempt(
+                        attempt_session,
+                        ticket=ticket,
+                        outcome=outcome,
+                        candidate=candidate,
+                    )
+                attempt_finalized = True
+
+            async def replay_agent_candidate(
+                request: SemanticCandidateReplayRequest,
+            ) -> SemanticCandidateReplay:
+                """Load one exact terminal candidate without redispatch."""
+
+                nonlocal replayed_candidate
+                async with SessionLocal() as replay_session:
+                    replay = await load_terminal_semantic_candidate(
+                        replay_session,
+                        operation_id=request.operation_id,
+                        attempt_no=request.attempt_no,
+                        project_id=project_id,
+                        purpose=LLMPurpose.AGENT_EXTRACT,
+                        input_fingerprint=request.input_fingerprint,
+                        contract_name=request.contract_name,
+                        binding_fingerprint=request.binding_fingerprint,
+                        normalizer=request.normalizer,
+                    )
+                replayed_candidate = replay
+                return replay
 
             def mark_physical_call_started() -> None:
                 nonlocal physical_call_started
                 physical_call_started = True
 
-            if run_budget is not None:
-                try:
-                    # The rolling project cap and the finite per-run budget
-                    # both apply to Agent extraction.  Check the durable cap
-                    # before reserving a run call so a blocked physical call
-                    # is neither attempted nor charged to the in-memory run.
-                    async with SessionLocal() as budget_session:
-                        await require_budget(budget_session, project_id)
-                    # Estimate the exact JSON-like input shape rather than raw
-                    # characters so non-ASCII source is escaped conservatively.
-                    # The allowance covers extraction instructions/schema.
-                    run_remaining = _reserve_agent_provider_call(
-                        run_budget,
-                        language=language,
-                        file_rel=file_rel,
-                        code=code,
-                    )
-                    run_deadline_owns_timeout = run_remaining <= provider_timeout
-                    provider_timeout = min(provider_timeout, run_remaining)
-                except BudgetExceeded:
-                    budget_exhausted_reason = "budget_exceeded"
-                    run_budget.stop(budget_exhausted_reason)
-                    files_failed += len(files) - file_index
-                    break
-                except RunBudgetExceeded as exc:
-                    budget_exhausted_reason = exc.reason
-                    files_failed += len(files) - file_index
-                    break
+            attempt_callbacks = AttemptCallbacks(
+                start=start_agent_attempt,
+                finish=finish_agent_attempt,
+                finish_candidate=finish_agent_candidate,
+                replay_candidate=replay_agent_candidate,
+                mark_provider_dispatch=mark_physical_call_started,
+            )
+
             try:
-                extracted = await asyncio.wait_for(
-                    extract_file_via_agent_sdk(
+                timeout_guard = asyncio.timeout(provider_timeout)
+                async with timeout_guard:
+                    extracted = await extract_file_via_agent_sdk(
                         language=language,
                         file_rel=file_rel,
                         code=code,
@@ -1723,10 +1821,60 @@ async def _run_agent_extraction_stage(
                         # slightly longer integer SDK timeout remains a second
                         # line of defence for direct adapter callers.
                         timeout_s=max(1, int(provider_timeout) + 1),
-                        on_provider_start=mark_physical_call_started,
-                    ),
-                    timeout=provider_timeout,
+                        semantic_binding=AgentExtractSemanticBinding(
+                            project_id=project_id,
+                            run_id=run_id,
+                        ),
+                        attempt_callbacks=attempt_callbacks,
+                    )
+            except LLMSemanticCandidateError as exc:
+                # A terminal attempt without an exact decryptable candidate
+                # is not permission to redispatch or ingest.  The lifecycle
+                # already restored this invocation's local pre-reservation.
+                log.warning(
+                    "agent_extract: candidate replay refused failure_code=%s",
+                    exception_failure_code(exc, domain="analysis"),
                 )
+                replay_blocked_files += 1
+                files_failed += 1
+                continue
+            except RunBudgetExceeded as exc:
+                # A persisted policy (possibly loaded after restart) refused
+                # the reservation.  No provider iterator was entered.
+                budget_exhausted_reason = exc.reason
+                files_failed += len(files) - file_index
+                break
+            except LLMLifecycleError as exc:
+                if started_ticket is not None and not attempt_finalized:
+                    try:
+                        await finish_agent_attempt(
+                            started_ticket,
+                            AttemptOutcome(
+                                attempt_status=AttemptStatus.FAILED,
+                                result_status=ResultStatus.NOT_APPLICABLE,
+                                usage=unavailable_usage(
+                                    lost_after_dispatch=physical_call_started,
+                                    source=UsageSource.AGENT_SDK,
+                                ),
+                                failure_code="agent_extract_lifecycle_error",
+                            ),
+                        )
+                    except Exception as finish_exc:  # noqa: BLE001
+                        # A committed-but-unconfirmed write stays STARTED for
+                        # reconciliation.  Never log DB/provider payloads.
+                        log.error(
+                            "agent_extract: lifecycle recovery failed failure_code=%s",
+                            exception_failure_code(finish_exc, domain="analysis"),
+                        )
+                log.error(
+                    "agent_extract: lifecycle boundary failed failure_code=%s",
+                    exception_failure_code(exc, domain="analysis"),
+                )
+                budget_exhausted_reason = _AGENT_BUDGET_RESERVATION_FAILED
+                if run_budget is not None:
+                    run_budget.stop(budget_exhausted_reason)
+                files_failed += len(files) - file_index
+                break
             except TimeoutError:
                 timeout_reason = (
                     _AGENT_RUN_DEADLINE
@@ -1736,69 +1884,138 @@ async def _run_agent_extraction_stage(
                 if run_deadline_owns_timeout and run_budget is not None:
                     run_budget.stop(timeout_reason)
                     budget_exhausted_reason = timeout_reason
-                if physical_call_started:
-                    await _record_agent_llm_call(
-                        project_id=project_id,
-                        run_id=run_id,
-                        language=language,
-                        file_rel=file_rel,
-                        status="timeout",
-                        fallback_reason=timeout_reason,
-                    )
+                if started_ticket is not None and not attempt_finalized:
+                    try:
+                        await finish_agent_attempt(
+                            started_ticket,
+                            AttemptOutcome(
+                                attempt_status=AttemptStatus.TIMEOUT,
+                                result_status=ResultStatus.NOT_APPLICABLE,
+                                usage=unavailable_usage(
+                                    lost_after_dispatch=physical_call_started,
+                                    source=UsageSource.AGENT_SDK,
+                                ),
+                                failure_code=timeout_reason,
+                            ),
+                        )
+                    except Exception as finish_exc:  # noqa: BLE001
+                        log.error(
+                            "agent_extract: timeout finalization failed failure_code=%s",
+                            exception_failure_code(finish_exc, domain="analysis"),
+                        )
                 files_failed += len(files) - file_index
                 break
             except asyncio.CancelledError:
-                if physical_call_started:
+                if started_ticket is not None and not attempt_finalized:
                     try:
-                        await _record_agent_llm_call(
-                            project_id=project_id,
-                            run_id=run_id,
-                            language=language,
-                            file_rel=file_rel,
-                            status="cancelled",
-                            fallback_reason=_AGENT_EXTRACT_CANCELLED,
+                        await asyncio.shield(
+                            finish_agent_attempt(
+                                started_ticket,
+                                AttemptOutcome(
+                                    attempt_status=AttemptStatus.CANCELLED,
+                                    result_status=ResultStatus.NOT_APPLICABLE,
+                                    usage=unavailable_usage(
+                                        lost_after_dispatch=physical_call_started,
+                                        source=UsageSource.AGENT_SDK,
+                                    ),
+                                    failure_code=_AGENT_EXTRACT_CANCELLED,
+                                ),
+                            )
                         )
-                    except Exception as ledger_exc:  # noqa: BLE001
+                    except Exception as finish_exc:  # noqa: BLE001
                         # Cancellation is the control-plane truth. Preserve it
                         # even when the best-effort accounting write fails.
                         log.error(
-                            "agent_extract: cancelled-call ledger failed: %s",
-                            ledger_exc.__class__.__name__,
+                            "agent_extract: cancellation finalization failed "
+                            "failure_code=%s",
+                            exception_failure_code(finish_exc, domain="analysis"),
                         )
                 raise
             except Exception as exc:  # noqa: BLE001
                 # The adapter contract is fail-soft, but option construction
                 # or a future regression can still escape before it returns a
-                # provider outcome.  Do not fabricate a physical-call ledger
-                # row; retain prior graph facts by making this pass partial.
+                # provider outcome.  Finalize only an already-owned v1 row;
+                # never fabricate a second physical-call ledger entry.
                 log.warning(
-                    "agent_extract: adapter escaped unexpectedly: %s",
-                    exc.__class__.__name__,
+                    "agent_extract: adapter escaped unexpectedly failure_code=%s",
+                    exception_failure_code(exc, domain="analysis"),
                 )
-                if physical_call_started:
-                    await _record_agent_llm_call(
-                        project_id=project_id,
-                        run_id=run_id,
-                        language=language,
-                        file_rel=file_rel,
-                        status="failed",
-                        fallback_reason=_AGENT_EXTRACT_FAILED,
+                if started_ticket is not None and not attempt_finalized:
+                    try:
+                        await finish_agent_attempt(
+                            started_ticket,
+                            AttemptOutcome(
+                                attempt_status=AttemptStatus.FAILED,
+                                result_status=ResultStatus.NOT_APPLICABLE,
+                                usage=unavailable_usage(
+                                    lost_after_dispatch=physical_call_started,
+                                    source=UsageSource.AGENT_SDK,
+                                ),
+                                failure_code=_AGENT_EXTRACT_FAILED,
+                            ),
+                        )
+                    except Exception as finish_exc:  # noqa: BLE001
+                        log.error(
+                            "agent_extract: failure finalization failed failure_code=%s",
+                            exception_failure_code(finish_exc, domain="analysis"),
+                        )
+                files_failed += 1
+                continue
+            attempt_id: uuid.UUID | None = None
+            if replayed_candidate is not None:
+                # Duplicate start was rejected before dispatch and the exact
+                # terminal candidate was loaded instead. It must now traverse
+                # the same grounding, staging, commit, and classification path
+                # as a fresh provider result.
+                if started_ticket is not None or physical_call_started:
+                    log.error(
+                        "agent_extract: replay crossed a provider boundary"
+                    )
+                    files_failed += 1
+                    continue
+                replayed_files += 1
+                attempt_id = replayed_candidate.attempt_id
+            elif started_ticket is None or not physical_call_started:
+                # A configured adapter must cross the durable boundary before
+                # it can return a fresh provider result. A legacy/test adapter
+                # that skipped the hook cannot publish unaccounted AI output.
+                if extracted is not None:
+                    log.warning(
+                        "agent_extract: adapter returned without durable start"
                     )
                 files_failed += 1
                 continue
-            # A valid payload proves a physical round-trip even for a legacy
-            # test adapter that predates the optional start hook.
-            physical_call_started = physical_call_started or extracted is not None
-            if physical_call_started:
-                await _record_agent_llm_call(
-                    project_id=project_id,
-                    run_id=run_id,
-                    language=language,
-                    file_rel=file_rel,
-                    status="completed" if extracted else "fallback",
-                    fallback_reason=None if extracted else _AGENT_EXTRACT_FAILED,
-                )
+            elif not attempt_finalized:
+                # A provider adapter may not hand unfinalized output to graph
+                # ingest.  Close the owned row as failed; only a DB failure
+                # leaves it STARTED for the stale-attempt reconciler.
+                log.error("agent_extract: adapter returned without attempt finish")
+                try:
+                    await finish_agent_attempt(
+                        started_ticket,
+                        AttemptOutcome(
+                            attempt_status=AttemptStatus.FAILED,
+                            result_status=ResultStatus.NOT_APPLICABLE,
+                            usage=unavailable_usage(
+                                lost_after_dispatch=True,
+                                source=UsageSource.AGENT_SDK,
+                            ),
+                            failure_code=_AGENT_EXTRACT_FAILED,
+                        ),
+                    )
+                except Exception as finish_exc:  # noqa: BLE001
+                    log.error(
+                        "agent_extract: missing-finish recovery failed failure_code=%s",
+                        exception_failure_code(finish_exc, domain="analysis"),
+                    )
+                files_failed += 1
+                continue
+            else:
+                attempt_id = started_ticket.attempt_id
             if not extracted:
+                files_failed += 1
+                continue
+            if attempt_id is None:  # pragma: no cover - guarded above
                 files_failed += 1
                 continue
             # Ingest + COMMIT this file's nodes in a short-lived session,
@@ -1829,6 +2046,23 @@ async def _run_agent_extraction_stage(
                 )
                 files_failed += 1
                 continue
+            try:
+                async with SessionLocal() as result_session:
+                    await classify_attempt_result(
+                        result_session,
+                        attempt_id=attempt_id,
+                        result_status=ResultStatus.ACCEPTED,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                # Graph facts are already committed, so do not roll them back
+                # or falsify a rejection reason.  PENDING honestly records
+                # that consumer acknowledgement was not durably observed.
+                log.error(
+                    "agent_extract: result classification failed failure_code=%s",
+                    exception_failure_code(exc, domain="analysis"),
+                )
+                files_failed += 1
+                continue
             files_done += 1
             if rejected_edges:
                 dangling_edges_dropped += rejected_edges
@@ -1843,6 +2077,8 @@ async def _run_agent_extraction_stage(
             {
                 "files_analyzed": files_done,
                 "files_failed": files_failed,
+                "replayed_candidate_files": replayed_files,
+                "replay_blocked_files": replay_blocked_files,
                 "symbols": totals.get("symbols", 0),
                 "edges": totals.get("edges", 0),
                 "dangling_edges_dropped": dangling_edges_dropped,
@@ -1861,6 +2097,11 @@ async def _run_agent_extraction_stage(
         records=files_done,
         errors=(
             (("agent_file_failures",) if files_failed else ())
+            + (
+                ("agent_attempt_replay_blocked",)
+                if replay_blocked_files
+                else ()
+            )
             + (("agent_dangling_edges_dropped",) if dangling_edges_dropped else ())
         ),
     )
@@ -2344,25 +2585,27 @@ def _compose_analysis_stats(
     return final_stats
 
 
-def _bounded_postprocess_message(value: Any) -> str:
-    text = str(value).strip() or type(value).__name__
-    if len(text) <= _MAX_POSTPROCESS_ERROR_CHARS:
-        return text
-    return text[: _MAX_POSTPROCESS_ERROR_CHARS - 16] + "\n...[truncated]"
-
-
 def _postprocess_error(
     stage: str,
     exc: BaseException,
     *,
     cancelled: bool = False,
 ) -> dict[str, Any]:
-    """Return the bounded, non-sensitive error envelope persisted and emitted."""
+    """Return the static, non-sensitive error envelope persisted and emitted."""
 
+    category = exception_category(exc, cancelled=cancelled)
+    code = exception_failure_code(
+        exc,
+        domain="postprocess",
+        cancelled=cancelled,
+    )
     return {
         "stage": stage,
-        "type": type(exc).__name__,
-        "message": _bounded_postprocess_message(exc),
+        # Keep ``type`` for the existing envelope while changing its value to
+        # the closed public category instead of an arbitrary Python class name.
+        "type": category,
+        "code": code,
+        "message": code,
         "cancelled": cancelled,
         "at": datetime.now(tz=timezone.utc).isoformat(),
     }
@@ -2534,8 +2777,12 @@ async def _close_published_run(
             project_id=project_id,
             details=audit_details,
         )
-    except Exception:  # noqa: BLE001 — terminal DB receipt remains authoritative
-        log.exception("analysis terminal audit failed run_id=%s", run_id)
+    except Exception as exc:  # noqa: BLE001 — terminal DB receipt remains authoritative
+        log.error(
+            "analysis terminal audit failed run_id=%s failure_code=%s",
+            run_id,
+            exception_failure_code(exc, domain="analysis"),
+        )
     try:
         from app.obs.metrics import analysis_runs_total
 
@@ -2554,8 +2801,12 @@ async def _close_published_run(
         event["error"] = bounded_errors[0]["message"]
     try:
         await bus.publish(run_id, event)
-    except Exception:  # noqa: BLE001 — SSE is a projection of durable state
-        log.exception("analysis terminal progress publish failed run_id=%s", run_id)
+    except Exception as exc:  # noqa: BLE001 — SSE is a projection of durable state
+        log.error(
+            "analysis terminal progress publish failed run_id=%s failure_code=%s",
+            run_id,
+            exception_failure_code(exc, domain="analysis"),
+        )
     return final_status
 
 
@@ -2733,7 +2984,7 @@ async def _run_published_postprocess(
             # and receives exactly one fresh bounded budget at this boundary.
             run_budget = llm_run_budget
             if run_budget is None:
-                run_budget = LLMRunBudget.from_env()
+                run_budget = LLMRunBudget.from_env(scope_id=run_id)
             for _level, label, fn, limit in (
                 (1, "l1_summaries", summarise_l1, l1_limit),
                 (2, "l2_summaries", summarise_l2, l2_limit),
@@ -3038,9 +3289,12 @@ async def run_ingest(
         with_context = asyncio.shield(_release_project_lock(project_id, run_id))
         try:
             await with_context
-        except Exception:  # noqa: BLE001 — the lease still has a hard TTL
-            log.exception(
-                "analysis uncertain project lock cleanup failed run_id=%s", run_id
+        except Exception as cleanup_exc:  # noqa: BLE001 — the lease has a hard TTL
+            log.error(
+                "analysis uncertain project lock cleanup failed run_id=%s "
+                "failure_code=%s",
+                run_id,
+                exception_failure_code(cleanup_exc, domain="analysis"),
             )
         await asyncio.shield(
             _recover_prelock_failure(
@@ -3054,21 +3308,27 @@ async def run_ingest(
         )
         raise
     except Exception as exc:  # noqa: BLE001
-        log.exception("analysis project lock unavailable")
+        error_code = exception_failure_code(exc, domain="analysis")
+        log.error(
+            "analysis project lock unavailable run_id=%s failure_code=%s",
+            run_id,
+            error_code,
+        )
         try:
             await _release_project_lock(project_id, run_id)
-        except Exception:  # noqa: BLE001 — compare-delete + TTL remain fail-safe
-            log.exception(
-                "analysis uncertain project lock cleanup failed run_id=%s", run_id
+        except Exception as cleanup_exc:  # noqa: BLE001 — TTL remains fail-safe
+            log.error(
+                "analysis uncertain project lock cleanup failed run_id=%s "
+                "failure_code=%s",
+                run_id,
+                exception_failure_code(cleanup_exc, domain="analysis"),
             )
         await _recover_prelock_failure(
             bus,
             project_id=project_id,
             run_id=run_id,
             stage="project_lock_acquire",
-            exc=RuntimeError(
-                f"analysis_project_lock_unavailable:{type(exc).__name__}"
-            ),
+            exc=exc,
         )
         return
     if not project_lock_acquired:
@@ -3176,10 +3436,7 @@ async def run_ingest(
             async with SessionLocal() as session:
                 head = await session.get(GraphHead, project_id)
                 if head is None or head.state != GRAPH_HEAD_READY:
-                    raise RuntimeError(
-                        "continuation_requires_published_graph: run a full source "
-                        "analysis before optional narration"
-                    )
+                    raise AnalysisFailure("continuation_requires_published_graph")
         if run_row is not None and run_row.created_at is not None:
             from app.obs.metrics import ingest_lag_seconds
 
@@ -3254,29 +3511,20 @@ async def run_ingest(
             if isinstance(previous_provenance, dict):
                 prior_root = previous_provenance.get("root_id")
                 if prior_root and prior_root != prepared_source.root_id:
-                    raise RuntimeError(
-                        "source_root_mismatch: this project is already bound "
-                        "to a different source root"
-                    )
+                    raise AnalysisFailure("source_root_mismatch")
                 prior_ref = previous_provenance.get("ref")
                 current_ref = prepared_source.source_ref or source_ref
                 if prior_ref and current_ref and prior_ref != current_ref:
-                    raise RuntimeError(
-                        "source_ref_mismatch: branch-scoped graphs are not supported"
-                    )
+                    raise AnalysisFailure("source_ref_mismatch")
                 prior_prefix = previous_provenance.get("tree_prefix")
                 if (
                     prior_prefix is not None
                     and prior_prefix != prepared_source.tree_prefix
                 ):
-                    raise RuntimeError(
-                        "source_tree_prefix_mismatch: project analysis root changed"
-                    )
+                    raise AnalysisFailure("source_tree_prefix_mismatch")
                 prior_kind = previous_provenance.get("kind")
                 if prior_kind and prior_kind != prepared_source.source_kind:
-                    raise RuntimeError(
-                        "source_kind_mismatch: project source mode changed"
-                    )
+                    raise AnalysisFailure("source_kind_mismatch")
             changed, removed_analyzers = changed_analyzers(
                 previous_stats, source_manifest
             )
@@ -3407,7 +3655,7 @@ async def run_ingest(
                             # fallback must not consume narration wall time
                             # when every language has deterministic coverage or
                             # this producer was skipped as unchanged.
-                            llm_run_budget = LLMRunBudget.from_env()
+                            llm_run_budget = LLMRunBudget.from_env(scope_id=run_id)
                         position += 1
                         agent_outcome = await _run_agent_extraction_stage(
                             bus, project_id, run_id, language, path,
@@ -3484,10 +3732,7 @@ async def run_ingest(
                     producer_options={"agent_extract_limit": agent_limit},
                 )
                 if final_manifest.as_dict() != source_manifest.as_dict():
-                    raise RuntimeError(
-                        "source_changed_during_analysis: mutable source cannot "
-                        "publish or delete facts"
-                    )
+                    raise AnalysisFailure("source_changed_during_analysis")
 
             # A content fingerprint authorizes a future skip only when this
             # run actually achieved complete producer coverage.  Likewise,
@@ -3658,11 +3903,7 @@ async def run_ingest(
                 if producer_coverage.get(producer, {}).get("usable") is True
             }
             if relevant_requested and not successful_requested:
-                unavailable = ",".join(sorted(relevant_requested))
-                raise RuntimeError(
-                    "no_usable_source_analyzer: no changed source producer "
-                    f"completed authoritatively ({unavailable})"
-                )
+                raise AnalysisFailure("no_usable_source_analyzer")
 
             # Stage L0-DB: live database schema for every registered
             # ProjectDB. Skipped silently when no DBs are bound to the
@@ -3716,7 +3957,7 @@ async def run_ingest(
                 and prepublication_stats.get("coverage", {}).get("status")
                 != "complete"
             ):
-                raise RuntimeError(
+                raise AnalysisFailure(
                     "full_rebuild_requires_complete_producer_coverage"
                 )
             async with SessionLocal() as session:
@@ -3764,7 +4005,7 @@ async def run_ingest(
         if summarize:
             extractor = Extractor()
             if llm_run_budget is None:
-                llm_run_budget = LLMRunBudget.from_env()
+                llm_run_budget = LLMRunBudget.from_env(scope_id=run_id)
             for level, label, fn, lim in (
                 (1, "l1_summaries", summarise_l1, l1_limit),
                 (2, "l2_summaries", summarise_l2, l2_limit),
@@ -3956,7 +4197,12 @@ async def run_ingest(
                 await _publish_current_terminal(bus, run_id)
         raise
     except Exception as exc:  # noqa: BLE001
-        log.exception("run_ingest failed")
+        error_code = exception_failure_code(exc, domain="analysis")
+        log.error(
+            "run_ingest failed run_id=%s failure_code=%s",
+            run_id,
+            error_code,
+        )
         current_status = await _run_status(run_id)
         if source_published or current_status == "published":
             if current_status == "published":
@@ -3979,7 +4225,7 @@ async def run_ingest(
                 run_id,
                 status="failed",
                 completed_at=datetime.now(tz=timezone.utc),
-                error_log=str(exc),
+                error_log=error_code,
                 stats={**totals, "seen_index": _seen_stats(seen_index)},
             )
         if not failed_update:
@@ -3991,7 +4237,7 @@ async def run_ingest(
             analysis_runs_total.labels(status="failed").inc()
         except Exception:
             pass
-        await bus.publish(run_id, {"event": "run_failed", "error": str(exc)})
+        await bus.publish(run_id, {"event": "run_failed", "error": error_code})
     finally:
         # Failed/cancelled staging is disposable only after the terminal state
         # is durable.  Promotion already removes successful rows; repeating
@@ -4012,19 +4258,31 @@ async def run_ingest(
                         run_id=run_id,
                     )
                     await session.commit()
-        except Exception:  # noqa: BLE001 — cleanup cannot hide run outcome
-            log.exception("analysis staging cleanup failed run_id=%s", run_id)
+        except Exception as cleanup_exc:  # noqa: BLE001 — preserve run outcome
+            log.error(
+                "analysis staging cleanup failed run_id=%s failure_code=%s",
+                run_id,
+                exception_failure_code(cleanup_exc, domain="analysis"),
+            )
         if seen_index is not None:
             seen_index.close()
         if prepared_source is not None:
             try:
                 await prepared_source.cleanup()
-            except Exception:  # noqa: BLE001
-                log.exception("source worktree cleanup failed for run %s", run_id)
+            except Exception as cleanup_exc:  # noqa: BLE001
+                log.error(
+                    "source worktree cleanup failed run_id=%s failure_code=%s",
+                    run_id,
+                    exception_failure_code(cleanup_exc, domain="analysis"),
+                )
         try:
             await _release_project_lock(project_id, run_id)
-        except Exception:  # noqa: BLE001
-            log.exception("analysis project lock release failed run_id=%s", run_id)
+        except Exception as cleanup_exc:  # noqa: BLE001
+            log.error(
+                "analysis project lock release failed run_id=%s failure_code=%s",
+                run_id,
+                exception_failure_code(cleanup_exc, domain="analysis"),
+            )
 
 
 _HEARTBEAT_KEY = "mnemos:worker:heartbeat"

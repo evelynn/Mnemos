@@ -166,7 +166,9 @@ async def test_atlas_config_persisted(sqlite_session, monkeypatch):
     cfg = await lp.resolve_config(sqlite_session)
     assert cfg["atlas"]["base_url"] == "https://atlas.hansol/api/v1/public"
     assert cfg["atlas"]["agent_id"] == "agent-xyz"
-    assert lp.is_provider_available("atlas", cfg) is True
+    # Configuration is preserved without advertising an unsafe generation
+    # route until Atlas exposes the required token/cost/receipt contract.
+    assert lp.is_provider_available("atlas", cfg) is False
 
 
 @pytest.mark.asyncio
@@ -175,6 +177,30 @@ async def test_atlas_default_base_url(sqlite_session, monkeypatch):
     monkeypatch.delenv("ATLAS_BASE_URL", raising=False)
     cfg = await lp.resolve_config(sqlite_session)
     assert cfg["atlas"]["base_url"] == "https://ai-atlas.hansol.net/api/v1/public"
+
+
+@pytest.mark.asyncio
+async def test_claude_chat_defaults_to_bounded_api_mode(sqlite_session, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    cfg = await lp.resolve_config(sqlite_session)
+    assert cfg["claudecode"]["mode"] == "api"
+
+
+def test_claude_status_never_advertises_key_free_agent_sdk_chat():
+    cfg = {
+        pid: {"api_key": None, "model": None, "base_url": None}
+        for pid in lp.PROVIDER_ORDER
+    }
+    cfg["claudecode"]["mode"] = "api"
+
+    status = cc._status("claudecode", cfg)
+
+    assert status["available"] is False
+    assert status["needs_key"] is True
+    assert status["subscription_available"] is False
+    assert status["agent_sdk_policy"] == (
+        "explicit_128k_reservation_and_attribution_required"
+    )
 
 
 def test_status_dot_reflects_last_test():

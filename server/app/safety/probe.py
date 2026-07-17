@@ -115,10 +115,10 @@ async def probe_tcp(kind: str, conn: str, timeout: float = 3.0) -> ProbeResult:
         )
     except asyncio.TimeoutError:
         return ProbeResult(ok=False, message="timeout", host=host, port=port)
-    except OSError as exc:
+    except OSError:
         return ProbeResult(
             ok=False,
-            message=f"unreachable: {exc.__class__.__name__}",
+            message="unreachable",
             host=host,
             port=port,
         )

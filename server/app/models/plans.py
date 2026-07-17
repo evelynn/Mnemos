@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -172,6 +173,119 @@ class DiffSubmission(Base):
             "review_run_id",
             "review_source_generation",
             "review_overlay_generation",
+        ),
+    )
+
+
+class SecondOpinionProduct(Base):
+    """Canonical, revision-bound Gate-B model product.
+
+    The row deliberately stores no prompt, raw provider response, exception,
+    or diff text.  ``canonical_payload`` is the normalized
+    ``mnemos.second_opinion.v1`` object after exact diff-line grounding; its
+    evidence contains only project-relative coordinates and SHA-256 digests.
+    """
+
+    __tablename__ = "second_opinion_products"
+
+    # The deterministic operation identity is also the replay key.  Unlike a
+    # random surrogate this cannot acquire a second product after restart.
+    operation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("plans.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    attempt_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("llm_calls.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    contract_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    diff_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    canonical_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    coverage: Mapped[str] = mapped_column(String(16), nullable=False)
+    input_coverage: Mapped[str] = mapped_column(String(16), nullable=False)
+    grounding_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    failure_code: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    finding_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    evidence_line_count: Mapped[int] = mapped_column(
+        BigInteger, nullable=False
+    )
+    rejected_findings: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    review_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    review_source_generation: Mapped[int] = mapped_column(
+        BigInteger, nullable=False
+    )
+    review_overlay_generation: Mapped[int] = mapped_column(
+        BigInteger, nullable=False
+    )
+    review_git_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["review_run_id", "project_id"],
+            ["analysis_runs.id", "analysis_runs.project_id"],
+            name="fk_second_opinion_product_review_run_project",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "attempt_id", name="uq_second_opinion_products_attempt"
+        ),
+        Index(
+            "ix_second_opinion_products_plan_revision",
+            "plan_id",
+            "review_run_id",
+            "review_source_generation",
+            "review_overlay_generation",
+        ),
+        CheckConstraint(
+            "contract_name = 'mnemos.second_opinion.v1'",
+            name="ck_second_opinion_products_contract",
+        ),
+        CheckConstraint(
+            "length(input_fingerprint) = 64 AND length(diff_sha256) = 64",
+            name="ck_second_opinion_products_fingerprints",
+        ),
+        CheckConstraint(
+            "coverage IN ('complete', 'incomplete') AND "
+            "input_coverage IN ('complete', 'incomplete') AND "
+            "grounding_status IN ('fully_grounded', 'rejected')",
+            name="ck_second_opinion_products_status_values",
+        ),
+        CheckConstraint(
+            "(coverage = 'complete' AND failure_code IS NULL "
+            "AND input_coverage = 'complete' "
+            "AND grounding_status = 'fully_grounded' "
+            "AND rejected_findings = 0) OR "
+            "(coverage = 'incomplete' AND failure_code IS NOT NULL "
+            "AND length(failure_code) BETWEEN 1 AND 64)",
+            name="ck_second_opinion_products_coverage_shape",
+        ),
+        CheckConstraint(
+            "finding_count >= 0 AND finding_count <= 32 AND "
+            "evidence_line_count >= 0 AND evidence_line_count <= 128 AND "
+            "rejected_findings >= 0 AND rejected_findings <= 32",
+            name="ck_second_opinion_products_counts",
+        ),
+        CheckConstraint(
+            "review_source_generation > 0 AND "
+            "review_overlay_generation >= 0 AND "
+            "length(review_git_sha) BETWEEN 40 AND 64",
+            name="ck_second_opinion_products_review_revision",
         ),
     )
 

@@ -10,6 +10,8 @@ Three jobs:
   credentials have lost their read-only character.
 * :func:`run_retention_purge` — once a day, vacuum old audit /
   webhook ingest noise per the configured retention window.
+* :func:`run_reset_stale_runs` — close abandoned analysis work and expired
+  durable LLM attempts without refunding unknown provider spend.
 
 Single-leader concurrency uses a Postgres advisory lock
 (``pg_try_advisory_lock(hashtext('mnemos:cron:<name>'))``). One worker
@@ -26,13 +28,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.graph_publication import (
     GraphPublicationInvariantError,
     validate_graph_publication_receipt,
 )
+from app.llm.lifecycle import reconcile_stale_attempts
 from app.models.graph import AnalysisRun
 
 log = logging.getLogger(__name__)
@@ -368,7 +371,11 @@ async def _find_expired_queued_runs(
         try:
             job_status = await Job(job_id, redis).status()
         except Exception:  # noqa: BLE001 — retain source revision on Redis faults
-            log.exception("queued analysis job status unavailable run_id=%s", run_id)
+            log.error(
+                "queued analysis job status unavailable run_id=%s "
+                "failure_code=analysis_dependency_unavailable",
+                run_id,
+            )
             continue
         if job_status in {JobStatus.complete, JobStatus.not_found}:
             expired.add(run_id)
@@ -400,9 +407,7 @@ async def _reset_stale_runs(
             "UPDATE analysis_runs SET "
             "  status = 'failed', "
             "  completed_at = now(), "
-            "  error_log = coalesce(error_log, '') "
-            "    || E'\\n[reset_stale_runs] worker heartbeat lost; "
-            "run exceeded configured stale-run budget' "
+            "  error_log = 'analysis_timeout' "
             " WHERE status = 'running' AND started_at < :cutoff "
             " RETURNING id"
         ),
@@ -419,10 +424,7 @@ async def _reset_stale_runs(
             .values(
                 status="failed",
                 completed_at=datetime.now(tz=timezone.utc),
-                error_log=(
-                    func.coalesce(AnalysisRun.error_log, "")
-                    + "\n[reset_stale_runs] queued job expired before worker pickup"
-                ),
+                error_log="analysis_timeout",
             )
             .returning(AnalysisRun.id)
         )
@@ -457,27 +459,24 @@ async def _partialize_stale_published_runs(
         )
     ).scalars().all()
     completed_at = datetime.now(tz=timezone.utc)
-    message = (
-        "[reset_stale_runs] source graph was published, but postprocess "
-        "heartbeat was lost"
-    )
     partialized = 0
     for run in rows:
         stats = dict(run.stats) if isinstance(run.stats, dict) else {}
         try:
             publication = validate_graph_publication_receipt(run)
-        except GraphPublicationInvariantError as exc:
+        except GraphPublicationInvariantError:
             log.error(
-                "stale published run has invalid receipt run_id=%s: %s",
+                "stale published run has invalid receipt run_id=%s "
+                "failure_code=graph_publication_receipt_invalid",
                 run.id,
-                exc,
             )
             continue
         receipt = publication.to_payload()
         error = {
             "stage": "stale_recovery",
-            "type": "WorkerHeartbeatLost",
-            "message": message,
+            "type": "timeout",
+            "code": "postprocess_timeout",
+            "message": "postprocess_timeout",
             "cancelled": False,
             "at": completed_at.isoformat(),
         }
@@ -498,7 +497,7 @@ async def _partialize_stale_published_runs(
         )
         run.status = "partial"
         run.completed_at = completed_at
-        run.error_log = message
+        run.error_log = "postprocess_timeout"
         run.stats = {
             **stats,
             "graph_publication": receipt,
@@ -525,7 +524,12 @@ async def run_reset_stale_runs(ctx: dict) -> dict[str, int] | None:
         )
         reset = await _reset_stale_runs(session, expired)
         partial = await _partialize_stale_published_runs(session)
-        return {**reset, **partial}
+        llm_attempts = await reconcile_stale_attempts(session)
+        return {
+            **reset,
+            **partial,
+            "llm_attempts_reconciled": llm_attempts,
+        }
 
     return await with_advisory_lock(
         SessionLocal_factory(), "reset_stale_runs", _reset_with_queue_check

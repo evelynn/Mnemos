@@ -197,12 +197,15 @@ async def test_nonterminal_or_failed_run_is_not_a_snapshot(seeded, status):
 
     assert diff["error"] == "run_not_published"
     assert diff["rejected_runs"] == [
-        {"run_id": str(run_b), "reason": f"run status {status!r} is not a terminal publication"}
+        {"run_id": str(run_b), "reason": "run_not_terminal_publication"}
     ]
+    # The public response is deliberately canonical: persisted status details
+    # belong to internal diagnosis and must not be reflected to MCP callers.
+    assert status not in repr(diff["rejected_runs"])
 
 
 @pytest.mark.parametrize(
-    ("mutation", "reason"),
+    ("mutation", "internal_detail"),
     [
         (lambda run: setattr(run, "stats", {}), "graph_publication receipt is missing"),
         (
@@ -243,7 +246,9 @@ async def test_nonterminal_or_failed_run_is_not_a_snapshot(seeded, status):
         ),
     ],
 )
-async def test_malformed_publication_receipt_fails_closed(seeded, mutation, reason):
+async def test_malformed_publication_receipt_fails_closed(
+    seeded, mutation, internal_detail
+):
     s, pid, run_a, run_b = seeded
     row = await s.get(AnalysisRun, run_b)
     # JSON columns do not track nested mutation portably; assign a fresh copy.
@@ -258,7 +263,12 @@ async def test_malformed_publication_receipt_fails_closed(seeded, mutation, reas
     diff = await compare_runs(s, project_id=pid, run_a_id=run_a, run_b_id=run_b)
 
     assert diff["error"] == "run_not_published"
-    assert diff["rejected_runs"] == [{"run_id": str(run_b), "reason": reason}]
+    assert diff["rejected_runs"] == [
+        {"run_id": str(run_b), "reason": "run_graph_publication_invalid"}
+    ]
+    # GraphPublicationInvariantError messages may describe stored graph state.
+    # Only the stable public reason code may cross this privacy boundary.
+    assert internal_detail not in repr(diff["rejected_runs"])
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ in those signals, what each value MEANS, where it is formed, and which
 rows it reads/writes.
 
 This module hands the relevant source slices from every tier to the
-operator's Claude Code subscription and asks for that structured trace.
+operator's Claude Code credential context and asks for that structured trace.
 The result is persisted as a level-4 Summary (``flow:<slug>``) so it
 joins the knowledge graph and is queryable like any other summary.
 """
@@ -17,17 +17,53 @@ joins the knowledge graph and is queryable like any other summary.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import math
 import os
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 
-from app.extractor.agent_sdk import _parse_json_response, is_agent_sdk_available
+from app.extractor.agent_sdk import (
+    AGENT_SDK_BUDGETED_MODEL,
+    AGENT_SDK_MAX_PROVIDER_INPUT_TOKENS,
+    AGENT_SDK_MAX_PROVIDER_OUTPUT_TOKENS,
+    AGENT_SDK_TERMINAL_ACCEPTED,
+    AGENT_SDK_TERMINAL_OUTPUT_LIMIT,
+    AgentSDKAssistantContract,
+    AgentSDKAuthContract,
+    _parse_json_response,
+    agent_sdk_isolation_options,
+    inspect_agent_sdk_result,
+    is_agent_sdk_available,
+)
 from app.extractor.cost import LLMRunBudget
-from app.extractor.packing import _approx_tokens
+from app.llm.contracts import (
+    AttemptKind,
+    AttemptStatus,
+    LLMUsageContractError,
+    LLMUsageV1,
+    ResultStatus,
+    UsageSource,
+    normalize_agent_sdk_usage,
+    unavailable_usage,
+)
+from app.llm.lifecycle import (
+    AttemptOutcome,
+    AttemptReplayState,
+    AttemptStartMetadata,
+    AttemptTicket,
+    LLMAttemptReplayBlocked,
+    LLMLifecycleError,
+    LLMSemanticCandidateCorrupt,
+    SemanticCandidate,
+    SemanticCandidateReplayRequest,
+    fingerprint_input,
+    require_attempt_callbacks,
+)
 
 log = logging.getLogger(__name__)
 
@@ -44,14 +80,34 @@ FLOW_FALLBACK_PROVIDER_REJECTED = "flow_provider_rejected"
 FLOW_FALLBACK_EMPTY_RESPONSE = "flow_empty_response"
 FLOW_FALLBACK_PARSE_REJECTED = "flow_parse_rejected"
 FLOW_FALLBACK_CONTRACT_REJECTED = "flow_contract_rejected"
+FLOW_FALLBACK_PREDISPATCH = "flow_pre_dispatch_guard_failed"
+FLOW_FALLBACK_USAGE_REJECTED = "flow_usage_contract_invalid"
 
 FlowBeforeProviderCall = Callable[[], Awaitable[None]]
 FlowPhysicalCallRecorder = Callable[[str, str | None, str], Awaitable[None]]
 
+
+def flow_candidate_binding_fingerprint(
+    semantic_binding_identity: str,
+    source_scope: Mapping[str, Any],
+) -> str:
+    """Canonical consumer/provider binding shared with product publication."""
+
+    return fingerprint_input(
+        "mnemos.flow_result.binding.v1",
+        semantic_binding_identity,
+        json.dumps(
+            source_scope,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ),
+    )
+
 # The provider response is untrusted input.  These limits are deliberately
 # lower than the API/source budgets so one malformed model response cannot
 # become an unbounded JSONB row or an oversized MCP response later.
-MAX_AGENT_OUTPUT_CHARS = 256 * 1024
+MAX_AGENT_OUTPUT_BYTES = 256 * 1024
 MAX_SOURCE_PROMPT_CHARS = 100_000
 MAX_SUMMARY_CHARS = 200
 MAX_DETAILED_CHARS = 20_000
@@ -332,6 +388,22 @@ def _flow_text(value: Any, *, path: str, maximum: int) -> str:
     if not isinstance(value, str):
         _flow_fail(path, f"non-empty string up to {maximum} chars", value, "Emit a JSON string.")
     normalized = value.strip()
+    if "\x00" in normalized:
+        _flow_fail(
+            path,
+            "NUL-free UTF-8 text",
+            value,
+            "Remove U+0000; PostgreSQL text and JSONB cannot store it.",
+        )
+    try:
+        normalized.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        _flow_fail(
+            path,
+            "strictly UTF-8-encodable text",
+            value,
+            "Remove unpaired UTF-16 surrogate code points.",
+        )
     if not normalized or len(normalized) > maximum:
         _flow_fail(
             path,
@@ -356,27 +428,25 @@ def _flow_enum(
     return normalized
 
 
-def _flow_scalar(value: Any, *, path: str) -> str | int | float | bool:
+def _flow_scalar(value: Any, *, path: str) -> str | int | bool:
     if isinstance(value, str):
         return _flow_text(value, path=path, maximum=300)
     if isinstance(value, bool):
         return value
     if isinstance(value, int) and -(2**63) <= value <= 2**63 - 1:
         return value
-    if isinstance(value, float) and math.isfinite(value) and abs(value) <= 1e100:
-        return value
     _flow_fail(
         path,
-        "bounded string, boolean, integer, or finite number",
+        "bounded string, boolean, or signed 64-bit integer",
         value,
-        "Emit one JSON scalar.",
+        "Encode fractional values as bounded strings to preserve exact JSONB provenance.",
     )
 
 
-def _flow_scalar_values(value: Any, *, path: str) -> list[str | int | float | bool]:
+def _flow_scalar_values(value: Any, *, path: str) -> list[str | int | bool]:
     values = _flow_list(value, path=path, maximum=MAX_VALUES)
-    result: list[str | int | float | bool] = []
-    seen: set[tuple[type, str | int | float | bool]] = set()
+    result: list[str | int | bool] = []
+    seen: set[tuple[type, str | int | bool]] = set()
     for index, raw in enumerate(values):
         scalar = _flow_scalar(raw, path=f"{path}[{index}]")
         marker = (type(scalar), scalar)
@@ -499,7 +569,7 @@ def _normalise_flags(value: Any) -> list[dict[str, Any]]:
         seen_names.add(marker)
         raw_values = _flow_list(item["values"], path=f"{path}.values", maximum=MAX_VALUES)
         values: list[dict[str, Any]] = []
-        seen_values: set[tuple[type, str | int | float | bool]] = set()
+        seen_values: set[tuple[type, str | int | bool]] = set()
         for value_index, raw_value in enumerate(raw_values):
             value_path = f"{path}.values[{value_index}]"
             value_item = _flow_mapping(raw_value, path=value_path)
@@ -958,6 +1028,18 @@ class _FlowOutputTooLarge(Exception):
     """Internal control signal; provider text is intentionally not retained."""
 
 
+@dataclass(slots=True)
+class FlowAttemptState:
+    """Privacy-safe durable-attempt facts returned to the HTTP owner."""
+
+    attempt_id: uuid.UUID | None = None
+    usage: LLMUsageV1 | None = None
+    resolved_model: str | None = None
+    failure_code: str | None = None
+    result_status: ResultStatus | None = None
+    candidate_binding_fingerprint: str | None = None
+
+
 async def analyze_flow_via_agent_sdk(
     *,
     entry: str,
@@ -968,8 +1050,11 @@ async def analyze_flow_via_agent_sdk(
     run_budget: LLMRunBudget | None = None,
     before_provider_call: FlowBeforeProviderCall | None = None,
     record_physical_call: FlowPhysicalCallRecorder | None = None,
+    attempt_state: FlowAttemptState | None = None,
+    operation_id: uuid.UUID,
+    semantic_binding_identity: str,
 ) -> dict[str, Any] | None:
-    """Trace one cross-tier process via the Claude Code subscription.
+    """Trace one cross-tier process via an isolated Agent SDK query.
 
     The outer adapter envelope deliberately separates model-owned canonical
     flow data from deterministic source provenance::
@@ -980,7 +1065,21 @@ async def analyze_flow_via_agent_sdk(
     callbacks are allowed to raise so a caller never reports a successful
     analysis after its accounting transaction failed.
     """
+    if not isinstance(operation_id, uuid.UUID):
+        raise LLMLifecycleError(
+            "flow analysis requires a stable consumer operation identity"
+        )
+    if (
+        not isinstance(semantic_binding_identity, str)
+        or re.fullmatch(r"[0-9a-f]{64}", semantic_binding_identity) is None
+    ):
+        raise LLMLifecycleError(
+            "flow analysis requires a revision-bound semantic identity"
+        )
     if not is_agent_sdk_available() or not sources:
+        return None
+    if model != AGENT_SDK_BUDGETED_MODEL:
+        log.warning("agent_flow: unsupported budget model refused")
         return None
     try:
         from claude_agent_sdk import (
@@ -997,69 +1096,291 @@ async def analyze_flow_via_agent_sdk(
         sources, max_total_chars=max_total_chars
     )
     if not packed_sources:
-        log.warning("agent_flow: %r has no source within the prompt budget", entry)
+        log.warning("agent_flow: no source remained within the prompt budget")
         return None
     if timeout_s <= 0:
         return None
     prompt = _build_flow_prompt(entry, packed_sources)
     opts = ClaudeAgentOptions(
-        allowed_tools=[],
+        **agent_sdk_isolation_options(),
         disallowed_tools=["Bash", "Edit", "Write", "Read", "Task"],
         system_prompt=_FLOW_SYSTEM,
         max_turns=1,
-        permission_mode="default",
+        permission_mode="dontAsk",
         cwd=os.environ.get("MNEMOS_AGENT_SDK_CWD", "/tmp"),
         model=model if model and "claude" in model else None,
     )
 
-    # Everything above is local preflight.  Apply the rolling project cap
-    # before reserving the fresh per-request call/input/wall budget, then mark
-    # a physical attempt only when the SDK iterator is about to be consumed.
-    if before_provider_call is not None:
-        await before_provider_call()
-    active_budget = run_budget or LLMRunBudget.from_env()
-    remaining = active_budget.reserve(
-        _approx_tokens({"system_prompt": _FLOW_SYSTEM, "prompt": prompt})
-    )
-    provider_timeout = min(float(timeout_s), remaining)
-    deadline_limited = remaining <= float(timeout_s)
+    # Everything above is local preflight.  Refuse before mutating even the
+    # in-memory run budget when no durable lifecycle owner is installed.
+    callbacks = require_attempt_callbacks("Claude Agent SDK flow analysis")
+    if callbacks.finish_candidate is None or (
+        callbacks.replay_attempt is None
+        and callbacks.replay_candidate is None
+    ):
+        raise LLMLifecycleError(
+            "Claude Agent SDK flow analysis requires semantic candidate capabilities"
+        )
+    if attempt_state is not None:
+        attempt_state.attempt_id = None
+        attempt_state.usage = None
+        attempt_state.resolved_model = None
+        attempt_state.failure_code = None
+        attempt_state.result_status = None
+        attempt_state.candidate_binding_fingerprint = None
 
-    async def _record(status: str, fallback_reason: str | None) -> None:
+    # The durable start callback is the sole owner of a new request's budget
+    # reservation.  It first checks for an exact prior attempt, allowing a
+    # validated local replay even when today's fresh budget is exhausted.
+    active_budget = run_budget or LLMRunBudget.from_env()
+    estimated_input_tokens = AGENT_SDK_MAX_PROVIDER_INPUT_TOKENS
+    provider_timeout = float(timeout_s)
+    deadline_limited = False
+    ticket: AttemptTicket | None = None
+    auth_contract = AgentSDKAuthContract()
+
+    input_fingerprint = fingerprint_input(_FLOW_SYSTEM, prompt)
+    operation_namespace = operation_id
+    bound_operation_id = uuid.uuid5(
+        operation_namespace,
+        "\x00".join(("anthropic", model, input_fingerprint)),
+    )
+    binding_identity = semantic_binding_identity
+    candidate_binding_fingerprint = flow_candidate_binding_fingerprint(
+        binding_identity,
+        source_scope,
+    )
+    if attempt_state is not None:
+        attempt_state.candidate_binding_fingerprint = (
+            candidate_binding_fingerprint
+        )
+    metadata = AttemptStartMetadata(
+        operation_id=bound_operation_id,
+        attempt_no=1,
+        attempt_kind=AttemptKind.PRIMARY,
+        provider="anthropic",
+        provider_mode="unknown",
+        requested_model=model,
+        input_fingerprint=input_fingerprint,
+        estimated_input_tokens=estimated_input_tokens,
+        input_estimate_method="model_context_ceiling_v1",
+        requested_max_output_tokens=AGENT_SDK_MAX_PROVIDER_OUTPUT_TOKENS,
+        usage_source=UsageSource.AGENT_SDK,
+        billing_route="claude_agent_sdk",
+    )
+    try:
+        ticket = await callbacks.start(metadata)
+    except LLMAttemptReplayBlocked:
+        replay_request = SemanticCandidateReplayRequest(
+            operation_id=bound_operation_id,
+            attempt_no=1,
+            input_fingerprint=input_fingerprint,
+            contract_name=FLOW_RESULT_CONTRACT,
+            binding_fingerprint=candidate_binding_fingerprint,
+            normalizer=normalize_flow_payload,
+        )
+        if callbacks.replay_attempt is not None:
+            replay = await callbacks.replay_attempt(replay_request)
+            if replay.state == AttemptReplayState.STARTED:
+                raise LLMAttemptReplayBlocked(
+                    "flow operation is still in progress"
+                )
+            if replay.state == AttemptReplayState.ABSENT:
+                raise LLMSemanticCandidateCorrupt(
+                    "flow duplicate attempt disappeared"
+                )
+            if attempt_state is not None:
+                attempt_state.attempt_id = replay.attempt_id
+                attempt_state.resolved_model = replay.resolved_model
+                attempt_state.result_status = replay.result_status
+                attempt_state.failure_code = replay.failure_code
+            if replay.state == AttemptReplayState.TERMINAL_WITHOUT_CANDIDATE:
+                return None
+        else:
+            replayer = callbacks.replay_candidate
+            if replayer is None:  # pragma: no cover - guarded above
+                raise LLMLifecycleError("flow semantic replayer disappeared")
+            replay = await replayer(replay_request)
+        if attempt_state is not None:
+            attempt_state.attempt_id = replay.attempt_id
+            attempt_state.resolved_model = replay.resolved_model
+            attempt_state.result_status = replay.result_status
+            attempt_state.failure_code = (
+                "flow_candidate_rejected"
+                if replay.candidate_status == "rejected"
+                else None
+            )
+        if replay.candidate_status not in {"candidate", "accepted"}:
+            return None
+        if replay.result_status not in {
+            ResultStatus.PENDING,
+            ResultStatus.ACCEPTED,
+        }:
+            raise LLMSemanticCandidateCorrupt(
+                "flow replay candidate classification is inconsistent"
+            )
+        return {
+            "flow": dict(replay.payload),
+            "source_scope": source_scope,
+        }
+    if attempt_state is not None:
+        attempt_state.attempt_id = ticket.attempt_id
+    if ticket.remaining_seconds <= provider_timeout:
+        deadline_limited = True
+    provider_timeout = min(provider_timeout, ticket.remaining_seconds)
+    provider_deadline = monotonic() + max(0.0, provider_timeout)
+
+    async def _finish(
+        status: str,
+        fallback_reason: str | None,
+        *,
+        attempt_status: AttemptStatus,
+        result_status: ResultStatus,
+        usage: LLMUsageV1,
+        resolved_model: str | None = None,
+        finish_reason: str | None = None,
+        candidate: SemanticCandidate | None = None,
+    ) -> None:
+        if attempt_state is not None:
+            attempt_state.usage = usage
+            attempt_state.resolved_model = resolved_model
+            attempt_state.failure_code = fallback_reason
+            attempt_state.result_status = result_status
+        outcome = AttemptOutcome(
+            attempt_status=attempt_status,
+            result_status=result_status,
+            usage=usage,
+            resolved_model=resolved_model,
+            failure_code=fallback_reason,
+            finish_reason=finish_reason,
+            provider_mode=auth_contract.provider_mode,
+        )
+        if candidate is not None:
+            if callbacks.finish_candidate is None:  # pragma: no cover - guarded above
+                raise LLMLifecycleError(
+                    "flow semantic candidate finalizer is unavailable"
+                )
+            await callbacks.finish_candidate(ticket, outcome, candidate)
+        else:
+            await callbacks.finish(ticket, outcome)
+        # Optional observer only; it cannot authorize dispatch and runs after
+        # the durable finalizer succeeds. Retained for adapter telemetry/tests.
         if record_physical_call is not None:
-            await record_physical_call(status, fallback_reason, model)
+            await record_physical_call(
+                status,
+                fallback_reason,
+                resolved_model or model,
+            )
+
+    # Legacy observers may still perform a local policy/readiness check, but
+    # they run only for a genuinely new ticket.  A replay never invokes them.
+    # Failure is ledgered as a pre-dispatch terminal outcome so the committed
+    # STARTED row cannot be stranded or mistaken for provider spend.
+    if before_provider_call is not None:
+        try:
+            await before_provider_call()
+        except asyncio.CancelledError:
+            await _finish(
+                "cancelled",
+                FLOW_FALLBACK_CANCELLED,
+                attempt_status=AttemptStatus.CANCELLED,
+                result_status=ResultStatus.NOT_APPLICABLE,
+                usage=unavailable_usage(
+                    lost_after_dispatch=False,
+                    source=UsageSource.AGENT_SDK,
+                ),
+            )
+            raise
+        except Exception:
+            await _finish(
+                "failed",
+                FLOW_FALLBACK_PREDISPATCH,
+                attempt_status=AttemptStatus.FAILED,
+                result_status=ResultStatus.NOT_APPLICABLE,
+                usage=unavailable_usage(
+                    lost_after_dispatch=False,
+                    source=UsageSource.AGENT_SDK,
+                ),
+            )
+            raise
+
+    # The optional readiness observer is pre-dispatch work and must consume the
+    # same absolute ticket window; it cannot extend a durable deadline merely
+    # because the timeout was calculated before awaiting it.
+    provider_timeout = provider_deadline - monotonic()
+
+    if provider_timeout <= 0:
+        active_budget.stop(FLOW_FALLBACK_RUN_DEADLINE)
+        await _finish(
+            "timeout",
+            FLOW_FALLBACK_RUN_DEADLINE,
+            attempt_status=AttemptStatus.TIMEOUT,
+            result_status=ResultStatus.NOT_APPLICABLE,
+            usage=unavailable_usage(
+                lost_after_dispatch=False,
+                source=UsageSource.AGENT_SDK,
+            ),
+        )
+        return None
 
     collected: list[str] = []
-    is_error = False
+    result_message: Any | None = None
+    assistant_contract = AgentSDKAssistantContract(expected_model=model)
+    if callbacks is not None and callbacks.mark_provider_dispatch is not None:
+        callbacks.mark_provider_dispatch()
     try:
-        async def _drain() -> bool:
-            total_chars = 0
+        async def _drain() -> Any | None:
+            total_bytes = 0
             async for msg in query(prompt=prompt, options=opts):
+                auth_contract.observe(msg)
                 if isinstance(msg, AssistantMessage):
+                    if not assistant_contract.observe(msg):
+                        continue
                     for block in msg.content:
                         if isinstance(block, TextBlock):
-                            separator_chars = 1 if collected else 0
+                            separator_bytes = 1 if collected else 0
+                            block_bytes = len(block.text.encode("utf-8"))
                             if (
-                                total_chars + separator_chars + len(block.text)
-                                > MAX_AGENT_OUTPUT_CHARS
+                                total_bytes + separator_bytes + block_bytes
+                                > MAX_AGENT_OUTPUT_BYTES
                             ):
                                 raise _FlowOutputTooLarge
                             collected.append(block.text)
-                            total_chars += separator_chars + len(block.text)
+                            total_bytes += separator_bytes + block_bytes
                 elif isinstance(msg, ResultMessage):
-                    return msg.is_error
-            return False
+                    return msg
+            return None
 
-        is_error = await asyncio.wait_for(_drain(), timeout=provider_timeout)
+        result_message = await asyncio.wait_for(
+            _drain(), timeout=provider_timeout
+        )
     except asyncio.CancelledError:
-        await _record("cancelled", FLOW_FALLBACK_CANCELLED)
+        await _finish(
+            "cancelled",
+            FLOW_FALLBACK_CANCELLED,
+            attempt_status=AttemptStatus.CANCELLED,
+            result_status=ResultStatus.NOT_APPLICABLE,
+            usage=unavailable_usage(
+                lost_after_dispatch=True,
+                source=UsageSource.AGENT_SDK,
+            ),
+        )
         raise
     except _FlowOutputTooLarge:
         log.warning(
-            "agent_flow: %r exceeded the %d-character output limit",
-            entry,
-            MAX_AGENT_OUTPUT_CHARS,
+            "agent_flow: response exceeded the %d-byte output limit",
+            MAX_AGENT_OUTPUT_BYTES,
         )
-        await _record("rejected", FLOW_FALLBACK_OUTPUT_LIMIT)
+        await _finish(
+            "rejected",
+            FLOW_FALLBACK_OUTPUT_LIMIT,
+            attempt_status=AttemptStatus.FAILED,
+            result_status=ResultStatus.OUTPUT_LIMIT_REJECTED,
+            usage=unavailable_usage(
+                lost_after_dispatch=True,
+                source=UsageSource.AGENT_SDK,
+            ),
+        )
         return None
     except asyncio.TimeoutError:
         fallback_reason = (
@@ -1069,30 +1390,143 @@ async def analyze_flow_via_agent_sdk(
         )
         if deadline_limited:
             active_budget.stop(FLOW_FALLBACK_RUN_DEADLINE)
-        log.warning("agent_flow: %r timed out within its bounded call window", entry)
-        await _record("timeout", fallback_reason)
+        log.warning("agent_flow: timed out within its bounded call window")
+        await _finish(
+            "timeout",
+            fallback_reason,
+            attempt_status=AttemptStatus.TIMEOUT,
+            result_status=ResultStatus.NOT_APPLICABLE,
+            usage=unavailable_usage(
+                lost_after_dispatch=True,
+                source=UsageSource.AGENT_SDK,
+            ),
+        )
         return None
     except Exception as exc:  # noqa: BLE001
-        log.warning("agent_flow: %r failed: %s", entry, exc.__class__.__name__)
-        await _record("failed", FLOW_FALLBACK_PROVIDER_ERROR)
+        log.warning("agent_flow: provider failed: %s", exc.__class__.__name__)
+        await _finish(
+            "failed",
+            FLOW_FALLBACK_PROVIDER_ERROR,
+            attempt_status=AttemptStatus.FAILED,
+            result_status=ResultStatus.NOT_APPLICABLE,
+            usage=unavailable_usage(
+                lost_after_dispatch=True,
+                source=UsageSource.AGENT_SDK,
+            ),
+        )
         return None
 
-    if is_error:
-        await _record("rejected", FLOW_FALLBACK_PROVIDER_REJECTED)
+    if result_message is None:
+        await _finish(
+            "rejected",
+            FLOW_FALLBACK_PROVIDER_REJECTED,
+            attempt_status=AttemptStatus.FAILED,
+            result_status=ResultStatus.NOT_APPLICABLE,
+            usage=unavailable_usage(
+                lost_after_dispatch=True,
+                source=UsageSource.AGENT_SDK,
+            ),
+            resolved_model=assistant_contract.resolved_model,
+        )
+        return None
+
+    terminal = inspect_agent_sdk_result(result_message)
+    try:
+        usage = normalize_agent_sdk_usage(result_message)
+    except LLMUsageContractError:
+        await _finish(
+            "rejected",
+            FLOW_FALLBACK_USAGE_REJECTED,
+            attempt_status=AttemptStatus.COMPLETED,
+            result_status=ResultStatus.NOT_APPLICABLE,
+            usage=unavailable_usage(source=UsageSource.AGENT_SDK),
+            resolved_model=assistant_contract.resolved_model,
+            finish_reason=terminal.finish_reason,
+        )
+        return None
+    if terminal.disposition == AGENT_SDK_TERMINAL_OUTPUT_LIMIT:
+        await _finish(
+            "rejected",
+            FLOW_FALLBACK_OUTPUT_LIMIT,
+            attempt_status=AttemptStatus.COMPLETED,
+            result_status=ResultStatus.OUTPUT_LIMIT_REJECTED,
+            usage=usage,
+            resolved_model=assistant_contract.resolved_model,
+            finish_reason=terminal.finish_reason,
+        )
+        return None
+    if terminal.disposition != AGENT_SDK_TERMINAL_ACCEPTED:
+        await _finish(
+            "rejected",
+            FLOW_FALLBACK_PROVIDER_REJECTED,
+            attempt_status=AttemptStatus.FAILED,
+            result_status=ResultStatus.NOT_APPLICABLE,
+            usage=usage,
+            resolved_model=assistant_contract.resolved_model,
+            finish_reason=terminal.finish_reason,
+        )
+        return None
+    if not assistant_contract.valid:
+        await _finish(
+            "rejected",
+            FLOW_FALLBACK_PROVIDER_REJECTED,
+            attempt_status=AttemptStatus.FAILED,
+            result_status=ResultStatus.NOT_APPLICABLE,
+            usage=usage,
+            resolved_model=assistant_contract.resolved_model,
+            finish_reason=terminal.finish_reason,
+        )
         return None
     if not collected:
-        await _record("rejected", FLOW_FALLBACK_EMPTY_RESPONSE)
+        await _finish(
+            "rejected",
+            FLOW_FALLBACK_EMPTY_RESPONSE,
+            attempt_status=AttemptStatus.COMPLETED,
+            result_status=ResultStatus.EMPTY,
+            usage=usage,
+            resolved_model=assistant_contract.resolved_model,
+            finish_reason=terminal.finish_reason,
+        )
         return None
     parsed = _parse_json_response("\n".join(collected))
     if parsed is None:
-        await _record("rejected", FLOW_FALLBACK_PARSE_REJECTED)
+        await _finish(
+            "rejected",
+            FLOW_FALLBACK_PARSE_REJECTED,
+            attempt_status=AttemptStatus.COMPLETED,
+            result_status=ResultStatus.PARSE_REJECTED,
+            usage=usage,
+            resolved_model=assistant_contract.resolved_model,
+            finish_reason=terminal.finish_reason,
+        )
         return None
     try:
         normalized = normalize_flow_payload(parsed)
     except FlowContractError as exc:
         # Safe diagnostic contains only a static path and type/size shape.
         log.warning("agent_flow: contract rejected: %s", exc)
-        await _record("rejected", FLOW_FALLBACK_CONTRACT_REJECTED)
+        await _finish(
+            "rejected",
+            FLOW_FALLBACK_CONTRACT_REJECTED,
+            attempt_status=AttemptStatus.COMPLETED,
+            result_status=ResultStatus.SCHEMA_REJECTED,
+            usage=usage,
+            resolved_model=assistant_contract.resolved_model,
+            finish_reason=terminal.finish_reason,
+        )
         return None
-    await _record("completed", None)
+    await _finish(
+        "completed",
+        None,
+        attempt_status=AttemptStatus.COMPLETED,
+        result_status=ResultStatus.PENDING,
+        usage=usage,
+        resolved_model=assistant_contract.resolved_model,
+        finish_reason=terminal.finish_reason,
+        candidate=SemanticCandidate(
+            contract_name=FLOW_RESULT_CONTRACT,
+            binding_fingerprint=candidate_binding_fingerprint,
+            payload=normalized,
+        ),
+    )
     return {"flow": normalized, "source_scope": source_scope}

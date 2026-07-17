@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 import uuid
 from datetime import datetime, timezone
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -19,7 +20,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.extractor.agent import ExtractorResult
+from app.extractor.agent import Extractor, ExtractorResult
+from app.extractor.agent_sdk import (
+    SUMMARY_CANDIDATE_CONTRACT,
+    current_summary_candidate_context,
+    normalize_summary_candidate_payload,
+)
+import app.extractor.runner as runner_module
+from app.extractor.cost import LLMRunBudget
 from app.extractor.packing import (
     MAX_EVIDENCE_PROMPT_CHARS,
     EvidencePromptTooLarge,
@@ -33,7 +41,23 @@ from app.extractor.runner import (
     summarise_l3,
 )
 from app.extractor.schema import parse_and_normalize_extractor_payload
-from app.models.findings import LLMCall, Summary
+from app.llm.contracts import (
+    AttemptKind,
+    AttemptStatus,
+    LLMUsageV1,
+    ResultStatus,
+    UsageSource,
+    UsageStatus,
+)
+from app.llm.lifecycle import (
+    AttemptOutcome,
+    AttemptStartMetadata,
+    LLMLifecycleError,
+    SemanticCandidate,
+    fingerprint_input,
+    require_attempt_callbacks,
+)
+from app.models.findings import Summary
 from app.models.graph import AnalysisRun, Edge, GraphHead, Node
 from app.models.organization import Organization
 from app.models.overlays import (
@@ -42,10 +66,99 @@ from app.models.overlays import (
     GraphNodeHumanOverlay,
 )
 from app.models.projects import Project
+from app.models.findings import LLMCall
+from app.models.llm import LLMSemanticCandidate
 from app.testing.graph_publication import published_run_fields
+from app.testing.llm_adapter import (
+    create_llm_ledger_tables,
+)
 from app.testing.sqlite_polyglot import install_polyglot
 
 install_polyglot()
+
+_PRODUCTION_BEGIN_ATTEMPT = runner_module.begin_attempt
+
+
+@pytest.fixture(autouse=True)
+def _summary_contract_lifecycle_mode(monkeypatch):
+    async def generic_test_begin_attempt(*args, **kwargs):  # noqa: ANN002, ANN003
+        assert kwargs.pop("require_atomic_dollar_reservation") is True
+        return await _PRODUCTION_BEGIN_ATTEMPT(
+            *args,
+            **kwargs,
+            require_atomic_dollar_reservation=False,
+        )
+
+    monkeypatch.setattr(
+        runner_module,
+        "begin_attempt",
+        generic_test_begin_attempt,
+    )
+
+
+async def _finish_summary_candidate(
+    result: ExtractorResult,
+    *,
+    target_id: str,
+    input_text: str,
+) -> ExtractorResult:
+    """Finalize the mock response through the real Summary candidate boundary."""
+
+    callbacks = require_attempt_callbacks("grounding contract test provider")
+    context = current_summary_candidate_context()
+    assert context is not None
+    assert callbacks.finish_candidate is not None
+    ticket = await callbacks.start(
+        AttemptStartMetadata(
+            operation_id=uuid.uuid4(),
+            attempt_no=1,
+            attempt_kind=AttemptKind.PRIMARY,
+            provider="test",
+            provider_mode="api",
+            requested_model=result.model_used,
+            input_fingerprint=fingerprint_input(
+                "ledgered-summary-test-system", input_text
+            ),
+            estimated_input_tokens=max(1, len(input_text.encode("utf-8"))),
+            input_estimate_method="utf8_bytes_upper_v1",
+            requested_max_output_tokens=1_024,
+            usage_source=UsageSource.PROVIDER_API,
+        )
+    )
+    if callbacks.mark_provider_dispatch is not None:
+        callbacks.mark_provider_dispatch()
+    tokens = int(result.tokens_used or 0)
+    payload = normalize_summary_candidate_payload(
+        {
+            "contract": SUMMARY_CANDIDATE_CONTRACT,
+            "summary": result.summary,
+            "detailed": result.detailed,
+            "claims": result.claims,
+            "open_questions": result.open_questions,
+        }
+    )
+    await callbacks.finish_candidate(
+        ticket,
+        AttemptOutcome(
+            attempt_status=AttemptStatus.COMPLETED,
+            result_status=ResultStatus.PENDING,
+            usage=LLMUsageV1(
+                status=UsageStatus.REPORTED_COMPLETE,
+                source=UsageSource.PROVIDER_API,
+                input_tokens=tokens,
+                output_tokens=0,
+                total_tokens=tokens,
+            ),
+            resolved_model=result.model_used,
+        ),
+        SemanticCandidate(
+            contract_name=SUMMARY_CANDIDATE_CONTRACT,
+            binding_fingerprint=context.binding_fingerprint,
+            payload=payload,
+        ),
+    )
+    result._llm_call_id = ticket.attempt_id
+    return result
 
 
 class ParsedGroundingExtractor:
@@ -98,13 +211,18 @@ class ParsedGroundingExtractor:
             }
         )
         parsed = parse_and_normalize_extractor_payload(provider_text)
-        return ExtractorResult(
+        result = ExtractorResult(
             summary=parsed["summary"],
             detailed=parsed["detailed"],
             claims=parsed["claims"],
             open_questions=parsed["open_questions"],
             model_used="mock-provider",
             tokens_used=7,
+        )
+        return await _finish_summary_candidate(
+            result,
+            target_id=target_id,
+            input_text=repr(evidence),
         )
 
 
@@ -120,8 +238,8 @@ async def _new_database():
         await connection.run_sync(GraphEdgeHumanOverlay.__table__.create)
         await connection.run_sync(GraphEdgeRuntimeOverlay.__table__.create)
         await connection.run_sync(GraphHead.__table__.create)
+        await create_llm_ledger_tables(connection)
         await connection.run_sync(Summary.__table__.create)
-        await connection.run_sync(LLMCall.__table__.create)
     return engine, sessionmaker(
         engine,
         class_=AsyncSession,
@@ -306,6 +424,133 @@ async def test_extractor_oversize_fails_before_any_provider_call():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source_certainty", ["asserted", "inferred"])
+async def test_atomic_summary_product_rejects_caller_certainty_upgrade(
+    monkeypatch,
+    source_certainty: str,
+) -> None:
+    """The final transaction re-grounds certainty instead of trusting callers."""
+
+    monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
+    engine, Session = await _new_database()
+    project_id = uuid.uuid4()
+    node_id = f"sym:certainty-{source_certainty}"
+
+    async with Session() as session:
+        await _seed_ready_head(session, project_id)
+        session.add(
+            Node(
+                id=node_id,
+                project_id=project_id,
+                kind="Symbol",
+                data={"name": node_id, "location": {"file": "certainty.py"}},
+                certainty=source_certainty,
+                created_by=["test"],
+            )
+        )
+        await session.commit()
+
+    actual_ground = runner_module._ground_result_or_fallback
+
+    async def forge_verified_certainty(*args, **kwargs):
+        grounded = await actual_ground(*args, **kwargs)
+        assert grounded.claims[0]["evidence"][0]["certainty"] == source_certainty
+        grounded.claims[0]["evidence"][0]["certainty"] = "verified"
+        return grounded
+
+    monkeypatch.setattr(
+        runner_module,
+        "_ground_result_or_fallback",
+        forge_verified_certainty,
+    )
+    extractor = ParsedGroundingExtractor(fake_id="certainty.py")
+    async with Session() as session:
+        with pytest.raises(
+            LLMLifecycleError,
+            match="grounded Summary does not match its semantic candidate",
+        ):
+            await summarise_l1(
+                session,
+                extractor,
+                project_id=project_id,
+                limit=1,
+                run_budget=LLMRunBudget(),
+            )
+        await session.rollback()
+        summaries = (
+            await session.execute(select(Summary).where(Summary.level == 1))
+        ).scalars().all()
+        calls = (await session.execute(select(LLMCall))).scalars().all()
+        candidates = (
+            await session.execute(select(LLMSemanticCandidate))
+        ).scalars().all()
+
+    await engine.dispose()
+    assert summaries == []
+    assert len(calls) == len(candidates) == 1
+    assert calls[0].result_status == "pending"
+    assert candidates[0].candidate_status == "candidate"
+
+
+@pytest.mark.asyncio
+async def test_atomic_summary_product_uses_locked_receipt_model_and_tokens(
+    monkeypatch,
+) -> None:
+    """Mutable caller provenance cannot replace the durable attempt receipt."""
+
+    monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
+    engine, Session = await _new_database()
+    project_id = uuid.uuid4()
+    node_id = "sym:immutable-product-receipt"
+
+    async with Session() as session:
+        await _seed_ready_head(session, project_id)
+        session.add(
+            Node(
+                id=node_id,
+                project_id=project_id,
+                kind="Symbol",
+                data={"name": node_id, "location": {"file": "receipt.py"}},
+                certainty="asserted",
+                created_by=["test"],
+            )
+        )
+        await session.commit()
+
+    actual_ground = runner_module._ground_result_or_fallback
+
+    async def forge_product_accounting(*args, **kwargs):
+        grounded = await actual_ground(*args, **kwargs)
+        grounded.model_used = "caller-controlled-model"
+        grounded.tokens_used = 999_999
+        return grounded
+
+    monkeypatch.setattr(
+        runner_module,
+        "_ground_result_or_fallback",
+        forge_product_accounting,
+    )
+    extractor = ParsedGroundingExtractor(fake_id="receipt.py")
+    async with Session() as session:
+        assert await summarise_l1(
+            session,
+            extractor,
+            project_id=project_id,
+            limit=1,
+            run_budget=LLMRunBudget(),
+        ) == 1
+        saved = (
+            await session.execute(select(Summary).where(Summary.level == 1))
+        ).scalar_one()
+        call = (await session.execute(select(LLMCall))).scalar_one()
+
+    await engine.dispose()
+    assert saved.model_used == "mock-provider"
+    assert saved.tokens_used == 7
+    assert saved.llm_attempt_id == call.id
+
+
+@pytest.mark.asyncio
 async def test_l1_oversized_node_uses_one_complete_exact_validation_scope(monkeypatch):
     monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
     engine, Session = await _new_database()
@@ -345,7 +590,13 @@ async def test_l1_oversized_node_uses_one_complete_exact_validation_scope(monkey
         await session.commit()
         extractor = ParsedGroundingExtractor(fake_id="large.py")
 
-        assert await summarise_l1(session, extractor, project_id=project_id, limit=1) == 1
+        assert await summarise_l1(
+            session,
+            extractor,
+            project_id=project_id,
+            limit=1,
+            run_budget=LLMRunBudget(),
+        ) == 1
         saved = (await session.execute(select(Summary).where(Summary.level == 1))).scalar_one()
 
     await engine.dispose()
@@ -381,7 +632,13 @@ async def test_l2_single_chunk_accepts_real_id_and_rejects_file_path(monkeypatch
         await session.commit()
         extractor = ParsedGroundingExtractor(fake_id=file_path)
 
-        assert await summarise_l2(session, extractor, project_id=project_id, limit=1) == 1
+        assert await summarise_l2(
+            session,
+            extractor,
+            project_id=project_id,
+            limit=1,
+            run_budget=LLMRunBudget(),
+        ) == 1
         saved = (await session.execute(select(Summary).where(Summary.level == 2))).scalar_one()
 
     await engine.dispose()
@@ -413,7 +670,13 @@ async def test_l2_multi_chunk_rollup_uses_real_ids_within_budget(monkeypatch):
         await session.commit()
         extractor = ParsedGroundingExtractor(fake_id=file_path)
 
-        assert await summarise_l2(session, extractor, project_id=project_id, limit=1) == 1
+        assert await summarise_l2(
+            session,
+            extractor,
+            project_id=project_id,
+            limit=1,
+            run_budget=LLMRunBudget(),
+        ) == 1
         saved = (await session.execute(select(Summary).where(Summary.level == 2))).scalar_one()
 
     await engine.dispose()
@@ -483,7 +746,13 @@ async def test_l3_single_chunk_accepts_real_id_and_rejects_file_path(monkeypatch
         )
         extractor = ParsedGroundingExtractor(fake_id=file_path)
 
-        assert await summarise_l3(session, extractor, project_id=project_id, limit=1) == 1
+        assert await summarise_l3(
+            session,
+            extractor,
+            project_id=project_id,
+            limit=1,
+            run_budget=LLMRunBudget(),
+        ) == 1
         saved = (await session.execute(select(Summary).where(Summary.level == 3))).scalar_one()
 
     await engine.dispose()
@@ -514,7 +783,13 @@ async def test_l3_multi_chunk_rollup_uses_real_ids_within_budget(monkeypatch):
         )
         extractor = ParsedGroundingExtractor(fake_id=module)
 
-        assert await summarise_l3(session, extractor, project_id=project_id, limit=1) == 1
+        assert await summarise_l3(
+            session,
+            extractor,
+            project_id=project_id,
+            limit=1,
+            run_budget=LLMRunBudget(),
+        ) == 1
         saved = (await session.execute(select(Summary).where(Summary.level == 3))).scalar_one()
 
     await engine.dispose()
@@ -524,3 +799,301 @@ async def test_l3_multi_chunk_rollup_uses_real_ids_within_budget(monkeypatch):
     assert all(row["node_id"] != module for row in rollup_evidence)
     assert _approx_tokens(rollup_evidence) <= 4000
     _assert_only_actual_claim(saved, node_ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rejected_before_crash",
+    [pytest.param(False, id="pending"), pytest.param(True, id="rejected")],
+)
+async def test_l1_restart_recovers_candidate_before_summary_without_redispatch(
+    monkeypatch,
+    rejected_before_crash: bool,
+) -> None:
+    monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
+    engine, Session = await _new_database()
+    project_id = uuid.uuid4()
+    node_id = "sym:candidate-crash"
+    dispatches = 0
+
+    async def create(**_kwargs):
+        nonlocal dispatches
+        dispatches += 1
+        return SimpleNamespace(
+            id="msg-summary-candidate-crash",
+            model="claude-sonnet-4-6",
+            stop_reason="end_turn",
+            usage={"input_tokens": 4, "output_tokens": 3},
+            content=[
+                SimpleNamespace(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "summary": "The crash target is present.",
+                            "detailed": "The claim is bound to graph evidence.",
+                            "claims": [
+                                {
+                                    "claim": "The crash target exists.",
+                                    "evidence": [
+                                        {
+                                            "kind": "node",
+                                            "node_id": (
+                                                "sym:not-in-evidence"
+                                                if rejected_before_crash
+                                                else node_id
+                                            ),
+                                            "certainty": "asserted",
+                                        }
+                                    ],
+                                }
+                            ],
+                            "open_questions": [],
+                        }
+                    ),
+                )
+            ],
+        )
+
+    provider_module = ModuleType("anthropic")
+    provider_module.AsyncAnthropic = lambda **_kwargs: SimpleNamespace(  # type: ignore[attr-defined]
+        messages=SimpleNamespace(create=create)
+    )
+    monkeypatch.setitem(sys.modules, "anthropic", provider_module)
+    monkeypatch.setenv("MNEMOS_DISABLE_AGENT_SDK", "1")
+
+    async with Session() as session:
+        await _seed_ready_head(session, project_id)
+        session.add(
+            Node(
+                id=node_id,
+                project_id=project_id,
+                kind="Symbol",
+                data={
+                    "name": "candidate_crash",
+                    "location": {"file": "candidate_crash.py"},
+                },
+                certainty="asserted",
+                created_by=["test"],
+            )
+        )
+        await session.commit()
+
+    actual_ground = runner_module._ground_result_or_fallback
+
+    async def crash_after_candidate(*args, **kwargs):
+        if rejected_before_crash:
+            await actual_ground(*args, **kwargs)
+        raise RuntimeError("simulated crash after candidate finalize")
+
+    monkeypatch.setattr(
+        runner_module,
+        "_ground_result_or_fallback",
+        crash_after_candidate,
+    )
+    first_scope = uuid.uuid4()
+    first_extractor = Extractor()
+    first_extractor._api_key = "test-key"
+    async with Session() as session:
+        with pytest.raises(RuntimeError, match="after candidate finalize"):
+            await summarise_l1(
+                session,
+                first_extractor,
+                project_id=project_id,
+                limit=1,
+                run_budget=LLMRunBudget(scope_id=first_scope),
+            )
+
+    monkeypatch.setattr(
+        runner_module,
+        "_ground_result_or_fallback",
+        actual_ground,
+    )
+    restarted_extractor = Extractor()
+    restarted_extractor._api_key = "test-key"
+    async with Session() as session:
+        assert await summarise_l1(
+            session,
+            restarted_extractor,
+            project_id=project_id,
+            limit=1,
+            run_budget=LLMRunBudget(scope_id=uuid.uuid4()),
+        ) == 1
+        summaries = (
+            await session.execute(select(Summary).where(Summary.level == 1))
+        ).scalars().all()
+        calls = (await session.execute(select(LLMCall))).scalars().all()
+        candidates = (
+            await session.execute(select(LLMSemanticCandidate))
+        ).scalars().all()
+
+    await engine.dispose()
+    assert dispatches == 1
+    assert len(summaries) == len(calls) == len(candidates) == 1
+    assert summaries[0].tokens_used == 7
+    if rejected_before_crash:
+        assert summaries[0].fallback_reason == "ungrounded_response"
+        assert calls[0].result_status == "grounding_rejected"
+        assert candidates[0].candidate_status == "rejected"
+    else:
+        assert summaries[0].fallback_reason is None
+        assert summaries[0].summary == "The crash target is present."
+        assert calls[0].result_status == "accepted"
+        assert candidates[0].candidate_status == "accepted"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", [2, 3])
+async def test_map_partial_candidate_replays_before_rollup_without_redispatch(
+    monkeypatch,
+    level: int,
+) -> None:
+    monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
+    engine, Session = await _new_database()
+    project_id = uuid.uuid4()
+    dispatch_targets: list[str] = []
+
+    async def create(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        target_id = prompt.splitlines()[0].split(": ", 1)[1]
+        evidence = json.loads(_prompt_evidence_json(prompt))
+        node_id = next(
+            row["node_id"]
+            for row in evidence
+            if row.get("kind") == "node" and "node_id" in row
+        )
+        dispatch_targets.append(target_id)
+        return SimpleNamespace(
+            id=f"msg-{len(dispatch_targets)}",
+            model="claude-sonnet-4-6",
+            stop_reason="end_turn",
+            usage={"input_tokens": 4, "output_tokens": 3},
+            content=[
+                SimpleNamespace(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "summary": f"Summary for {target_id}.",
+                            "detailed": "Grounded map or reduce result.",
+                            "claims": [
+                                {
+                                    "claim": "The cited symbol exists.",
+                                    "evidence": [
+                                        {
+                                            "kind": "node",
+                                            "node_id": node_id,
+                                            "certainty": "asserted",
+                                        }
+                                    ],
+                                }
+                            ],
+                            "open_questions": [],
+                        }
+                    ),
+                )
+            ],
+        )
+
+    provider_module = ModuleType("anthropic")
+    provider_module.AsyncAnthropic = lambda **_kwargs: SimpleNamespace(  # type: ignore[attr-defined]
+        messages=SimpleNamespace(create=create)
+    )
+    monkeypatch.setitem(sys.modules, "anthropic", provider_module)
+    monkeypatch.setenv("MNEMOS_DISABLE_AGENT_SDK", "1")
+
+    async with Session() as session:
+        await _seed_ready_head(session, project_id)
+        if level == 2:
+            for index, node_id in enumerate(("sym:map-l2-a", "sym:map-l2-b")):
+                session.add_all(
+                    _node_and_l1(
+                        project_id=project_id,
+                        node_id=node_id,
+                        file_path="large.py",
+                        l1_summary=str(index) * 13_000,
+                    )
+                )
+            target = "large.py"
+            stage = summarise_l2
+        else:
+            await _seed_l3(
+                session,
+                project_id=project_id,
+                files=[
+                    ("module/a.py", "sym:map-l3-a", "a" * 17_000),
+                    ("module/b.py", "sym:map-l3-b", "b" * 17_000),
+                ],
+            )
+            target = "module"
+            stage = summarise_l3
+        await session.commit()
+
+    actual_ground = runner_module._ground_result_or_fallback
+    first_partial = f"{target}#chunk1"
+    crash_pending = True
+
+    async def crash_first_partial(*args, **kwargs):
+        nonlocal crash_pending
+        grounded = await actual_ground(*args, **kwargs)
+        if crash_pending and kwargs.get("target_id") == first_partial:
+            crash_pending = False
+            raise RuntimeError("simulated map-partial crash")
+        return grounded
+
+    monkeypatch.setattr(
+        runner_module,
+        "_ground_result_or_fallback",
+        crash_first_partial,
+    )
+    first_extractor = Extractor()
+    first_extractor._api_key = "test-key"
+    async with Session() as session:
+        with pytest.raises(RuntimeError, match="map-partial crash"):
+            await stage(
+                session,
+                first_extractor,
+                project_id=project_id,
+                limit=1,
+                run_budget=LLMRunBudget(scope_id=uuid.uuid4()),
+            )
+
+    monkeypatch.setattr(
+        runner_module,
+        "_ground_result_or_fallback",
+        actual_ground,
+    )
+    restarted_extractor = Extractor()
+    restarted_extractor._api_key = "test-key"
+    async with Session() as session:
+        assert await stage(
+            session,
+            restarted_extractor,
+            project_id=project_id,
+            limit=1,
+            run_budget=LLMRunBudget(scope_id=uuid.uuid4()),
+        ) == 1
+        final = (
+            await session.execute(
+                select(Summary).where(
+                    Summary.level == level,
+                    Summary.target_id == target,
+                )
+            )
+        ).scalar_one()
+        calls = (await session.execute(select(LLMCall))).scalars().all()
+        candidates = (
+            await session.execute(select(LLMSemanticCandidate))
+        ).scalars().all()
+
+    await engine.dispose()
+    assert dispatch_targets.count(first_partial) == 1
+    assert len(dispatch_targets) == len(set(dispatch_targets)) == 3
+    assert set(dispatch_targets) == {
+        first_partial,
+        f"{target}#chunk2",
+        target,
+    }
+    assert len(calls) == len(candidates) == 3
+    assert {row.candidate_status for row in candidates} == {"accepted"}
+    assert final.fallback_reason is None
+    assert final.tokens_used == 7
+    assert sum(row.total_tokens or 0 for row in calls) == 21

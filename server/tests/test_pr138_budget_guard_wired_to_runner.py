@@ -1,23 +1,16 @@
-"""PR-138 — verify the budget guard is wired (not dead code).
+"""PR-138 — verify paid Summary dispatch uses the durable budget gate.
 
-The audit's biggest "claimed but not used" risk: a budget module that
-no callsite invokes. This test:
-
-- Sets ``MNEMOS_LLM_BUDGET_USD_PER_PROJECT=0.01`` (extremely tight).
-- Plants an existing Summary that already exceeds the cap.
-- Runs ``summarise_l1`` against the project.
-- Asserts the freshly-created Summary carries the
-  ``stub:budget_exceeded`` label (so the operator can debug).
-
-If the runner forgot to invoke ``require_budget``, the freshly-
-written Summary would carry ``model_used="stub"`` (no reason) — the
-test would fail.
+``begin_attempt`` is the sole authorization point for a paid provider call.
+The tests below prove that an absent dollar policy becomes a structured,
+operator-visible fallback while the deterministic no-backend path remains
+available without inventing a paid attempt.
 """
 
 from __future__ import annotations
 
+import ast
+import inspect
 import uuid as _uuid
-from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import AsyncIterator
 
@@ -54,9 +47,12 @@ from app.models import audit as _audit  # noqa: E402,F401
 from app.models import findings as _findings  # noqa: E402,F401
 from app.models import graph as _graph  # noqa: E402,F401
 from app.models import organization as _org  # noqa: E402,F401
-from app.models.findings import LLMCall, Summary  # noqa: E402
+from app.extractor.agent import Extractor, ExtractorResult  # noqa: E402
+from app.extractor.cost import LLMRunBudget  # noqa: E402
+from app.models.findings import Summary  # noqa: E402
 from app.models.graph import Node  # noqa: E402
 from app.models.projects import Project  # noqa: E402
+from app.testing.llm_adapter import finish_test_provider_result  # noqa: E402
 
 
 @pytest_asyncio.fixture
@@ -86,68 +82,56 @@ async def _seed(session: AsyncSession) -> Project:
         created_by=["test"],
     )
     session.add(sym)
-    # Existing Summary that already busts the $0.01 cap (5M tokens
-    # @ $3/Mtok = $15).
-    busted = Summary(
-        id=_uuid.uuid4(),
-        project_id=proj.id,
-        level=1,
-        target_id="sym:test:other",
-        summary="old", detailed="old",
-        claims=[], open_questions=[],
-        model_used="claude-sonnet-4-6",
-        tokens_used=5_000_000,
-        generated_at=datetime.now(tz=timezone.utc) - timedelta(minutes=5),
-    )
-    session.add(busted)
-    session.add(
-        LLMCall(
-            id=busted.id,
-            project_id=proj.id,
-            analysis_run_id=None,
-            target_id=busted.target_id,
-            level=busted.level,
-            model_used=busted.model_used,
-            tokens_used=busted.tokens_used,
-            status="legacy_summary",
-            generated_at=busted.generated_at,
-        )
-    )
     await session.commit()
     return proj
 
 
+class _PaidExtractor(Extractor):
+    async def summarize(self, _level, target_id, evidence):  # noqa: ANN001
+        return await finish_test_provider_result(
+            ExtractorResult(
+                summary="paid result",
+                detailed="paid result",
+                claims=[
+                    {
+                        "claim": "The symbol exists.",
+                        "evidence": [
+                            {
+                                "kind": "node",
+                                "node_id": evidence[0]["node_id"],
+                                "certainty": evidence[0]["certainty"],
+                            }
+                        ],
+                    }
+                ],
+                open_questions=[],
+                model_used="test-model",
+                tokens_used=10,
+            ),
+            target_id=target_id,
+        )
+
+
 @pytest.mark.asyncio
-async def test_l1_runner_short_circuits_to_stub_when_over_budget(
+async def test_l1_runner_denies_paid_attempt_when_dollar_policy_is_absent(
     session, monkeypatch,
 ):
     _pin_graph(monkeypatch)
-    """The big-money test: every L1 LLM call must pass through the
-    budget guard. With cap=$0.01 and $15 already spent the guard
-    must trip; the new Summary lands with the explicit
-    ``stub:budget_exceeded`` label.
-    """
-    monkeypatch.setenv("MNEMOS_LLM_USD_PER_MTOK", "3.0")
-    monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", "0.01")
-    monkeypatch.setenv("MNEMOS_LLM_BUDGET_WINDOW_SEC", "86400")
-    # Also force the stub path so we never hit a real API key, but
-    # the budget guard runs first.
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv("MNEMOS_DISABLE_AGENT_SDK", "1")
+    monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
 
     proj = await _seed(session)
 
-    from app.extractor.agent import Extractor
     from app.extractor.runner import summarise_l1
 
-    ext = Extractor()
     n = await summarise_l1(
-        session, ext, project_id=proj.id, limit=5,
+        session,
+        _PaidExtractor(),
+        project_id=proj.id,
+        limit=5,
+        run_budget=LLMRunBudget(),
     )
     assert n >= 1, "summarise_l1 should have written ≥1 row"
 
-    # The new row exists, and it's labelled with the budget-exceeded
-    # reason — proves require_budget was actually called.
     fresh = (await session.execute(
         select(Summary)
         .where(Summary.project_id == proj.id)
@@ -155,20 +139,15 @@ async def test_l1_runner_short_circuits_to_stub_when_over_budget(
         .where(Summary.level == 1)
     )).scalar_one_or_none()
     assert fresh is not None, "summarise_l1 didn't write the expected row"
-    assert fresh.model_used == "stub:budget_exceeded", (
-        f"runner did NOT pass through budget guard; "
-        f"model_used={fresh.model_used!r}"
-    )
+    assert fresh.fallback_reason == "project_dollar_budget_required"
+    assert fresh.model_used == "stub:project_dollar_budget_required"
 
 
 @pytest.mark.asyncio
-async def test_runner_does_not_call_budget_guard_when_cap_unset(
+async def test_runner_preserves_deterministic_no_backend_path_when_policy_unset(
     session, monkeypatch,
 ):
     _pin_graph(monkeypatch)
-    """When the cap is disabled (default), the runner runs normally
-    and the L1 row carries the regular stub label (NOT
-    ``stub:budget_exceeded``)."""
     monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("MNEMOS_DISABLE_AGENT_SDK", "1")
@@ -180,7 +159,11 @@ async def test_runner_does_not_call_budget_guard_when_cap_unset(
 
     ext = Extractor()
     n = await summarise_l1(
-        session, ext, project_id=proj.id, limit=5,
+        session,
+        ext,
+        project_id=proj.id,
+        limit=5,
+        run_budget=LLMRunBudget(),
     )
     assert n >= 1
     fresh = (await session.execute(
@@ -190,16 +173,30 @@ async def test_runner_does_not_call_budget_guard_when_cap_unset(
         .where(Summary.level == 1)
     )).scalar_one_or_none()
     assert fresh is not None
-    # No backend configured, no budget → plain "stub" label.
-    assert fresh.model_used == "stub", (
-        f"unexpected label when budget unset: {fresh.model_used!r}"
-    )
+    assert fresh.model_used == "stub"
+    assert fresh.fallback_reason == "no_backend"
 
 
-def test_runner_module_imports_budget_helpers():
-    """Forward-guard: the runner must keep importing the budget API,
-    or a future refactor could quietly orphan it again."""
+def test_runner_begin_attempt_requires_atomic_dollar_authority():
+    """Forward-guard the sole production paid-dispatch authorization."""
     import app.extractor.runner as r
-    assert hasattr(r, "_summarize_with_budget")
-    assert hasattr(r, "require_budget")
-    assert hasattr(r, "BudgetExceeded")
+
+    tree = ast.parse(inspect.getsource(r._summarize_with_budget))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "begin_attempt"
+    ]
+    assert len(calls) == 1
+    requirement = next(
+        (
+            keyword.value
+            for keyword in calls[0].keywords
+            if keyword.arg == "require_atomic_dollar_reservation"
+        ),
+        None,
+    )
+    assert isinstance(requirement, ast.Constant)
+    assert requirement.value is True

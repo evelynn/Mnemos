@@ -267,10 +267,20 @@ async function buildReport(ev) {
     : '<p class="muted" data-i18n="No process flows yet — run trace_flow on a frontend/backend/DB slice to see the end-to-end process here.">No process flows yet — run trace_flow on a frontend/backend/DB slice to see the end-to-end process here.</p>';
 
   // Cost.
-  document.getElementById("rp-cost").innerHTML = cost
-    ? `${cost.summary_count} summaries · ${cost.total_tokens.toLocaleString()} tokens · `
-      + `~$${cost.estimated_usd} (at $${cost.rate_usd_per_mtok}/Mtok)`
-    : "—";
+  if (cost) {
+    const knownCost = `${cost.summary_count} summaries · ${cost.total_tokens.toLocaleString()} tokens · `
+      + `known ~$${cost.estimated_usd} (at $${cost.rate_usd_per_mtok}/Mtok)`;
+    const unknownCost = cost.cost_indeterminate
+      ? ` · ${cost.unknown_provider_calls} billable call(s) have unknown usage/cost; `
+        + `exact cost is indeterminate (reservation proxy ~$${cost.unknown_provider_reservation_usd})`
+      : "";
+    const subscriptionCost = cost.subscription_call_count > 0
+      ? ` · ${cost.subscription_call_count} subscription call(s) excluded from API dollars`
+      : "";
+    document.getElementById("rp-cost").textContent = knownCost + unknownCost + subscriptionCost;
+  } else {
+    document.getElementById("rp-cost").textContent = "—";
+  }
 
   // ROI — risk eliminated paired against the spend above.
   if (roi) {

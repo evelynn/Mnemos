@@ -51,6 +51,7 @@ from app.review_revision import (
     bind_review_revision,
     lock_review_graph_revision,
     read_review_graph_stamp,
+    resolve_review_revision_from_stamp,
 )
 from app.safety.review import run_pipeline
 from app.safety.tokens import hash_token
@@ -133,6 +134,11 @@ async def issue_break_glass_grant(
             db,
             project_id=plan.project_id,
         )
+        product_revision = await resolve_review_revision_from_stamp(
+            db,
+            project_id=plan.project_id,
+            stamp=review_stamp,
+        )
     except GraphPublicationError as exc:
         await db.rollback()
         raise HTTPException(
@@ -151,7 +157,20 @@ async def issue_break_glass_grant(
         project_id=plan.project_id,
         plan_id=plan.id,
         diff=reviewed_diff,
+        review_revision=product_revision,
     )
+    if report.coverage != "complete":
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "rerun_review_incomplete",
+                "coverage": report.coverage,
+                "passes": [
+                    p.name for p in report.passes if p.coverage != "complete"
+                ],
+            },
+        )
     if report.verdict == "blocked":
         await db.rollback()
         raise HTTPException(

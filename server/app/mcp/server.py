@@ -10,9 +10,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import logging
 import os
 import sys
 import uuid
+from datetime import date, datetime
+from decimal import Decimal
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -78,6 +82,9 @@ from app.safety.tokens import hash_token
 
 GRAPH_SNAPSHOT_UNAVAILABLE_CODE = "graph_snapshot_unavailable"
 GRAPH_SNAPSHOT_CHANGED_CODE = "graph_snapshot_changed_retry"
+MCP_TOOL_INTERNAL_FAILURE_CODE = "mcp_tool_internal_failure"
+
+log = logging.getLogger(__name__)
 
 _TOOLS = [
     Tool(
@@ -556,21 +563,37 @@ _TOOLS = [
     Tool(
         name="run_in_sandbox",
         description=(
-            "Run an allowlisted command inside the plan worktree.\n\n"
+            "Request a bounded allowlisted local verification command in the "
+            "Plan worktree.\n\n"
             "Use when: verifying a change you just made with "
             "edit_file_in_worktree — running tests (\"pytest -k\"), a "
-            "linter, or a build. Allowlist is per-project; commands "
-            "outside it are rejected with a list of allowed prefixes. "
-            "Network is off, filesystem is read-only outside /scratch, "
-            "and the timeout caps long runs. Output is captured and "
-            "returned for self-review."
+            "linter, or a build. The local argv backend is fail-disabled by "
+            "default and always disabled in production. Unless a trusted-repo "
+            "developer explicitly sets MNEMOS_TRUSTED_LOCAL_EXECUTION=1 in "
+            "a local, development, or test environment, the tool returns the "
+            "static failure code sandbox_backend_unavailable without spawning "
+            "a process. Production cannot enable this backend with that flag. "
+            "When explicitly enabled, the command is parsed into validated "
+            "argv without a shell, receives a scrubbed environment, and is "
+            "rejected if it contains shell syntax or an escaping path. "
+            "Network-oriented and dependency-install commands are not "
+            "authorized. The enabled local executor provides no OS-level "
+            "filesystem or network containment, so it is only for repositories "
+            "the developer already trusts. "
+            "Timeout and byte caps bound execution; returned output is "
+            "redacted. This is not a general-purpose shell."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "plan_id": {"type": "string"},
-                "command": {"type": "string"},
-                "timeout_sec": {"type": "integer", "default": 300},
+                "command": {"type": "string", "minLength": 1, "maxLength": 4096},
+                "timeout_sec": {
+                    "type": "integer",
+                    "default": 300,
+                    "minimum": 5,
+                    "maximum": 1800,
+                },
             },
             "required": ["plan_id", "command"],
         },
@@ -685,7 +708,7 @@ def _graph_snapshot_unavailable_error(exc: Exception) -> dict:
     return {
         "schema": "mnemos.error.v1",
         "error": GRAPH_SNAPSHOT_UNAVAILABLE_CODE,
-        "reason": str(exc),
+        "reason": GRAPH_SNAPSHOT_UNAVAILABLE_CODE,
         "repair": {
             "required": True,
             "scope": "full",
@@ -700,7 +723,7 @@ def _graph_snapshot_changed_error(
     return {
         "schema": "mnemos.error.v1",
         "error": GRAPH_SNAPSHOT_CHANGED_CODE,
-        "reason": str(exc),
+        "reason": GRAPH_SNAPSHOT_CHANGED_CODE,
         "retryable": True,
         "snapshot": {
             "generation": stamp.generation,
@@ -709,6 +732,68 @@ def _graph_snapshot_changed_error(
             "published_at": stamp.published_at.isoformat(),
         },
     }
+
+
+def _audit_value_shape(value: object) -> dict[str, int | str]:
+    """Describe an MCP argument without retaining any caller-owned content."""
+
+    if value is None:
+        return {"type": "null"}
+    if type(value) is bool:
+        return {"type": "boolean"}
+    if type(value) is int:
+        return {"type": "integer"}
+    if type(value) is float:
+        return {"type": "number"}
+    if isinstance(value, str):
+        return {"type": "string", "chars": len(value)}
+    if isinstance(value, list):
+        return {"type": "array", "items": len(value)}
+    if isinstance(value, dict):
+        return {"type": "object", "fields": len(value)}
+    return {"type": "unsupported"}
+
+
+def _tool_argument_names(name: str) -> frozenset[str]:
+    for tool in _TOOLS:
+        if tool.name != name:
+            continue
+        properties = tool.inputSchema.get("properties", {})
+        if not isinstance(properties, dict):
+            return frozenset()
+        return frozenset(key for key in properties if isinstance(key, str))
+    return frozenset()
+
+
+def _mcp_audit_details(
+    name: str,
+    arguments: dict,
+    *,
+    blocked_by: str | None = None,
+) -> dict[str, object]:
+    """Return the canonical shape-only audit envelope for every MCP tool."""
+
+    recognized = _tool_argument_names(name)
+    shapes = {
+        key: _audit_value_shape(arguments[key])
+        for key in sorted(recognized.intersection(arguments))
+    }
+    details: dict[str, object] = {
+        "schema": "mnemos.mcp_audit.v1",
+        "argument_count": len(arguments),
+        "recognized_argument_count": len(shapes),
+        "unknown_argument_count": len(set(arguments).difference(recognized)),
+        "argument_shapes": shapes,
+    }
+    if blocked_by is not None:
+        details["blocked_by"] = blocked_by
+    return details
+
+
+def _sandbox_audit_details(arguments: dict) -> dict[str, object]:
+    """Compatibility wrapper using the global shape-only MCP audit contract."""
+
+    return _mcp_audit_details("run_in_sandbox", arguments)
 
 
 def build_server(auth_context: MCPAuthContext) -> Server:
@@ -729,8 +814,7 @@ def build_server(auth_context: MCPAuthContext) -> Server:
             tool for tool in _TOOLS if _can_call_tool(auth_context, tool.name)
         ]
 
-    @server.call_tool()
-    async def _call_tool(name: str, arguments: dict) -> list[TextContent]:
+    async def _call_tool_impl(name: str, arguments: dict) -> list[TextContent]:
         async with SessionLocal() as db:
             try:
                 await revalidate_mcp_auth_context(
@@ -786,10 +870,11 @@ def build_server(auth_context: MCPAuthContext) -> Server:
                         action=f"mcp.tool.{name}",
                         target=str(project_id),
                         project_id=project_id,
-                        details={
-                            "arguments": arguments,
-                            "blocked_by": GRAPH_SNAPSHOT_UNAVAILABLE_CODE,
-                        },
+                        details=_mcp_audit_details(
+                            name,
+                            arguments,
+                            blocked_by=GRAPH_SNAPSHOT_UNAVAILABLE_CODE,
+                        ),
                     )
                     return [TextContent(type="text", text=_cap_response(result))]
             if name == "get_project_index":
@@ -983,7 +1068,7 @@ def build_server(auth_context: MCPAuthContext) -> Server:
                     self_review_notes=arguments.get("self_review_notes"),
                 )
             else:
-                result = {"error": f"unknown tool: {name}"}
+                result = {"error": "unknown_tool"}
             # Dev mutations lock GraphHead -> AnalysisRun -> Plan internally
             # and hold that boundary through their commit/external action.
             # Replacing an already-committed success with a generic retryable
@@ -998,10 +1083,34 @@ def build_server(auth_context: MCPAuthContext) -> Server:
                 action=f"mcp.tool.{name}",
                 target=str(project_id),
                 project_id=project_id,
-                details={"arguments": arguments},
+                details=_mcp_audit_details(name, arguments),
             )
 
         return [TextContent(type="text", text=_cap_response(result))]
+
+    @server.call_tool()
+    async def _call_tool(name: str, arguments: dict) -> list[TextContent]:
+        try:
+            return await _call_tool_impl(name, arguments)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — MCP must emit only the static envelope
+            log.error(
+                "MCP tool call failed failure_code=%s",
+                MCP_TOOL_INTERNAL_FAILURE_CODE,
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=_cap_response(
+                        {
+                            "schema": "mnemos.error.v1",
+                            "error": MCP_TOOL_INTERNAL_FAILURE_CODE,
+                            "retryable": False,
+                        }
+                    ),
+                )
+            ]
 
     return server
 
@@ -1012,6 +1121,29 @@ def build_server(auth_context: MCPAuthContext) -> Server:
 _MAX_RESPONSE_BYTES = 50 * 1024
 
 
+def _mcp_json_default(value: object) -> str:
+    """Normalize only documented scalar dialects; never stringify objects."""
+
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    raise TypeError("unsupported_mcp_response_value")
+
+
+def _serialize_mcp_response(value: object) -> str | None:
+    try:
+        return json.dumps(
+            value,
+            default=_mcp_json_default,
+            allow_nan=False,
+        )
+    except Exception:  # noqa: BLE001 — hostile __iter__/mapping implementations
+        return None
+
+
 def _cap_response(result, max_bytes: int = _MAX_RESPONSE_BYTES) -> str:
     """Serialise ``result`` to JSON; if too large, halve the largest
     list field until it fits and append ``response_truncated`` markers
@@ -1020,9 +1152,18 @@ def _cap_response(result, max_bytes: int = _MAX_RESPONSE_BYTES) -> str:
     Single-pass on the original ``result`` so ``truncated_total``
     always reports the real input size (not the post-halve size from a
     naive recursion)."""
-    import json
-
-    text = json.dumps(result, default=str)
+    text = _serialize_mcp_response(result)
+    if text is None:
+        text = json.dumps(
+            {
+                "schema": "mnemos.error.v1",
+                "error": "mcp_response_contract_invalid",
+                "retryable": False,
+            }
+        )
+        if len(text.encode("utf-8")) <= max_bytes:
+            return text
+        return "{}" if max_bytes >= 2 else ""
     if len(text.encode("utf-8")) <= max_bytes:
         return text
 
@@ -1043,8 +1184,8 @@ def _cap_response(result, max_bytes: int = _MAX_RESPONSE_BYTES) -> str:
                     "truncated_kept": keep,
                     "truncated_total": biggest_len,
                 }
-                txt2 = json.dumps(shrunk, default=str)
-                if len(txt2.encode("utf-8")) <= max_bytes:
+                txt2 = _serialize_mcp_response(shrunk)
+                if txt2 is not None and len(txt2.encode("utf-8")) <= max_bytes:
                     return txt2
             empty = json.dumps({
                 biggest_key: [],
@@ -1061,16 +1202,15 @@ def _cap_response(result, max_bytes: int = _MAX_RESPONSE_BYTES) -> str:
         keep = total
         while keep > 0:
             keep //= 2
-            txt2 = json.dumps(
+            txt2 = _serialize_mcp_response(
                 {
                     "items": result[:keep],
                     "response_truncated": True,
                     "truncated_kept": keep,
                     "truncated_total": total,
-                },
-                default=str,
+                }
             )
-            if len(txt2.encode("utf-8")) <= max_bytes:
+            if txt2 is not None and len(txt2.encode("utf-8")) <= max_bytes:
                 return txt2
 
     fallback = json.dumps({

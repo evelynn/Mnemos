@@ -45,10 +45,10 @@ async def resolve_active_session_user(
         # must never turn that safe 401/redirect into a server error.
         try:
             await delete_session(session_token)
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             log.warning(
-                "failed to revoke a rejected session: %s",
-                exc.__class__.__name__,
+                "failed to revoke a rejected session "
+                "failure_code=session_cleanup_failed"
             )
         return None
     return user

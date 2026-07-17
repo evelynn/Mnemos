@@ -104,6 +104,39 @@ async def test_db_soft_returns_false_on_failure_does_not_raise():
 
 
 @pytest.mark.asyncio
+async def test_db_reachable_with_unsafe_isolation_fails_startup_hard():
+    """Reachability cannot downgrade a broken dollar-cap proof to a warning."""
+
+    from app import startup_verify
+    from app.llm.lifecycle import LLMLifecycleError
+
+    class ReachableSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def execute(self, _statement):
+            return None
+
+    unsafe = AsyncMock(
+        side_effect=LLMLifecycleError(
+            "postgresql_attempt_accounting_requires_read_committed"
+        )
+    )
+    with patch("app.db.SessionLocal", return_value=ReachableSession()), patch(
+        "app.llm.lifecycle.assert_attempt_accounting_isolation", unsafe
+    ):
+        with pytest.raises(
+            startup_verify.StartupCheckFailed,
+            match="database.postgresql_isolation_requires_read_committed",
+        ):
+            await startup_verify._check_db_soft()
+    unsafe.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_redis_soft_returns_false_on_failure_does_not_raise():
     from app import startup_verify
 
@@ -199,7 +232,8 @@ async def test_arbitrary_crypto_exception_becomes_startup_check_failed():
     ):
         with pytest.raises(startup_verify.StartupCheckFailed) as ei:
             await startup_verify.run_startup_verify()
-        assert "crypto.KeyError" in str(ei.value)
+        assert str(ei.value) == "crypto_unavailable"
+        assert "FERNET_KEY" not in str(ei.value)
 
 
 # ─── lifespan wiring ───────────────────────────────────────────────

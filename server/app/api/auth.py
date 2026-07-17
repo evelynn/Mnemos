@@ -129,7 +129,7 @@ async def login(
         try:
             await db.rollback()
         except Exception:  # noqa: BLE001
-            log.exception("auth.login_rollback_failed")
+            log.error("auth.login_rollback_failed failure_code=auth_storage_failure")
         if token is not None:
             try:
                 await delete_session(token)
@@ -137,7 +137,10 @@ async def login(
                 # Do not hide the original SQL/session failure.  The normal
                 # create/delete path uses the same Redis backend, so this is a
                 # last-resort operational alert for an ambiguous credential.
-                log.exception("auth.login_session_cleanup_failed")
+                log.error(
+                    "auth.login_session_cleanup_failed "
+                    "failure_code=session_cleanup_failed"
+                )
         raise
 
     response.set_cookie(

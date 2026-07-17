@@ -34,8 +34,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import delete
 
 # Module-level env so app.* imports see the right values.
 os.environ.setdefault("MNEMOS_LOCAL_MODE", "1")
@@ -229,6 +232,11 @@ def test_llm_cost_reads_seeded_tokens(logged_in, event_loop):
         assert "summary_count" in body
         assert "total_tokens" in body
         assert "estimated_usd" in body
+        assert "known_spend_usd" in body
+        assert "unknown_provider_calls" in body
+        assert "unknown_provider_reservation_usd" in body
+        assert "cost_indeterminate" in body
+        assert "subscription_call_count" in body
         assert body["rate_usd_per_mtok"] > 0
 
     event_loop.run_until_complete(_go())
@@ -311,6 +319,161 @@ def test_graph_stats_sanity(logged_in, readable_graph, event_loop):
         assert r.status_code == 200
         body = r.json()
         assert body.get("nodes_current", 0) > 0
+
+    event_loop.run_until_complete(_go())
+
+
+def test_llm_cost_counts_only_canonical_subscription_pair(
+    logged_in, event_loop,
+):
+    c, pid = logged_in
+    call_ids = [uuid.uuid4() for _ in range(4)]
+
+    async def _go():
+        from app.db import SessionLocal
+        from app.models.findings import LLMCall
+
+        baseline_response = await c.get(f"/api/v1/projects/{pid}/llm_cost")
+        assert baseline_response.status_code == 200
+        baseline = baseline_response.json()
+        now = datetime.now(tz=timezone.utc)
+        classifications = [
+            ("anthropic", "subscription", "agent_sdk"),
+            ("anthropic", "api", "agent_sdk"),
+            ("anthropic", "subscription", "provider_api"),
+            ("openai", "subscription", "agent_sdk"),
+        ]
+        async with SessionLocal() as session:
+            for call_id, (provider, provider_mode, usage_source) in zip(
+                call_ids, classifications, strict=True
+            ):
+                session.add(
+                    LLMCall(
+                        id=call_id,
+                        project_id=uuid.UUID(str(pid)),
+                        analysis_run_id=None,
+                        target_id=f"cost:e2e:subscription:{call_id}",
+                        level=1,
+                        model_used="claude-sonnet-4-6",
+                        tokens_used=None,
+                        status="timeout",
+                        fallback_reason="provider_timeout",
+                        generated_at=now,
+                        contract_version=1,
+                        operation_id=uuid.uuid4(),
+                        budget_scope_id=uuid.uuid4(),
+                        purpose="summary",
+                        attempt_no=1,
+                        attempt_kind="primary",
+                        provider=provider,
+                        provider_mode=provider_mode,
+                        requested_model="claude-sonnet-4-6",
+                        resolved_model="claude-sonnet-4-6",
+                        input_fingerprint="d" * 64,
+                        estimated_input_tokens=100,
+                        input_estimate_method="test_v1",
+                        requested_max_output_tokens=50,
+                        attempt_status="timeout",
+                        result_status="not_applicable",
+                        failure_code="provider_timeout",
+                        started_at=now - timedelta(milliseconds=10),
+                        completed_at=now,
+                        duration_ms=10,
+                        usage_status="lost_after_dispatch",
+                        usage_source=usage_source,
+                    )
+                )
+            await session.commit()
+        try:
+            response = await c.get(f"/api/v1/projects/{pid}/llm_cost")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["subscription_call_count"] == (
+                baseline["subscription_call_count"]
+            )
+            assert body["unknown_provider_calls"] == (
+                baseline["unknown_provider_calls"] + 4
+            )
+            assert body["cost_indeterminate"] is True
+        finally:
+            async with SessionLocal() as session:
+                await session.execute(
+                    delete(LLMCall).where(LLMCall.id.in_(call_ids))
+                )
+                await session.commit()
+
+    event_loop.run_until_complete(_go())
+
+
+def test_unknown_api_cost_is_visible_and_disables_roi_ratio(
+    logged_in, event_loop,
+):
+    """HTTP consumers preserve the ledger's unknown-cost distinction."""
+    c, pid = logged_in
+    call_id = uuid.uuid4()
+
+    async def _go():
+        from app.db import SessionLocal
+        from app.models.findings import LLMCall
+
+        now = datetime.now(tz=timezone.utc)
+        async with SessionLocal() as session:
+            session.add(
+                LLMCall(
+                    id=call_id,
+                    project_id=uuid.UUID(str(pid)),
+                    analysis_run_id=None,
+                    target_id="cost:e2e:unknown",
+                    level=1,
+                    model_used="claude-sonnet-4-6",
+                    tokens_used=None,
+                    status="timeout",
+                    fallback_reason="provider_timeout",
+                    generated_at=now,
+                    contract_version=1,
+                    operation_id=uuid.uuid4(),
+                    budget_scope_id=uuid.uuid4(),
+                    purpose="summary",
+                    attempt_no=1,
+                    attempt_kind="primary",
+                    provider="anthropic",
+                    provider_mode="api",
+                    requested_model="claude-sonnet-4-6",
+                    resolved_model="claude-sonnet-4-6",
+                    input_fingerprint="c" * 64,
+                    estimated_input_tokens=100,
+                    input_estimate_method="test_v1",
+                    requested_max_output_tokens=50,
+                    attempt_status="timeout",
+                    result_status="not_applicable",
+                    failure_code="provider_timeout",
+                    started_at=now - timedelta(milliseconds=10),
+                    completed_at=now,
+                    duration_ms=10,
+                    usage_status="lost_after_dispatch",
+                    usage_source="provider_api",
+                )
+            )
+            await session.commit()
+        try:
+            cost = await c.get(f"/api/v1/projects/{pid}/llm_cost")
+            assert cost.status_code == 200
+            cost_body = cost.json()
+            assert cost_body["unknown_provider_calls"] >= 1
+            assert cost_body["cost_indeterminate"] is True
+            assert cost_body["unknown_provider_reservation_usd"] > 0
+
+            roi = await c.get(f"/api/v1/projects/{pid}/findings/roi")
+            assert roi.status_code == 200
+            roi_body = roi.json()
+            assert roi_body["cost_indeterminate"] is True
+            assert roi_body["risk_per_usd"] is None
+        finally:
+            async with SessionLocal() as session:
+                await session.execute(
+                    delete(LLMCall).where(LLMCall.id == call_id)
+                )
+                await session.commit()
 
     event_loop.run_until_complete(_go())
 

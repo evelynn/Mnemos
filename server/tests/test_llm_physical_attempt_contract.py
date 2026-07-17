@@ -117,7 +117,11 @@ def test_agent_sdk_result_normalizes_usage_cost_and_turn_count() -> None:
     assert usage.output_tokens == 4
     assert usage.total_tokens == 14
     assert usage.provider_turn_count == 2
-    assert usage.reported_cost_usd == Decimal("0.0125")
+    assert usage.reported_cost_usd is None
+    assert usage.estimated_cost_usd == Decimal("0.0125")
+    assert usage.pricing_version == (
+        "claude-agent-sdk-0.2.118-client-estimate"
+    )
     assert result.result not in repr(usage)
 
 

@@ -10,11 +10,13 @@ polyglot SQLite session (no mocks of the spend logic itself).
 from __future__ import annotations
 
 import uuid as _uuid
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -32,9 +34,12 @@ from app.models.findings import LLMCall, Summary  # noqa: E402
 from app.models.projects import Project  # noqa: E402
 
 from app.extractor.cost import (  # noqa: E402
+    _project_budget_exposure_stmt,
+    BudgetConfigurationError,
     BudgetExceeded,
     BudgetStatus,
     check_budget,
+    project_budget_exposure,
     project_spend,
     rate_usd_per_mtok,
     require_budget,
@@ -98,6 +103,106 @@ async def _add_summary(
     return row
 
 
+async def _add_v1_unknown_call(
+    s: AsyncSession,
+    project: Project,
+    *,
+    usage_source: str = "provider_api",
+    provider_mode: str | None = None,
+    provider: str = "anthropic",
+    age_sec: int = 0,
+) -> LLMCall:
+    when = datetime.now(tz=timezone.utc) - timedelta(seconds=age_sec)
+    row = LLMCall(
+        id=_uuid.uuid4(),
+        project_id=project.id,
+        analysis_run_id=None,
+        target_id=f"unknown:{_uuid.uuid4().hex[:8]}",
+        level=1,
+        model_used="claude-sonnet-4-6",
+        tokens_used=None,
+        status="timeout",
+        fallback_reason="provider_timeout",
+        generated_at=when,
+        contract_version=1,
+        operation_id=_uuid.uuid4(),
+        budget_scope_id=_uuid.uuid4(),
+        purpose="summary",
+        attempt_no=1,
+        parent_attempt_id=None,
+        attempt_kind="primary",
+        provider=provider,
+        provider_mode=(
+            provider_mode
+            or ("api" if usage_source == "provider_api" else "subscription")
+        ),
+        requested_model="claude-sonnet-4-6",
+        resolved_model="claude-sonnet-4-6",
+        input_fingerprint="a" * 64,
+        estimated_input_tokens=100,
+        input_estimate_method="test_v1",
+        requested_max_output_tokens=50,
+        attempt_status="timeout",
+        result_status="not_applicable",
+        failure_code="provider_timeout",
+        started_at=when - timedelta(milliseconds=10),
+        completed_at=when,
+        duration_ms=10,
+        usage_status="lost_after_dispatch",
+        usage_source=usage_source,
+    )
+    s.add(row)
+    await s.commit()
+    return row
+
+
+async def _add_v1_reported_cost_call(
+    s: AsyncSession,
+    project: Project,
+) -> LLMCall:
+    when = datetime.now(tz=timezone.utc)
+    row = LLMCall(
+        id=_uuid.uuid4(),
+        project_id=project.id,
+        analysis_run_id=None,
+        target_id=f"reported:{_uuid.uuid4().hex[:8]}",
+        level=1,
+        model_used="claude-sonnet-4-6",
+        tokens_used=1_000_000,
+        status="completed",
+        generated_at=when,
+        contract_version=1,
+        operation_id=_uuid.uuid4(),
+        budget_scope_id=_uuid.uuid4(),
+        purpose="summary",
+        attempt_no=1,
+        attempt_kind="primary",
+        provider="anthropic",
+        provider_mode="api",
+        requested_model="claude-sonnet-4-6",
+        resolved_model="claude-sonnet-4-6",
+        input_fingerprint="b" * 64,
+        estimated_input_tokens=400_000,
+        input_estimate_method="test_v1",
+        requested_max_output_tokens=600_000,
+        attempt_status="completed",
+        result_status="accepted",
+        started_at=when - timedelta(milliseconds=10),
+        completed_at=when,
+        duration_ms=10,
+        usage_status="reported_complete",
+        usage_source="provider_api",
+        input_tokens=400_000,
+        output_tokens=600_000,
+        total_tokens=1_000_000,
+        provider_total_tokens=1_000_000,
+        reported_cost_usd=Decimal("0.25"),
+    )
+    s.add(row)
+    await s.commit()
+    return row
+
+
 # ─── rate + conversion ────────────────────────────────────────────
 
 
@@ -111,9 +216,21 @@ def test_rate_honours_env_override(monkeypatch):
     assert rate_usd_per_mtok() == 15.0
 
 
-def test_rate_falls_back_on_garbage_env(monkeypatch):
-    monkeypatch.setenv("MNEMOS_LLM_USD_PER_MTOK", "not-a-number")
-    assert rate_usd_per_mtok() == 3.0
+@pytest.mark.parametrize("value", ["not-a-number", "-3", "0", "nan", "inf"])
+def test_rate_fails_closed_on_unsafe_env(monkeypatch, value):
+    monkeypatch.setenv("MNEMOS_LLM_USD_PER_MTOK", value)
+    with pytest.raises(BudgetConfigurationError, match="finite positive"):
+        rate_usd_per_mtok()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["garbage", "-1", "0", "59"])
+async def test_invalid_budget_window_fails_closed(
+    session, monkeypatch, value,
+):
+    monkeypatch.setenv("MNEMOS_LLM_BUDGET_WINDOW_SEC", value)
+    with pytest.raises(BudgetConfigurationError, match="integer >= 60"):
+        await check_budget(session, _uuid.uuid4())
 
 
 def test_tokens_to_usd_at_default_rate(monkeypatch):
@@ -122,9 +239,10 @@ def test_tokens_to_usd_at_default_rate(monkeypatch):
     assert tokens_to_usd(1_000_000) == 3.0
     # 1.5 Mtok = $4.5000
     assert tokens_to_usd(1_500_000) == 4.5
-    # half-cent precision: 100 tokens at $3/Mtok is $0.0003, rounds
-    # to 0.0003 (4 dp).
+    # 100 tokens at $3/Mtok is $0.0003.
     assert tokens_to_usd(100) == 0.0003
+    # Guard precision must not round a real sub-$0.0001 exposure to zero.
+    assert tokens_to_usd(1) == pytest.approx(0.000003)
 
 
 def test_tokens_to_usd_treats_none_as_zero(monkeypatch):
@@ -195,6 +313,36 @@ async def test_project_spend_isolated_per_project(session, monkeypatch):
     assert await project_spend(session, b.id) == pytest.approx(1.5)
 
 
+@pytest.mark.asyncio
+async def test_reported_provider_cost_takes_precedence_without_double_count(
+    session, monkeypatch,
+):
+    monkeypatch.setenv("MNEMOS_LLM_USD_PER_MTOK", "3.0")
+    project = await _seed_project(session)
+    await _add_v1_reported_cost_call(session, project)
+
+    exposure = await project_budget_exposure(session, project.id)
+    assert exposure.known_spend_usd == pytest.approx(0.25)
+    assert exposure.budget_exposure_usd == pytest.approx(0.25)
+    assert exposure.unknown_provider_calls == 0
+
+
+def test_budget_exposure_query_compiles_for_postgresql():
+    stmt = _project_budget_exposure_stmt(
+        _uuid.uuid4(),
+        since=datetime.now(tz=timezone.utc) - timedelta(hours=1),
+    )
+    sql = str(
+        stmt.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "llm_calls.project_id" in sql
+    assert "reported_cost_usd" in sql
+    assert "CASE WHEN" in sql
+
+
 # ─── budget guard ─────────────────────────────────────────────────
 
 
@@ -241,6 +389,210 @@ async def test_check_budget_reports_status_when_enabled(
     assert status.spent_usd == pytest.approx(6.0)
     assert status.remaining_usd == pytest.approx(4.0)
     assert not status.exceeded
+
+
+@pytest.mark.asyncio
+async def test_tiny_cap_uses_unrounded_internal_exposure(
+    session, monkeypatch,
+):
+    monkeypatch.setenv("MNEMOS_LLM_USD_PER_MTOK", "3.0")
+    monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", "0.000001")
+    project = await _seed_project(session)
+    await _add_summary(session, project, 1)
+
+    status = await check_budget(session, project.id)
+    assert status.spent_usd == pytest.approx(0.000003)
+    assert status.budget_exposure_usd == pytest.approx(0.000003)
+    assert status.exceeded
+    with pytest.raises(BudgetExceeded):
+        await require_budget(session, project.id)
+
+
+@pytest.mark.asyncio
+async def test_unknown_provider_usage_fails_closed_even_below_high_cap(
+    session, monkeypatch,
+):
+    """A token proxy cannot prove a model-specific hard-dollar upper bound."""
+    monkeypatch.setenv("MNEMOS_LLM_USD_PER_MTOK", "3.0")
+    monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", "1000.0")
+    project = await _seed_project(session)
+    await _add_v1_unknown_call(session, project)
+
+    assert await project_spend(session, project.id) == 0.0
+    status = await check_budget(session, project.id)
+    assert status.spent_usd == 0.0
+    assert status.unknown_provider_calls == 1
+    assert status.unknown_provider_exposure_usd > 0.0
+    assert status.remaining_usd == 0.0
+    assert status.exceeded
+    with pytest.raises(BudgetExceeded, match="indeterminate"):
+        await require_budget(session, project.id)
+
+
+@pytest.mark.asyncio
+async def test_unattested_agent_sdk_unknown_usage_fails_closed(
+    session, monkeypatch,
+):
+    monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", "0.000001")
+    project = await _seed_project(session)
+    await _add_v1_unknown_call(session, project, usage_source="agent_sdk")
+
+    status = await check_budget(session, project.id)
+    assert status.unknown_provider_calls == 1
+    assert status.unknown_provider_exposure_usd > 0.0
+    assert status.exceeded
+
+
+@pytest.mark.asyncio
+async def test_agent_sdk_zero_cost_estimate_cannot_authorize_budget(
+    session, monkeypatch,
+):
+    monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", "0.000001")
+    project = await _seed_project(session)
+    row = await _add_v1_reported_cost_call(session, project)
+    row.provider_mode = "unknown"
+    row.usage_source = "agent_sdk"
+    row.reported_cost_usd = 0.0
+    await session.commit()
+
+    exposure = await project_budget_exposure(session, project.id)
+    assert exposure.known_spend_usd == pytest.approx(3.0)
+    assert exposure.unknown_provider_calls == 1
+    assert exposure.unknown_provider_exposure_usd == pytest.approx(3.0)
+    assert exposure.budget_exposure_usd == pytest.approx(6.0)
+    status = await check_budget(session, project.id)
+    assert status.exceeded
+
+
+@pytest.mark.asyncio
+async def test_legacy_row_is_billable_even_with_subscription_labels(
+    session, monkeypatch,
+):
+    """Legacy subscription labels do not authorize free-call treatment."""
+    monkeypatch.setenv("MNEMOS_LLM_USD_PER_MTOK", "3.0")
+    project = await _seed_project(session)
+    summary = await _add_summary(session, project, 1_000_000)
+    row = await session.get(LLMCall, summary.id)
+    assert row is not None
+    row.provider_mode = "subscription"
+    row.usage_source = "agent_sdk"
+    await session.commit()
+
+    exposure = await project_budget_exposure(session, project.id)
+    assert exposure.known_spend_usd == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_legacy_opaque_agent_call_is_cost_indeterminate(
+    session, monkeypatch,
+):
+    monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", "1000.0")
+    project = await _seed_project(session)
+    summary = await _add_summary(session, project, 1)
+    row = await session.get(LLMCall, summary.id)
+    assert row is not None
+    row.model_used = "claude_code:claude-sonnet-4-6"
+    row.tokens_used = None
+    await session.commit()
+
+    exposure = await project_budget_exposure(session, project.id)
+    assert exposure.unknown_provider_calls == 1
+    status = await check_budget(session, project.id)
+    assert status.exceeded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "provider_mode", "usage_source"),
+    [
+        ("anthropic", "api", "agent_sdk"),
+        ("anthropic", "subscription", "provider_api"),
+        ("openai", "subscription", "agent_sdk"),
+    ],
+)
+async def test_subscription_metadata_mismatch_with_unknown_usage_fails_closed(
+    session, monkeypatch, provider, provider_mode, usage_source,
+):
+    monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", "1000.0")
+    project = await _seed_project(session)
+    await _add_v1_unknown_call(
+        session,
+        project,
+        provider=provider,
+        provider_mode=provider_mode,
+        usage_source=usage_source,
+    )
+
+    status = await check_budget(session, project.id)
+    assert status.unknown_provider_calls == 1
+    assert status.exceeded
+    with pytest.raises(BudgetExceeded, match="indeterminate"):
+        await require_budget(session, project.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "provider",
+        "provider_mode",
+        "usage_source",
+        "expected_spend",
+        "expected_unknown",
+    ),
+    [
+        ("anthropic", "api", "agent_sdk", 3.0, 1),
+        ("anthropic", "subscription", "provider_api", 0.25, 0),
+        ("openai", "subscription", "agent_sdk", 3.0, 1),
+    ],
+)
+async def test_subscription_metadata_mismatch_with_known_cost_is_billable(
+    session,
+    monkeypatch,
+    provider,
+    provider_mode,
+    usage_source,
+    expected_spend,
+    expected_unknown,
+):
+    monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", "0.1")
+    project = await _seed_project(session)
+    row = await _add_v1_reported_cost_call(session, project)
+    row.provider = provider
+    row.provider_mode = provider_mode
+    row.usage_source = usage_source
+    await session.commit()
+
+    exposure = await project_budget_exposure(session, project.id)
+    assert exposure.known_spend_usd == pytest.approx(expected_spend)
+    assert exposure.unknown_provider_calls == expected_unknown
+    status = await check_budget(session, project.id)
+    assert status.exceeded
+    with pytest.raises(BudgetExceeded):
+        await require_budget(session, project.id)
+
+
+@pytest.mark.asyncio
+async def test_old_unknown_provider_usage_leaves_rolling_window(
+    session, monkeypatch,
+):
+    monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", "1.0")
+    monkeypatch.setenv("MNEMOS_LLM_BUDGET_WINDOW_SEC", "3600")
+    project = await _seed_project(session)
+    await _add_v1_unknown_call(session, project, age_sec=7200)
+
+    status = await check_budget(session, project.id)
+    assert status.unknown_provider_calls == 0
+    assert not status.exceeded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["garbage", "-1", "nan", "inf"])
+async def test_invalid_explicit_project_cap_fails_closed(
+    session, monkeypatch, value,
+):
+    monkeypatch.setenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", value)
+    with pytest.raises(BudgetConfigurationError, match="finite"):
+        await check_budget(session, _uuid.uuid4())
 
 
 @pytest.mark.asyncio

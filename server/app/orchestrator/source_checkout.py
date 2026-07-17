@@ -13,6 +13,7 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.orchestrator.source_binding import (
+    PROJECT_SOURCE_BINDING_CODES,
     ProjectSourceBindingError,
     resolve_project_source_path,
 )
@@ -22,8 +23,45 @@ log = logging.getLogger(__name__)
 _COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
 
+_SOURCE_CHECKOUT_CODES = PROJECT_SOURCE_BINDING_CODES | frozenset(
+    {
+        "manual_git_ref_required_for_detached_revision",
+        "manual_git_revision_invalid",
+        "manual_git_revision_not_on_ref",
+        "manual_git_revision_unavailable",
+        "manual_git_status_failed",
+        "manual_git_worktree_dirty",
+        "manual_non_git_revision_unsupported",
+        "source_checkout_failed",
+        "source_checkout_git_timeout",
+        "source_checkout_git_unavailable",
+        "source_manual_mirror_create_failed",
+        "source_manual_mirror_fetch_failed",
+        "source_manual_mirror_invalid",
+        "source_manual_mirror_path_escape",
+        "source_manual_mirror_revision_unavailable",
+        "source_manual_mirror_root_invalid",
+        "source_manual_mirror_root_unavailable",
+        "source_repository_outside_project_root",
+        "source_worktree_already_exists",
+        "source_worktree_create_failed",
+        "source_worktree_path_escape",
+        "webhook_source_mirror_missing",
+        "webhook_source_mirror_not_configured",
+        "webhook_source_revision_invalid",
+        "webhook_source_revision_unavailable",
+    }
+)
+
+
 class SourceCheckoutError(RuntimeError):
-    """The requested source snapshot cannot be proven or materialised."""
+    """Source snapshot failure carrying one closed, non-sensitive code."""
+
+    def __init__(self, code: str) -> None:
+        if code not in _SOURCE_CHECKOUT_CODES:
+            code = "source_checkout_failed"
+        self.code = code
+        super().__init__(code)
 
 
 def _is_link_or_junction(path: Path) -> bool:
@@ -114,7 +152,7 @@ async def prepare_source(
                 project_roots_json=project_roots_json,
             )
         except ProjectSourceBindingError as exc:
-            raise SourceCheckoutError(str(exc)) from exc
+            raise SourceCheckoutError(exc.code) from exc
         resolved_allowed_root = binding.allowed_root
         project_root = binding.project_root
         path = binding.source_path
@@ -343,7 +381,7 @@ async def prepare_source(
                     repository_locator=repository_locator,
                 )
         except SourceCheckoutError as exc:
-            if str(exc) != "source_checkout_git_unavailable":
+            if exc.code != "source_checkout_git_unavailable":
                 raise
         if git_sha.strip() not in {"", "HEAD"}:
             raise SourceCheckoutError("manual_non_git_revision_unsupported")

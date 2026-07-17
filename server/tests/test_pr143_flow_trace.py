@@ -24,12 +24,48 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fake_llm_attempt_callbacks")
+
 os.environ.setdefault("MNEMOS_LOCAL_MODE", "1")
 os.environ.setdefault("MNEMOS_ENV", "test")
 os.environ.setdefault("SECRET_KEY", "ci-test-pr143")
 os.environ.setdefault("FERNET_KEY", "4oEY9MJGAjGCbrScyvvi4CZgm8KxFuQuklXSQwUYpys=")
 os.environ.setdefault("SESSION_COOKIE_SECURE", "false")
 os.environ.setdefault("MNEMOS_SKIP_STARTUP_VERIFY", "1")
+
+_FLOW_TEST_OPERATION_ID = uuid.UUID("7a123b27-758e-4eb7-a6f8-c043de83dfd7")
+_FLOW_TEST_BINDING = "b" * 64
+
+
+@pytest.fixture(autouse=True)
+def _flow_opaque_budget_env(monkeypatch):
+    """Isolate Flow product tests from the production dollar-policy gate.
+
+    Opaque Agent SDK dispatch is production-disabled by the immutable price
+    contract boundary. These fake-provider tests exercise the independent
+    parser/replay/product contract through the generic lifecycle mode; the
+    production callsite's required flag has a separate static regression.
+    """
+
+    monkeypatch.setenv("MNEMOS_LLM_MAX_INPUT_TOKENS_PER_RUN", "1000000")
+    monkeypatch.setenv("MNEMOS_LLM_MAX_OUTPUT_TOKENS_PER_RUN", "128000")
+    from app.api import flow as flow_api
+
+    production_begin_attempt = flow_api.begin_attempt
+
+    async def generic_test_begin_attempt(*args, **kwargs):  # noqa: ANN002, ANN003
+        assert kwargs.pop("require_atomic_dollar_reservation") is True
+        return await production_begin_attempt(
+            *args,
+            **kwargs,
+            require_atomic_dollar_reservation=False,
+        )
+
+    monkeypatch.setattr(
+        flow_api,
+        "begin_attempt",
+        generic_test_begin_attempt,
+    )
 
 
 def _valid_flow_payload():
@@ -145,6 +181,10 @@ def test_flow_normalise_rejects_instead_of_silently_dropping_or_renumbering():
     nested_text["summary"] = {"source-secret-sentinel": "must not stringify"}
     invalid_payloads.append(nested_text)
 
+    unpaired_surrogate = _valid_flow_payload()
+    unpaired_surrogate["summary"] = "invalid-utf8-\ud800"
+    invalid_payloads.append(unpaired_surrogate)
+
     oversized = _valid_flow_payload()
     oversized["flags"] = [deepcopy(oversized["flags"][0]) for _ in range(MAX_FLAGS + 1)]
     invalid_payloads.append(oversized)
@@ -153,6 +193,24 @@ def test_flow_normalise_rejects_instead_of_silently_dropping_or_renumbering():
         with pytest.raises(FlowContractError) as exc_info:
             _normalise(payload)
         assert "source-secret-sentinel" not in str(exc_info.value)
+
+
+def test_flow_normalise_rejects_fractional_scalar_with_actionable_path():
+    """JSONB-normalized floats cannot authorize a replay digest."""
+
+    from app.extractor.agent_flow import FlowContractError, _normalise
+
+    fractional = _valid_flow_payload()
+    fractional["flags"][0]["values"][0]["value"] = -0.0
+
+    with pytest.raises(FlowContractError) as exc_info:
+        _normalise(fractional)
+
+    error = exc_info.value
+    assert error.path == "$.flags[0].values[0].value"
+    assert error.expected == "bounded string, boolean, or signed 64-bit integer"
+    assert error.actual == "float"
+    assert "fractional values as bounded strings" in error.hint
 
 
 def test_flow_summary_contract_normalizes_once_and_rejects_mixed_content():
@@ -266,6 +324,7 @@ def test_flow_prompt_includes_all_tiers_and_entry():
 @pytest.mark.asyncio
 async def test_flow_agent_sdk_rejects_output_over_hard_cap(monkeypatch):
     from app.extractor import agent_flow
+    from app.extractor.cost import LLMRunBudget
 
     class TextBlock:
         def __init__(self, text):  # noqa: ANN001
@@ -274,17 +333,22 @@ async def test_flow_agent_sdk_rejects_output_over_hard_cap(monkeypatch):
     class AssistantMessage:
         def __init__(self, content):  # noqa: ANN001
             self.content = content
+            self.model = "claude-sonnet-4-6"
+            self.error = None
 
     class ResultMessage:
         def __init__(self, is_error=False):  # noqa: FBT002
             self.is_error = is_error
+            self.subtype = "success"
+            self.stop_reason = "end_turn"
 
     class ClaudeAgentOptions:
         def __init__(self, **kwargs):  # noqa: ANN003
             self.kwargs = kwargs
 
     async def query(**_kwargs):  # noqa: ANN003
-        yield AssistantMessage([TextBlock("x" * 33)])
+        # Nine code points are only nine Python characters but 36 UTF-8 bytes.
+        yield AssistantMessage([TextBlock("😀" * 9)])
         yield ResultMessage(False)
 
     fake_sdk = SimpleNamespace(
@@ -295,12 +359,19 @@ async def test_flow_agent_sdk_rejects_output_over_hard_cap(monkeypatch):
         query=query,
     )
     monkeypatch.setattr(agent_flow, "is_agent_sdk_available", lambda: True)
-    monkeypatch.setattr(agent_flow, "MAX_AGENT_OUTPUT_CHARS", 32)
+    monkeypatch.setattr(agent_flow, "MAX_AGENT_OUTPUT_BYTES", 32)
 
     with patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk}):
         result = await agent_flow.analyze_flow_via_agent_sdk(
             entry="checkout",
             sources=[{"tier": "backend", "label": "a.py", "code": "pass"}],
+            operation_id=_FLOW_TEST_OPERATION_ID,
+            semantic_binding_identity=_FLOW_TEST_BINDING,
+            run_budget=LLMRunBudget(
+                max_calls=1,
+                max_input_tokens=1_000_000,
+                max_output_tokens=128_000,
+            ),
         )
 
     assert result is None
@@ -317,14 +388,21 @@ async def test_flow_agent_sdk_mock_passes_parse_and_v1_normalization(monkeypatch
     class AssistantMessage:
         def __init__(self, content):  # noqa: ANN001
             self.content = content
+            self.model = "claude-sonnet-4-6"
+            self.error = None
 
     class ResultMessage:
         def __init__(self, is_error=False):  # noqa: FBT002
             self.is_error = is_error
+            self.subtype = "success"
+            self.stop_reason = "end_turn"
+
+    options_seen = []
 
     class ClaudeAgentOptions:
         def __init__(self, **kwargs):  # noqa: ANN003
             self.kwargs = kwargs
+            options_seen.append(kwargs)
 
     payload = {
         "summary": "Checkout calls the order API.",
@@ -364,6 +442,8 @@ async def test_flow_agent_sdk_mock_passes_parse_and_v1_normalization(monkeypatch
         result = await agent_flow.analyze_flow_via_agent_sdk(
             entry="checkout",
             sources=[{"tier": "frontend", "label": "a.ts", "code": "submit()"}],
+            operation_id=_FLOW_TEST_OPERATION_ID,
+            semantic_binding_identity=_FLOW_TEST_BINDING,
         )
 
     assert result is not None
@@ -382,6 +462,14 @@ async def test_flow_agent_sdk_mock_passes_parse_and_v1_normalization(monkeypatch
             },
         }
     ]
+    assert options_seen[0]["tools"] == []
+    assert options_seen[0]["allowed_tools"] == []
+    assert options_seen[0]["setting_sources"] == []
+    assert options_seen[0]["skills"] == []
+    assert options_seen[0]["mcp_servers"] == {}
+    assert options_seen[0]["agents"] == {}
+    assert options_seen[0]["plugins"] == []
+    assert options_seen[0]["permission_mode"] == "dontAsk"
     assert result["source_scope"]["provided_files"] == ["a.ts"]
     assert result["source_scope"]["files"] == [
         {
@@ -398,14 +486,124 @@ async def test_flow_agent_sdk_mock_passes_parse_and_v1_normalization(monkeypatch
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    (
+        "stop_reason",
+        "is_error",
+        "emit_result",
+        "assistant_error",
+        "assistant_model",
+        "second_model",
+        "expected_reason",
+    ),
+    [
+        (
+            "max_tokens",
+            False,
+            True,
+            None,
+            "claude-sonnet-4-6",
+            None,
+            "flow_output_limit_exceeded",
+        ),
+        (None, False, True, None, "claude-sonnet-4-6", None, "flow_provider_rejected"),
+        ("tool_use", False, True, None, "claude-sonnet-4-6", None, "flow_provider_rejected"),
+        ("end_turn", None, True, None, "claude-sonnet-4-6", None, "flow_provider_rejected"),
+        ("end_turn", False, False, None, "claude-sonnet-4-6", None, "flow_provider_rejected"),
+        ("end_turn", False, True, "server_error", "claude-sonnet-4-6", None, "flow_provider_rejected"),
+        ("end_turn", False, True, None, "claude-sonnet-4-6", "claude-other", "flow_provider_rejected"),
+        ("end_turn", False, True, None, "claude-other", None, "flow_provider_rejected"),
+    ],
+)
+async def test_flow_agent_requires_authoritative_end_turn_result(
+    monkeypatch,
+    stop_reason,
+    is_error,
+    emit_result,
+    assistant_error,
+    assistant_model,
+    second_model,
+    expected_reason,
+):
+    from app.extractor import agent_flow
+
+    class TextBlock:
+        def __init__(self, text):  # noqa: ANN001
+            self.text = text
+
+    class AssistantMessage:
+        def __init__(
+            self,
+            content,  # noqa: ANN001
+            *,
+            model="claude-sonnet-4-6",
+            error=None,
+        ):
+            self.content = content
+            self.model = model
+            self.error = error
+
+    class ResultMessage:
+        def __init__(self):
+            self.is_error = is_error
+            self.subtype = "success"
+            self.stop_reason = stop_reason
+
+    class ClaudeAgentOptions:
+        def __init__(self, **_kwargs):  # noqa: ANN003
+            pass
+
+    async def query(**_kwargs):  # noqa: ANN003
+        yield AssistantMessage(
+            [TextBlock(json.dumps(_valid_flow_payload()))],
+            model=assistant_model,
+            error=assistant_error,
+        )
+        if second_model is not None:
+            yield AssistantMessage([], model=second_model)
+        if emit_result:
+            yield ResultMessage()
+
+    sdk = SimpleNamespace(
+        AssistantMessage=AssistantMessage,
+        ClaudeAgentOptions=ClaudeAgentOptions,
+        ResultMessage=ResultMessage,
+        TextBlock=TextBlock,
+        query=query,
+    )
+    outcomes = []
+
+    async def record(status, reason, model):  # noqa: ANN001
+        outcomes.append((status, reason, model))
+
+    monkeypatch.setattr(agent_flow, "is_agent_sdk_available", lambda: True)
+    with patch.dict(sys.modules, {"claude_agent_sdk": sdk}):
+        result = await agent_flow.analyze_flow_via_agent_sdk(
+            entry="checkout",
+            sources=[{"tier": "backend", "label": "a.py", "code": "pass"}],
+            operation_id=_FLOW_TEST_OPERATION_ID,
+            semantic_binding_identity=_FLOW_TEST_BINDING,
+            record_physical_call=record,
+        )
+
+    assert result is None
+    recorded_model = (
+        assistant_model
+        if assistant_model != "claude-sonnet-4-6" and second_model is None
+        else "claude-sonnet-4-6"
+    )
+    assert outcomes == [("rejected", expected_reason, recorded_model)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("case", "expected_status", "expected_reason"),
     [
         ("completed", "completed", None),
         ("contract_rejected", "rejected", "flow_contract_rejected"),
-        ("timeout", "timeout", "run_deadline_exceeded"),
+        ("timeout", "timeout", "flow_provider_timeout"),
     ],
 )
-async def test_flow_adapter_reserves_fresh_budget_and_reports_physical_outcome(
+async def test_flow_adapter_delegates_budget_reservation_and_reports_physical_outcome(
     monkeypatch,
     case,
     expected_status,
@@ -421,10 +619,14 @@ async def test_flow_adapter_reserves_fresh_budget_and_reports_physical_outcome(
     class AssistantMessage:
         def __init__(self, content):  # noqa: ANN001
             self.content = content
+            self.model = "claude-sonnet-4-6"
+            self.error = None
 
     class ResultMessage:
         def __init__(self, is_error=False):  # noqa: FBT002
             self.is_error = is_error
+            self.subtype = "success"
+            self.stop_reason = "end_turn"
 
     class ClaudeAgentOptions:
         def __init__(self, **_kwargs):  # noqa: ANN003
@@ -448,11 +650,10 @@ async def test_flow_adapter_reserves_fresh_budget_and_reports_physical_outcome(
     monkeypatch.setattr(agent_flow, "is_agent_sdk_available", lambda: True)
     budget = LLMRunBudget(
         max_calls=1,
-        max_input_tokens=100_000,
+        max_input_tokens=1_000_000,
+        max_output_tokens=128_000,
         wall_time_sec=60,
     )
-    if case == "timeout":
-        monkeypatch.setattr(budget, "remaining_seconds", lambda: 0.01)
     events = []
 
     async def before_provider_call():
@@ -466,16 +667,144 @@ async def test_flow_adapter_reserves_fresh_budget_and_reports_physical_outcome(
         result = await agent_flow.analyze_flow_via_agent_sdk(
             entry="checkout",
             sources=[{"tier": "backend", "label": "a.py", "code": "pass"}],
+            operation_id=_FLOW_TEST_OPERATION_ID,
+            semantic_binding_identity=_FLOW_TEST_BINDING,
             run_budget=budget,
+            timeout_s=0.01 if case == "timeout" else 300,
             before_provider_call=before_provider_call,
             record_physical_call=record_physical_call,
         )
 
     assert (result is not None) is (case == "completed")
-    assert budget.calls_started == 1
-    assert budget.input_tokens_reserved > 0
+    # The adapter must not reserve locally. The installed lifecycle owner is
+    # solely responsible for a genuinely new durable attempt, which keeps an
+    # exact replay possible under a fresh exhausted request budget.
+    assert budget.calls_started == 0
+    assert budget.input_tokens_reserved == 0
+    assert budget.output_tokens_reserved == 0
     assert events[0] == "budget_checked"
     assert events[1][:2] == (expected_status, expected_reason)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("durable_remaining", "predispatch_delay", "expected_dispatch"),
+    [(0.01, 0.0, True), (0.0, 0.0, False), (0.01, 0.02, False)],
+)
+async def test_flow_adapter_uses_durable_remaining_time_after_start_delay(
+    monkeypatch,
+    durable_remaining,
+    predispatch_delay,
+    expected_dispatch,
+):
+    from app.extractor import agent_flow
+    from app.extractor.cost import LLMRunBudget
+    from app.llm.contracts import AttemptStatus, UsageStatus
+    from app.llm.lifecycle import (
+        AttemptCallbacks,
+        AttemptTicket,
+        use_attempt_callbacks,
+    )
+
+    class TextBlock:
+        def __init__(self, text):  # noqa: ANN001
+            self.text = text
+
+    class AssistantMessage:
+        pass
+
+    class ResultMessage:
+        pass
+
+    class ClaudeAgentOptions:
+        def __init__(self, **_kwargs):  # noqa: ANN003
+            pass
+
+    dispatched = asyncio.Event()
+
+    async def query(**_kwargs):  # noqa: ANN003
+        dispatched.set()
+        await asyncio.sleep(1)
+        if False:  # pragma: no cover - preserves the async-generator shape
+            yield None
+
+    fake_sdk = SimpleNamespace(
+        AssistantMessage=AssistantMessage,
+        ClaudeAgentOptions=ClaudeAgentOptions,
+        ResultMessage=ResultMessage,
+        TextBlock=TextBlock,
+        query=query,
+    )
+    outcomes = []
+
+    async def start(metadata):  # noqa: ANN001
+        # Simulate durable lock/commit latency.  The returned DB-owned
+        # remaining time, not the stale pre-start local sample, must govern
+        # the provider wait.
+        await asyncio.sleep(0.01)
+        return AttemptTicket(
+            attempt_id=uuid.uuid4(),
+            operation_id=metadata.operation_id,
+            budget_scope_id=uuid.uuid4(),
+            started_at=datetime.now(tz=timezone.utc),
+            remaining_seconds=durable_remaining,
+        )
+
+    async def finish(_ticket, outcome):  # noqa: ANN001
+        outcomes.append(outcome)
+
+    async def finish_candidate(_ticket, outcome, _candidate):  # noqa: ANN001
+        outcomes.append(outcome)
+
+    async def replay_candidate(_request):  # noqa: ANN001
+        from app.llm.lifecycle import LLMSemanticCandidateUnavailable
+
+        raise LLMSemanticCandidateUnavailable("test candidate unavailable")
+
+    callbacks = AttemptCallbacks(
+        start=start,
+        finish=finish,
+        finish_candidate=finish_candidate,
+        replay_candidate=replay_candidate,
+        mark_provider_dispatch=lambda: None,
+    )
+    monkeypatch.setattr(agent_flow, "is_agent_sdk_available", lambda: True)
+    budget = LLMRunBudget(
+        max_calls=1,
+        max_input_tokens=1_000_000,
+        max_output_tokens=128_000,
+        wall_time_sec=60,
+    )
+
+    async def before_provider_call():
+        await asyncio.sleep(predispatch_delay)
+
+    with patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk}):
+        async with use_attempt_callbacks(callbacks):
+            result = await asyncio.wait_for(
+                agent_flow.analyze_flow_via_agent_sdk(
+                    entry="checkout",
+                    sources=[
+                        {"tier": "backend", "label": "a.py", "code": "pass"}
+                    ],
+                    operation_id=_FLOW_TEST_OPERATION_ID,
+                    semantic_binding_identity=_FLOW_TEST_BINDING,
+                    run_budget=budget,
+                    before_provider_call=before_provider_call,
+                ),
+                timeout=0.25,
+            )
+
+    assert dispatched.is_set() is expected_dispatch
+    assert result is None
+    assert len(outcomes) == 1
+    assert outcomes[0].attempt_status == AttemptStatus.TIMEOUT
+    assert outcomes[0].failure_code == agent_flow.FLOW_FALLBACK_RUN_DEADLINE
+    assert outcomes[0].usage.status == (
+        UsageStatus.LOST_AFTER_DISPATCH
+        if expected_dispatch
+        else UsageStatus.UNAVAILABLE
+    )
 
 
 @pytest.mark.asyncio
@@ -492,6 +821,8 @@ async def test_flow_adapter_preflight_failure_is_not_a_physical_call(monkeypatch
     result = await agent_flow.analyze_flow_via_agent_sdk(
         entry="checkout",
         sources=[{"tier": "backend", "label": "a.py", "code": "pass"}],
+        operation_id=_FLOW_TEST_OPERATION_ID,
+        semantic_binding_identity=_FLOW_TEST_BINDING,
         run_budget=budget,
         before_provider_call=must_not_run,
         record_physical_call=must_not_run,
@@ -514,10 +845,14 @@ async def test_flow_agent_records_exact_prompt_scope_for_partial_source_windows(
     class AssistantMessage:
         def __init__(self, content):  # noqa: ANN001
             self.content = content
+            self.model = "claude-sonnet-4-6"
+            self.error = None
 
     class ResultMessage:
         def __init__(self, is_error=False):  # noqa: FBT002
             self.is_error = is_error
+            self.subtype = "success"
+            self.stop_reason = "end_turn"
 
     class ClaudeAgentOptions:
         def __init__(self, **_kwargs):  # noqa: ANN003
@@ -578,6 +913,8 @@ async def test_flow_agent_records_exact_prompt_scope_for_partial_source_windows(
         result = await agent_flow.analyze_flow_via_agent_sdk(
             entry="bounded",
             sources=sources,
+            operation_id=_FLOW_TEST_OPERATION_ID,
+            semantic_binding_identity=_FLOW_TEST_BINDING,
             max_total_chars=80,
         )
 
@@ -604,12 +941,17 @@ def test_trace_flow_route_registered():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("physical_status", "fallback_reason", "expected_rows"),
+    (
+        "physical_status",
+        "fallback_reason",
+        "expected_rows",
+        "expected_legacy_status",
+    ),
     [
-        ("completed", None, 1),
-        ("rejected", "flow_contract_rejected", 1),
-        ("timeout", "run_deadline_exceeded", 1),
-        (None, None, 0),
+        ("completed", None, 1, "completed"),
+        ("rejected", "flow_contract_rejected", 1, "fallback"),
+        ("timeout", "run_deadline_exceeded", 1, "timeout"),
+        (None, None, 0, None),
     ],
 )
 async def test_flow_api_durably_ledgers_only_physical_attempts(
@@ -617,14 +959,32 @@ async def test_flow_api_durably_ledgers_only_physical_attempts(
     physical_status,
     fallback_reason,
     expected_rows,
+    expected_legacy_status,
 ):
     from fastapi import HTTPException
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
     from app.api import flow as flow_api
-    from app.extractor.agent_flow import normalize_flow_payload
-    from app.models.findings import LLMCall
+    from app.extractor.agent_flow import (
+        flow_candidate_binding_fingerprint,
+        normalize_flow_payload,
+    )
+    from app.llm.contracts import (
+        AttemptKind,
+        AttemptStatus,
+        ResultStatus,
+        UsageSource,
+        unavailable_usage,
+    )
+    from app.llm.lifecycle import (
+        AttemptOutcome,
+        AttemptStartMetadata,
+        SemanticCandidate,
+        current_attempt_callbacks,
+    )
+    from app.models.findings import LLMBudgetScope, LLMCall, LLMProjectBudgetAccount
+    from app.models.llm import LLMSemanticCandidate
     from app.source_snapshot import GitSourceSnapshot
     from app.testing.sqlite_polyglot import install_polyglot
 
@@ -632,6 +992,9 @@ async def test_flow_api_durably_ledgers_only_physical_attempts(
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(LLMCall.__table__.create)
+        await connection.run_sync(LLMBudgetScope.__table__.create)
+        await connection.run_sync(LLMProjectBudgetAccount.__table__.create)
+        await connection.run_sync(LLMSemanticCandidate.__table__.create)
 
     source = {
         "tier": "backend",
@@ -664,26 +1027,68 @@ async def test_flow_api_durably_ledgers_only_physical_attempts(
     async def fake_analyze(**kwargs):  # noqa: ANN003
         if physical_status is None:
             return None
-        await kwargs["before_provider_call"]()
-        kwargs["run_budget"].reserve(100)
-        await kwargs["record_physical_call"](
-            physical_status,
-            fallback_reason,
-            "claude-sonnet-test",
+        callbacks = current_attempt_callbacks()
+        assert callbacks is not None
+        ticket = await callbacks.start(
+            AttemptStartMetadata(
+                operation_id=uuid.uuid5(
+                    kwargs["operation_id"],
+                    "mnemos.flow.fake-provider.v1",
+                ),
+                attempt_no=1,
+                attempt_kind=AttemptKind.PRIMARY,
+                provider="anthropic",
+                provider_mode="unknown",
+                requested_model="claude-sonnet-4-6",
+                input_fingerprint="d" * 64,
+                estimated_input_tokens=100,
+                input_estimate_method="test_v1",
+                requested_max_output_tokens=128_000,
+                usage_source=UsageSource.AGENT_SDK,
+            )
         )
+        kwargs["attempt_state"].attempt_id = ticket.attempt_id
+        if physical_status == "completed":
+            attempt_status = AttemptStatus.COMPLETED
+            result_status = ResultStatus.PENDING
+        elif physical_status == "timeout":
+            attempt_status = AttemptStatus.TIMEOUT
+            result_status = ResultStatus.NOT_APPLICABLE
+        else:
+            attempt_status = AttemptStatus.COMPLETED
+            result_status = ResultStatus.SCHEMA_REJECTED
+        outcome = AttemptOutcome(
+                attempt_status=attempt_status,
+                result_status=result_status,
+                usage=unavailable_usage(
+                    lost_after_dispatch=physical_status == "timeout",
+                    source=UsageSource.AGENT_SDK,
+                ),
+                failure_code=fallback_reason,
+                provider_mode="unknown",
+            )
+        if physical_status == "completed":
+            assert callbacks.finish_candidate is not None
+            await callbacks.finish_candidate(
+                ticket,
+                outcome,
+                SemanticCandidate(
+                    contract_name=flow_api.FLOW_RESULT_CONTRACT,
+                    binding_fingerprint=flow_candidate_binding_fingerprint(
+                        kwargs["semantic_binding_identity"],
+                        envelope["source_scope"],
+                    ),
+                    payload=envelope["flow"],
+                ),
+            )
+        else:
+            await callbacks.finish(ticket, outcome)
         return envelope if physical_status == "completed" else None
-
-    budget_checks = []
-
-    async def allow_budget(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        budget_checks.append("checked")
-        return None
 
     async def fake_audit(**_kwargs):  # noqa: ANN003
         return None
 
     monkeypatch.setattr(flow_api, "analyze_flow_via_agent_sdk", fake_analyze)
-    monkeypatch.setattr(flow_api, "require_budget", allow_budget)
     monkeypatch.setattr(flow_api, "audit_record", fake_audit)
     snapshot = GitSourceSnapshot(
         run_id=uuid.uuid4(),
@@ -709,15 +1114,24 @@ async def test_flow_api_durably_ledgers_only_physical_attempts(
             with pytest.raises(HTTPException, match="flow_analysis_failed"):
                 await call
         rows = (await session.execute(select(LLMCall))).scalars().all()
+        scopes = (
+            await session.execute(select(LLMBudgetScope))
+        ).scalars().all()
 
     await engine.dispose()
+
     assert len(rows) == expected_rows
-    assert len(budget_checks) == (0 if physical_status is None else 1)
+    assert len(scopes) == expected_rows
     if rows:
-        assert rows[0].status == physical_status
+        assert scopes[0].calls_reserved == 1
+        assert scopes[0].input_tokens_reserved == 100
+        assert scopes[0].output_tokens_reserved == 128_000
+        assert rows[0].status == expected_legacy_status
         assert rows[0].fallback_reason == fallback_reason
         assert rows[0].tokens_used is None
-        assert rows[0].analysis_run_id == snapshot.run_id
+        assert rows[0].analysis_run_id is None
+        assert rows[0].contract_version == 1
+        assert rows[0].purpose == "flow"
         assert rows[0].level == 4
 
 
@@ -727,15 +1141,44 @@ async def test_explicit_historical_flow_has_v1_contract_but_is_not_current(monke
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
     from app.api import flow as flow_api
-    from app.extractor.agent_flow import FLOW_RESULT_CONTRACT
+    from app.extractor.agent_flow import (
+        FLOW_RESULT_CONTRACT,
+        flow_candidate_binding_fingerprint,
+    )
     from app.extractor.validator import current_summary_claim_views
-    from app.models.findings import Summary
+    from app.llm.contracts import (
+        AttemptKind,
+        AttemptStatus,
+        ResultStatus,
+        UsageSource,
+        unavailable_usage,
+    )
+    from app.llm.lifecycle import (
+        AttemptOutcome,
+        AttemptStartMetadata,
+        SemanticCandidate,
+        current_attempt_callbacks,
+        fingerprint_input,
+    )
+    from app.models.findings import (
+        LLMBudgetScope,
+        LLMCall,
+        LLMProjectBudgetAccount,
+        Summary,
+    )
+    from app.models.graph import AnalysisRun
+    from app.models.llm import LLMSemanticCandidate
     from app.source_snapshot import GitSourceSnapshot
     from app.testing.sqlite_polyglot import install_polyglot
 
     install_polyglot()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
+        await connection.run_sync(LLMProjectBudgetAccount.__table__.create)
+        await connection.run_sync(LLMBudgetScope.__table__.create)
+        await connection.run_sync(LLMCall.__table__.create)
+        await connection.run_sync(LLMSemanticCandidate.__table__.create)
+        await connection.run_sync(AnalysisRun.__table__.create)
         await connection.run_sync(Summary.__table__.create)
 
     project_id = uuid.uuid4()
@@ -798,7 +1241,50 @@ async def test_explicit_historical_flow_has_v1_contract_but_is_not_current(monke
         },
     }
 
-    async def fake_analyze(**_kwargs):  # noqa: ANN003
+    async def fake_analyze(**kwargs):  # noqa: ANN003
+        callbacks = current_attempt_callbacks()
+        assert callbacks is not None and callbacks.finish_candidate is not None
+        input_fingerprint = fingerprint_input(
+            "mnemos.flow.historical-test.v1",
+            str(kwargs["operation_id"]),
+        )
+        ticket = await callbacks.start(
+            AttemptStartMetadata(
+                operation_id=uuid.uuid5(
+                    kwargs["operation_id"],
+                    "mnemos.flow.historical-test.v1",
+                ),
+                attempt_no=1,
+                attempt_kind=AttemptKind.PRIMARY,
+                provider="anthropic",
+                provider_mode="unknown",
+                requested_model="claude-sonnet-4-6",
+                input_fingerprint=input_fingerprint,
+                estimated_input_tokens=100,
+                input_estimate_method="test_v1",
+                requested_max_output_tokens=128_000,
+                usage_source=UsageSource.AGENT_SDK,
+                billing_route="claude_agent_sdk",
+            )
+        )
+        kwargs["attempt_state"].attempt_id = ticket.attempt_id
+        await callbacks.finish_candidate(
+            ticket,
+            AttemptOutcome(
+                attempt_status=AttemptStatus.COMPLETED,
+                result_status=ResultStatus.PENDING,
+                usage=unavailable_usage(source=UsageSource.AGENT_SDK),
+                provider_mode="unknown",
+            ),
+            SemanticCandidate(
+                contract_name=FLOW_RESULT_CONTRACT,
+                binding_fingerprint=flow_candidate_binding_fingerprint(
+                    kwargs["semantic_binding_identity"],
+                    canonical_flow["source_scope"],
+                ),
+                payload=canonical_flow["flow"],
+            ),
+        )
         return canonical_flow
 
     async def fake_audit(**_kwargs):  # noqa: ANN003
@@ -814,6 +1300,17 @@ async def test_explicit_historical_flow_has_v1_contract_but_is_not_current(monke
             mirrors=(),
             tree_prefix="",
         )
+        session.add(
+            AnalysisRun(
+                id=first_snapshot.run_id,
+                project_id=project_id,
+                status="completed",
+                triggered_by="test",
+                git_sha=first_snapshot.revision,
+                scope="full",
+            )
+        )
+        await session.commit()
         first = await flow_api._analyze_and_persist(
             session,
             project_id,
@@ -830,6 +1327,17 @@ async def test_explicit_historical_flow_has_v1_contract_but_is_not_current(monke
             mirrors=(),
             tree_prefix="",
         )
+        session.add(
+            AnalysisRun(
+                id=second_snapshot.run_id,
+                project_id=project_id,
+                status="completed",
+                triggered_by="test",
+                git_sha=second_snapshot.revision,
+                scope="full",
+            )
+        )
+        await session.commit()
         second = await flow_api._analyze_and_persist(
             session,
             project_id,
@@ -875,7 +1383,7 @@ async def test_explicit_historical_flow_has_v1_contract_but_is_not_current(monke
     assert persisted_row.validated_graph_generation is None
     assert persisted_row.validated_overlay_generation is None
     assert persisted_row.validated_at is None
-    assert persisted_row.model_used == f"claude_code:{FLOW_RESULT_CONTRACT}"
+    assert persisted_row.model_used == "claude-sonnet-4-6"
     assert current_view.grounding_status == "hypothesis"
     assert current_view.claims == []
     assert current_view.flow == canonical_flow["flow"]
@@ -901,20 +1409,27 @@ async def test_explicit_historical_flow_has_v1_contract_but_is_not_current(monke
 
 
 @pytest.mark.asyncio
-async def test_mock_provider_json_round_trips_through_storage_and_mcp(monkeypatch):
-    """E2: mock provider text uses the real parse/normalize/store/read path."""
+async def test_explicit_current_run_flow_is_validated_and_visible_to_mcp(monkeypatch):
+    """An explicit current run remains a current-generation product."""
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+    import app.source_snapshot as source_snapshot_module
     from app.api import flow as flow_api
     from app.extractor import agent_flow
-    from app.graph_publication import GraphReadStamp
     from app.mcp.queries import get_module_summary, list_flows
-    from app.models.findings import LLMCall, Summary
+    from app.models.findings import (
+        LLMBudgetScope,
+        LLMCall,
+        LLMProjectBudgetAccount,
+        Summary,
+    )
+    from app.models.llm import LLMSemanticCandidate
     from app.models.graph import AnalysisRun, GraphHead
     from app.models.organization import Organization
     from app.models.projects import Project
-    from app.source_snapshot import GitSourceSnapshot
+    from app.orchestrator.source_manifest import INDEX_CONTRACT_VERSION
+    from app.source_snapshot import resolve_git_source_snapshot
     from app.testing.graph_publication import published_run_fields
     from app.testing.sqlite_polyglot import install_polyglot
 
@@ -925,16 +1440,24 @@ async def test_mock_provider_json_round_trips_through_storage_and_mcp(monkeypatc
     class AssistantMessage:
         def __init__(self, content):  # noqa: ANN001
             self.content = content
+            self.model = "claude-sonnet-4-6"
+            self.error = None
 
     class ResultMessage:
         def __init__(self, is_error=False):  # noqa: FBT002
             self.is_error = is_error
+            self.subtype = "success"
+            self.stop_reason = "end_turn"
 
     class ClaudeAgentOptions:
         def __init__(self, **_kwargs):  # noqa: ANN003
             pass
 
+    dispatches = 0
+
     async def query(**_kwargs):  # noqa: ANN003
+        nonlocal dispatches
+        dispatches += 1
         yield AssistantMessage([TextBlock(json.dumps(_valid_flow_payload()))])
         yield ResultMessage(False)
 
@@ -950,15 +1473,16 @@ async def test_mock_provider_json_round_trips_through_storage_and_mcp(monkeypatc
     async def real_adapter(**kwargs):  # noqa: ANN003
         return await agent_flow.analyze_flow_via_agent_sdk(**kwargs)
 
-    async def allow_budget(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        return None
-
     async def fake_audit(**_kwargs):  # noqa: ANN003
         return None
 
     monkeypatch.setattr(flow_api, "analyze_flow_via_agent_sdk", real_adapter)
-    monkeypatch.setattr(flow_api, "require_budget", allow_budget)
     monkeypatch.setattr(flow_api, "audit_record", fake_audit)
+    monkeypatch.setattr(
+        source_snapshot_module,
+        "_configured_mirrors",
+        lambda *_args, **_kwargs: (Path("."),),
+    )
 
     install_polyglot()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -969,23 +1493,13 @@ async def test_mock_provider_json_round_trips_through_storage_and_mcp(monkeypatc
         await connection.run_sync(GraphHead.__table__.create)
         await connection.run_sync(Summary.__table__.create)
         await connection.run_sync(LLMCall.__table__.create)
+        await connection.run_sync(LLMBudgetScope.__table__.create)
+        await connection.run_sync(LLMProjectBudgetAccount.__table__.create)
+        await connection.run_sync(LLMSemanticCandidate.__table__.create)
 
     project_id = uuid.uuid4()
     run_id = uuid.uuid4()
     published_at = datetime.now(tz=timezone.utc)
-    snapshot = GitSourceSnapshot(
-        run_id=run_id,
-        revision="c" * 40,
-        mirrors=(),
-        tree_prefix="",
-        graph_stamp=GraphReadStamp(
-            project_id=project_id,
-            generation=1,
-            overlay_generation=0,
-            current_run_id=run_id,
-            published_at=published_at,
-        ),
-    )
     sources = [
         {
             "tier": "backend",
@@ -1018,7 +1532,7 @@ async def test_mock_provider_json_round_trips_through_storage_and_mcp(monkeypatc
                     id=run_id,
                     project_id=project_id,
                     status="completed",
-                    triggered_by="test",
+                    triggered_by="webhook:test",
                     git_sha="c" * 40,
                     scope="full",
                     started_at=published_at,
@@ -1026,6 +1540,12 @@ async def test_mock_provider_json_round_trips_through_storage_and_mcp(monkeypatc
                     **published_run_fields(
                         generation=1,
                         published_at=published_at,
+                        stats={
+                            "refresh": {"authoritative_root": True},
+                            "source_manifest": {
+                                "contract_version": INDEX_CONTRACT_VERSION,
+                            },
+                        },
                     ),
                 )
             )
@@ -1041,6 +1561,15 @@ async def test_mock_provider_json_round_trips_through_storage_and_mcp(monkeypatc
                 )
             )
             await session.commit()
+            snapshot = await resolve_git_source_snapshot(
+                session,
+                project_id=project_id,
+                run_id=run_id,
+            )
+            assert snapshot.graph_stamp is not None
+            assert snapshot.graph_stamp.current_run_id == run_id
+            assert snapshot.graph_stamp.generation == 1
+            assert snapshot.graph_stamp.overlay_generation == 0
             persisted = await flow_api._analyze_and_persist(
                 session,
                 project_id,
@@ -1050,6 +1579,35 @@ async def test_mock_provider_json_round_trips_through_storage_and_mcp(monkeypatc
                 True,
                 [],
                 snapshot,
+            )
+            persisted_row = await session.get(
+                Summary,
+                uuid.UUID(persisted["summary_id"]),
+            )
+            head = await session.get(GraphHead, project_id)
+            assert head is not None
+            head.overlay_generation = 1
+            await session.commit()
+            replacement_snapshot = await resolve_git_source_snapshot(
+                session,
+                project_id=project_id,
+                run_id=run_id,
+            )
+            assert replacement_snapshot.graph_stamp is not None
+            assert replacement_snapshot.graph_stamp.overlay_generation == 1
+            replacement = await flow_api._analyze_and_persist(
+                session,
+                project_id,
+                SimpleNamespace(id=uuid.uuid4()),
+                "create order",
+                sources,
+                True,
+                [],
+                replacement_snapshot,
+            )
+            replacement_row = await session.get(
+                Summary,
+                uuid.UUID(replacement["summary_id"]),
             )
             module_summary = await get_module_summary(
                 session,
@@ -1065,7 +1623,7 @@ async def test_mock_provider_json_round_trips_through_storage_and_mcp(monkeypatc
                     level=4,
                     analysis_run_id=snapshot.run_id,
                     validated_graph_generation=1,
-                    validated_overlay_generation=0,
+                    validated_overlay_generation=1,
                     validated_at=published_at,
                     summary="Must not leak raw content.",
                     detailed="Must not leak raw content.",
@@ -1081,6 +1639,17 @@ async def test_mock_provider_json_round_trips_through_storage_and_mcp(monkeypatc
                 )
             )
             await session.commit()
+            flow_rows = (
+                await session.execute(
+                    select(Summary)
+                    .where(
+                        Summary.project_id == project_id,
+                        Summary.target_id == "flow:create-order",
+                        Summary.level == 4,
+                    )
+                    .order_by(Summary.validated_overlay_generation)
+                )
+            ).scalars().all()
             malformed_summary = await get_module_summary(
                 session,
                 project_id=project_id,
@@ -1093,7 +1662,23 @@ async def test_mock_provider_json_round_trips_through_storage_and_mcp(monkeypatc
     await engine.dispose()
 
     expected_flow = agent_flow.normalize_flow_payload(_valid_flow_payload())
+    assert dispatches == 2
     assert persisted["summary_id"] is not None
+    assert replacement["summary_id"] is not None
+    assert replacement["summary_id"] != persisted["summary_id"]
+    assert persisted_row is not None
+    assert replacement_row is not None
+    assert persisted_row.analysis_run_id == run_id
+    assert persisted_row.validated_graph_generation == 1
+    assert persisted_row.validated_overlay_generation == 0
+    assert persisted_row.validated_at is not None
+    assert persisted_row.superseded_by == replacement_row.id
+    assert replacement_row.analysis_run_id == run_id
+    assert replacement_row.validated_graph_generation == 1
+    assert replacement_row.validated_overlay_generation == 1
+    assert replacement_row.validated_at is not None
+    assert replacement_row.superseded_by is None
+    assert len(flow_rows) == 2
     assert module_summary is not None
     assert module_summary["flow"] == expected_flow
     assert module_summary["source_snapshot"]["analysis_run_id"] == str(
@@ -1109,9 +1694,410 @@ async def test_mock_provider_json_round_trips_through_storage_and_mcp(monkeypatc
     assert flows[0]["flow"] == expected_flow
     assert flows[0]["sections"] == module_summary["sections"]
     assert [(call.status, call.fallback_reason) for call in calls] == [
-        ("completed", None)
+        ("completed", None),
+        ("completed", None),
     ]
 
+
+@pytest.mark.asyncio
+async def test_flow_retry_reuses_atomic_summary_product_without_redispatch(
+    monkeypatch,
+):
+    """A crash after product commit reuses one attempt, candidate, and row."""
+
+    from fastapi import HTTPException
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import StaticPool
+
+    from app.api import flow as flow_api
+    from app.extractor import agent_flow
+    from app.llm.contracts import ResultStatus
+    from app.models.findings import (
+        LLMBudgetScope,
+        LLMCall,
+        LLMProjectBudgetAccount,
+        Summary,
+    )
+    from app.models.graph import AnalysisRun
+    from app.models.llm import LLMSemanticCandidate
+    from app.source_snapshot import GitSourceSnapshot
+    from app.testing.sqlite_polyglot import install_polyglot
+
+    class TextBlock:
+        def __init__(self, text):  # noqa: ANN001
+            self.text = text
+
+    class AssistantMessage:
+        def __init__(self, content):  # noqa: ANN001
+            self.content = content
+            self.model = "claude-sonnet-4-6"
+            self.error = None
+
+    class ResultMessage:
+        def __init__(self):
+            self.is_error = False
+            self.subtype = "success"
+            self.stop_reason = "end_turn"
+
+    class ClaudeAgentOptions:
+        def __init__(self, **_kwargs):  # noqa: ANN003
+            pass
+
+    dispatches = 0
+
+    async def query(**_kwargs):  # noqa: ANN003
+        nonlocal dispatches
+        dispatches += 1
+        yield AssistantMessage([TextBlock(json.dumps(_valid_flow_payload()))])
+        yield ResultMessage()
+
+    fake_sdk = SimpleNamespace(
+        AssistantMessage=AssistantMessage,
+        ClaudeAgentOptions=ClaudeAgentOptions,
+        ResultMessage=ResultMessage,
+        TextBlock=TextBlock,
+        query=query,
+    )
+    monkeypatch.setattr(agent_flow, "is_agent_sdk_available", lambda: True)
+
+    audit_calls = 0
+
+    async def crash_once_after_product_commit(**_kwargs):  # noqa: ANN003
+        nonlocal audit_calls
+        audit_calls += 1
+        if audit_calls == 1:
+            raise RuntimeError("simulated post-commit consumer crash")
+
+    monkeypatch.setattr(
+        flow_api,
+        "audit_record",
+        crash_once_after_product_commit,
+    )
+
+    install_polyglot()
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(LLMProjectBudgetAccount.__table__.create)
+        await connection.run_sync(LLMBudgetScope.__table__.create)
+        await connection.run_sync(LLMCall.__table__.create)
+        await connection.run_sync(LLMSemanticCandidate.__table__.create)
+        await connection.run_sync(AnalysisRun.__table__.create)
+        await connection.run_sync(Summary.__table__.create)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(flow_api.app_db, "SessionLocal", factory)
+
+    project_id = uuid.uuid4()
+    snapshot = GitSourceSnapshot(
+        run_id=uuid.uuid4(),
+        revision="d" * 40,
+        mirrors=(),
+        tree_prefix="",
+    )
+    sources = [
+        {
+            "tier": "backend",
+            "language": "python",
+            "label": "checkout.py",
+            "code": "def checkout():\n    return True\n",
+        }
+    ]
+    user = SimpleNamespace(id=uuid.uuid4())
+
+    with patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk}):
+        async with factory() as session:
+            session.add(
+                AnalysisRun(
+                    id=snapshot.run_id,
+                    project_id=project_id,
+                    status="completed",
+                    triggered_by="test",
+                    git_sha=snapshot.revision,
+                    scope="full",
+                )
+            )
+            await session.commit()
+            with pytest.raises(
+                RuntimeError,
+                match="post-commit consumer crash",
+            ):
+                await flow_api._analyze_and_persist(
+                    session,
+                    project_id,
+                    user,
+                    "checkout",
+                    sources,
+                    True,
+                    [],
+                    snapshot,
+                )
+            replayed = await flow_api._analyze_and_persist(
+                session,
+                project_id,
+                user,
+                "checkout",
+                sources,
+                True,
+                [],
+                snapshot,
+            )
+            summaries = (
+                await session.execute(select(Summary))
+            ).scalars().all()
+            calls = (await session.execute(select(LLMCall))).scalars().all()
+            candidates = (
+                await session.execute(select(LLMSemanticCandidate))
+            ).scalars().all()
+            scopes = (
+                await session.execute(select(LLMBudgetScope))
+            ).scalars().all()
+            summary_id = str(summaries[0].id)
+            summary_attempt_id = summaries[0].llm_attempt_id
+            call_id = calls[0].id
+            call_result_status = calls[0].result_status
+            candidate_status = candidates[0].candidate_status
+            scope_calls_reserved = scopes[0].calls_reserved
+            summaries[0].fallback_reason = "polluted-after-publication"
+            await session.commit()
+            with pytest.raises(HTTPException) as replay_error:
+                await flow_api._analyze_and_persist(
+                    session,
+                    project_id,
+                    user,
+                    "checkout",
+                    sources,
+                    True,
+                    [],
+                    snapshot,
+                )
+
+    assert dispatches == 1
+    assert audit_calls == 2
+    assert replay_error.value.status_code == 503
+    assert replay_error.value.detail == "flow_product_provenance_invalid"
+    assert len(summaries) == len(calls) == len(candidates) == len(scopes) == 1
+    assert replayed["summary_id"] == summary_id
+    assert summary_attempt_id == call_id
+    assert call_result_status == ResultStatus.ACCEPTED.value
+    assert candidate_status == "accepted"
+    assert scope_calls_reserved == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_flow_terminal_candidate_replays_after_consumer_crash(monkeypatch):
+    """A terminal normalized flow survives a crash without another SDK call."""
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.extractor import agent_flow
+    from app.extractor.cost import LLMRunBudget
+    from app.llm.contracts import LLMPurpose, ResultStatus
+    from app.llm.lifecycle import (
+        AttemptCallbacks,
+        BudgetScopeKind,
+        LLMSemanticCandidateUnavailable,
+        begin_attempt,
+        classify_attempt_result,
+        finalize_attempt,
+        fingerprint_input,
+        load_terminal_semantic_candidate,
+        use_attempt_callbacks,
+    )
+    from app.models.findings import LLMBudgetScope, LLMCall, LLMProjectBudgetAccount
+    from app.models.llm import LLMSemanticCandidate
+    from app.testing.sqlite_polyglot import install_polyglot
+
+    class TextBlock:
+        def __init__(self, text):  # noqa: ANN001
+            self.text = text
+
+    class AssistantMessage:
+        def __init__(self, content):  # noqa: ANN001
+            self.content = content
+            self.model = "claude-sonnet-4-6"
+            self.error = None
+
+    class ResultMessage:
+        def __init__(self):
+            self.is_error = False
+            self.subtype = "success"
+            self.stop_reason = "end_turn"
+
+    class ClaudeAgentOptions:
+        def __init__(self, **_kwargs):  # noqa: ANN003
+            pass
+
+    dispatches = 0
+
+    async def query(**_kwargs):  # noqa: ANN003
+        nonlocal dispatches
+        dispatches += 1
+        yield AssistantMessage([TextBlock(json.dumps(_valid_flow_payload()))])
+        yield ResultMessage()
+
+    fake_sdk = SimpleNamespace(
+        AssistantMessage=AssistantMessage,
+        ClaudeAgentOptions=ClaudeAgentOptions,
+        ResultMessage=ResultMessage,
+        TextBlock=TextBlock,
+        query=query,
+    )
+    monkeypatch.setattr(agent_flow, "is_agent_sdk_available", lambda: True)
+    install_polyglot()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(LLMProjectBudgetAccount.__table__.create)
+        await connection.run_sync(LLMBudgetScope.__table__.create)
+        await connection.run_sync(LLMCall.__table__.create)
+        await connection.run_sync(LLMSemanticCandidate.__table__.create)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    project_id = uuid.uuid4()
+    operation_namespace = uuid.uuid5(project_id, "flow:checkout")
+    binding = fingerprint_input(
+        "mnemos.flow.consumer.test.v1",
+        str(project_id),
+        "run-1",
+        "revision-1",
+        "checkout",
+    )
+
+    def callbacks_for(run_budget):  # noqa: ANN001
+        async def start(metadata):  # noqa: ANN001
+            async with factory() as session:
+                return await begin_attempt(
+                    session,
+                    project_id=project_id,
+                    analysis_run_id=None,
+                    purpose=LLMPurpose.FLOW,
+                    target_id="flow:checkout",
+                    level=agent_flow.FLOW_LEVEL,
+                        run_budget=run_budget,
+                        scope_kind=BudgetScopeKind.REQUEST,
+                        metadata=metadata,
+                        pre_reserved=None,
+                    )
+
+        async def finish(ticket, outcome):  # noqa: ANN001
+            async with factory() as session:
+                await finalize_attempt(session, ticket=ticket, outcome=outcome)
+
+        async def finish_candidate(ticket, outcome, candidate):  # noqa: ANN001
+            async with factory() as session:
+                await finalize_attempt(
+                    session,
+                    ticket=ticket,
+                    outcome=outcome,
+                    candidate=candidate,
+                )
+
+        async def replay_candidate(request):  # noqa: ANN001
+            async with factory() as session:
+                return await load_terminal_semantic_candidate(
+                    session,
+                    operation_id=request.operation_id,
+                    attempt_no=request.attempt_no,
+                    project_id=project_id,
+                    purpose=LLMPurpose.FLOW,
+                    input_fingerprint=request.input_fingerprint,
+                    contract_name=request.contract_name,
+                    binding_fingerprint=request.binding_fingerprint,
+                    normalizer=request.normalizer,
+                )
+
+        return AttemptCallbacks(
+            start=start,
+            finish=finish,
+            finish_candidate=finish_candidate,
+            replay_candidate=replay_candidate,
+            mark_provider_dispatch=lambda: None,
+        )
+
+    def budget() -> LLMRunBudget:
+        return LLMRunBudget(
+            max_calls=1,
+            max_input_tokens=1_000_000,
+            max_output_tokens=128_000,
+            wall_time_sec=60,
+        )
+
+    sources = [
+        {
+            "tier": "backend",
+            "language": "python",
+            "label": "checkout.py",
+            "code": "def checkout():\n    return True\n",
+        }
+    ]
+    first_budget = budget()
+    first_state = agent_flow.FlowAttemptState()
+    with patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk}):
+        async with use_attempt_callbacks(callbacks_for(first_budget)):
+            first = await agent_flow.analyze_flow_via_agent_sdk(
+                entry="checkout",
+                sources=sources,
+                run_budget=first_budget,
+                attempt_state=first_state,
+                operation_id=operation_namespace,
+                semantic_binding_identity=binding,
+            )
+    assert first is not None
+    assert first_state.result_status == ResultStatus.PENDING
+
+    # No classify call: this is the exact crash window between terminal
+    # candidate commit and consumer publication/classification.
+    retry_budget = budget()
+    retry_state = agent_flow.FlowAttemptState()
+    with patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk}):
+        async with use_attempt_callbacks(callbacks_for(retry_budget)):
+            replayed = await agent_flow.analyze_flow_via_agent_sdk(
+                entry="checkout",
+                sources=sources,
+                run_budget=retry_budget,
+                attempt_state=retry_state,
+                operation_id=operation_namespace,
+                semantic_binding_identity=binding,
+            )
+    assert replayed == first
+    assert dispatches == 1
+    assert retry_budget.calls_started == 0
+    assert retry_state.attempt_id == first_state.attempt_id
+    assert retry_state.result_status == ResultStatus.PENDING
+    assert retry_state.attempt_id is not None
+    async with factory() as session:
+        await classify_attempt_result(
+            session,
+            attempt_id=retry_state.attempt_id,
+            result_status=ResultStatus.ACCEPTED,
+        )
+
+    changed_budget = budget()
+    with patch.dict(sys.modules, {"claude_agent_sdk": fake_sdk}):
+        async with use_attempt_callbacks(callbacks_for(changed_budget)):
+            with pytest.raises(LLMSemanticCandidateUnavailable):
+                await agent_flow.analyze_flow_via_agent_sdk(
+                    entry="checkout",
+                    sources=sources,
+                    run_budget=changed_budget,
+                    operation_id=operation_namespace,
+                    semantic_binding_identity=fingerprint_input("changed-binding"),
+                )
+    assert dispatches == 1
+    assert changed_budget.calls_started == 0
+    async with factory() as session:
+        rows = (await session.execute(select(LLMCall))).scalars().all()
+        candidates = (
+            await session.execute(select(LLMSemanticCandidate))
+        ).scalars().all()
+    assert len(rows) == 1
+    assert len(candidates) == 1
+    assert rows[0].result_status == ResultStatus.ACCEPTED.value
+    assert candidates[0].candidate_status == "accepted"
+    await engine.dispose()
 
 @pytest.mark.asyncio
 async def test_snapshot_source_loader_rejects_host_paths_and_pins_run(monkeypatch):
@@ -1170,6 +2156,67 @@ async def test_snapshot_source_loader_rejects_host_paths_and_pins_run(monkeypatc
         "input[1]:invalid_project_path",
         "input[2]:invalid_project_path",
     ]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_source_loader_dedupes_normalized_paths_before_dispatch(
+    monkeypatch,
+):
+    from app.api import flow as flow_api
+    from app.extractor.agent_flow import _pack_flow_sources
+    from app.source_snapshot import GitSourceSnapshot
+
+    project_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    revision = "e" * 40
+    snapshot = GitSourceSnapshot(
+        run_id=run_id,
+        revision=revision,
+        mirrors=(),
+        tree_prefix="",
+    )
+    reads: list[str] = []
+
+    async def fake_read_project_file(_db, **kwargs):  # noqa: ANN001, ANN003
+        reads.append(kwargs["file_path"])
+        return {
+            "run_id": str(run_id),
+            "revision": revision,
+            "path": kwargs["file_path"],
+            "encoding": "utf-8",
+            "content": "export function checkout() { return true; }\n",
+        }
+
+    monkeypatch.setattr(flow_api, "read_project_file", fake_read_project_file)
+    sources, skipped = await flow_api._load_snapshot_sources(
+        object(),
+        project_id=project_id,
+        snapshot=snapshot,
+        project_paths=[
+            "frontend/app.ts",
+            "./frontend/app.ts",
+            "frontend\\app.ts",
+        ],
+        max_file_bytes=1_000,
+    )
+    _packed, source_scope = _pack_flow_sources(
+        sources,
+        max_total_chars=1_000,
+    )
+
+    assert reads == ["frontend/app.ts"]
+    assert [source["label"] for source in sources] == ["frontend/app.ts"]
+    assert skipped == [
+        "frontend/app.ts:duplicate_source_path",
+        "frontend/app.ts:duplicate_source_path",
+    ]
+    assert source_scope["provided_files"] == ["frontend/app.ts"]
+    assert [item["label"] for item in source_scope["files"]] == [
+        "frontend/app.ts"
+    ]
+    assert len(set(source_scope["provided_files"])) == len(
+        source_scope["provided_files"]
+    )
 
 
 def test_flow_level_is_above_l3():

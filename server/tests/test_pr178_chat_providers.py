@@ -1,7 +1,7 @@
 """PR-178/179 — Chat provider selection logic.
 
-The operator picks which AI answers: OpenAI, Gemini, Claude Code
-(subscription/API) or Atlas (hansol ai). The availability/selection
+The operator picks which AI answers: OpenAI, Gemini, bounded Anthropic API,
+or Atlas (hansol ai). The availability/selection
 helpers are pure functions over a resolved config dict, so these run in
 CI with no DB and no real LLM call.
 """
@@ -32,11 +32,10 @@ def test_labels_name_the_four_ais():
     assert "Claude" in labels["claudecode"]
 
 
-def test_openai_available_with_key(monkeypatch):
-    monkeypatch.setattr(lp, "is_agent_sdk_available", lambda: False)
+def test_openai_available_with_key():
     cfg = _cfg(openai={"api_key": "sk-x"})
     assert lp.is_provider_available("openai", cfg) is True
-    # claudecode has no key + no subscription → first available is openai.
+    # claudecode has no API key → first available is openai.
     assert lp.default_provider(cfg) == "openai"
 
 
@@ -44,14 +43,21 @@ def test_gemini_available_with_key():
     assert lp.is_provider_available("gemini", _cfg(gemini={"api_key": "g"})) is True
 
 
-def test_atlas_needs_key_agent_and_base_url():
-    # Atlas (hansol agent API) needs an API key, an agent ID, and a base URL.
+def test_atlas_generation_remains_unavailable_even_when_configured():
+    # Persisted Atlas settings are retained for a future provider contract,
+    # but credentials cannot substitute for a provider-enforced token/cost
+    # receipt. Generation therefore remains fail-disabled.
     assert lp.is_provider_available("atlas", _cfg(atlas={"api_key": "a"})) is False
     assert lp.is_provider_available(
         "atlas", _cfg(atlas={"api_key": "a", "base_url": "https://x/v1"})
-    ) is False  # agent ID missing
+    ) is False
     cfg = _cfg(atlas={"api_key": "a", "agent_id": "ag-1", "base_url": "https://x/v1"})
-    assert lp.is_provider_available("atlas", cfg) is True
+    assert lp.is_provider_available("atlas", cfg) is False
+    capability = lp.output_token_limit_capability("atlas", cfg)
+    assert capability == {
+        "output_token_limit_enforcement": "unsupported",
+        "output_token_limit_detail": lp.ATLAS_GENERATION_DISABLED_REASON,
+    }
 
 
 def test_claudecode_available_with_key():
@@ -60,9 +66,19 @@ def test_claudecode_available_with_key():
     assert lp.default_provider(cfg) == "claudecode"
 
 
-def test_claudecode_uses_subscription_when_no_key(monkeypatch):
-    monkeypatch.setattr(lp, "is_agent_sdk_available", lambda: True)
-    assert lp.is_provider_available("claudecode", _cfg()) is True
+def test_claudecode_legacy_subscription_mode_is_not_advertised():
+    cfg = _cfg(claudecode={"api_key": "sk-ant", "mode": "subscription"})
+    assert lp.is_provider_available("claudecode", cfg) is False
+
+
+def test_claudecode_has_no_agent_sdk_availability_path():
+    assert not hasattr(lp, "is_agent_sdk_available")
+    assert not hasattr(lp, "_claude_subscription")
+    assert lp.is_provider_available("claudecode", _cfg()) is False
+    provider = next(
+        item for item in lp.available_providers(_cfg()) if item["id"] == "claudecode"
+    )
+    assert "API 키 필수" in provider["label"]
 
 
 def test_default_prefers_claudecode_when_multiple():
@@ -70,8 +86,7 @@ def test_default_prefers_claudecode_when_multiple():
     assert lp.default_provider(cfg) == "claudecode"
 
 
-def test_nothing_configured(monkeypatch):
-    monkeypatch.setattr(lp, "is_agent_sdk_available", lambda: False)
+def test_nothing_configured():
     cfg = _cfg()
     assert lp.any_provider_available(cfg) is False
     assert all(not p["available"] for p in lp.available_providers(cfg))
@@ -97,6 +112,6 @@ def test_secret_label_maps_claudecode_to_anthropic():
 
 
 def test_suggested_models_are_current():
-    assert "gpt-4o" in lp.SUGGESTED_MODELS["openai"]
+    assert lp.SUGGESTED_MODELS["openai"] == ["gpt-4o-2024-11-20"]
     assert any("gemini" in m for m in lp.SUGGESTED_MODELS["gemini"])
     assert any("claude" in m for m in lp.SUGGESTED_MODELS["claudecode"])

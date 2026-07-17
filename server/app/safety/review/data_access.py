@@ -62,6 +62,7 @@ async def run(
                     Node.valid_to.is_(None),
                     Node.id.ilike(f"%.{table.lower()}"),
                 )
+                .order_by(Node.id)
                 .limit(1)
             )
         ).scalar_one_or_none()

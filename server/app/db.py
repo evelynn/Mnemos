@@ -1,4 +1,5 @@
 from sqlalchemy import event
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -22,6 +23,15 @@ _settings = get_settings()
 _engine_kwargs: dict = {"pool_pre_ping": True, "future": True}
 if (_settings.mnemos_env or "").lower() == "test":
     _engine_kwargs = {"poolclass": NullPool, "future": True}
+# The atomic project-dollar reservation serializes writers and then reads the
+# rolling exposure in the same transaction. That proof requires PostgreSQL's
+# statement-fresh READ COMMITTED snapshots; REPEATABLE READ can retain a
+# snapshot taken before an advisory-lock wait and miss the preceding writer's
+# newly committed reservation. Pin every application connection explicitly
+# instead of inheriting a cluster/role default. SQLite uses a different set
+# of isolation-level names and remains on its native transaction policy.
+if make_url(_settings.database_url).get_backend_name() == "postgresql":
+    _engine_kwargs["isolation_level"] = "READ COMMITTED"
 engine = create_async_engine(_settings.database_url, **_engine_kwargs)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 

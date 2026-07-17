@@ -1,10 +1,11 @@
 """PR-178/179 — multi-provider LLM backend for the Chat tab.
 
-The operator picks which AI answers a chat message: OpenAI, Gemini, Claude
-Code, or Atlas (hansol ai). Claude runs on the local Claude Code
-subscription by default (no key); Atlas is the hansol agent API (key +
-agent ID, two-step session call). Each provider's config is resolved per
-request from two sources, DB first then env:
+The operator picks which AI answers a chat message: OpenAI, Gemini, Claude,
+or Atlas (hansol ai). Ordinary Claude chat requires an Anthropic API key;
+the local Agent SDK is not advertised as a key-free provider because it has
+neither positive billing provenance nor a per-request output cap. Atlas is
+the hansol agent API (key + agent ID, two-step session call). Each provider's
+config is resolved per request from two sources, DB first then env:
 
   1. Platform-provisioned DB config: keys in the encrypted ``Secret`` table
      (label ``chat-provider:<suffix>``), models / agent / base_url / mode in
@@ -15,7 +16,9 @@ request from two sources, DB first then env:
 ``resolve_config(db)`` returns ``{provider: {api_key, model, base_url}}``;
 the availability/dispatch helpers take that config (they never read env or
 DB themselves, which keeps them pure and testable). Calls go over HTTP
-(httpx) — no provider SDKs except ``anthropic`` for the Claude direct API.
+(``httpx``), except for the direct ``anthropic`` client.  Chat deliberately
+does not fall back to the Claude Agent SDK: that route has neither a
+provider-enforced output cap nor independently attested billing provenance.
 ``provider_chat`` returns the markdown reply or ``None`` (never raises).
 """
 
@@ -25,14 +28,51 @@ import asyncio
 import json
 import logging
 import os
-from urllib.parse import urlparse
+import re
+import uuid
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from time import monotonic
+from typing import Any
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.extractor.agent_sdk import is_agent_sdk_available
 from app.extractor.cost import LLMRunBudget, RunBudgetExceeded
+from app.llm.contracts import (
+    AttemptKind,
+    AttemptStatus,
+    LLMUsageContractError,
+    LLMUsageV1,
+    ResultStatus,
+    UsageSource,
+    normalize_anthropic_usage,
+    normalize_gemini_usage,
+    normalize_openai_chat_usage,
+    unavailable_usage,
+)
+from app.llm.lifecycle import (
+    AttemptOutcome,
+    AttemptReplayState,
+    AttemptStartMetadata,
+    AttemptTicket,
+    CandidateNormalizer,
+    LLMAttemptReplayBlocked,
+    LLMLifecycleError,
+    LLMSemanticCandidateCorrupt,
+    PRICE_ATTESTATION_MODEL_MISMATCH,
+    SemanticCandidate,
+    SemanticCandidateReplayRequest,
+    fingerprint_input,
+    require_attempt_callbacks,
+)
+from app.llm.pricing import (
+    OFFICIAL_ANTHROPIC_API_BASE_URL,
+    OFFICIAL_GEMINI_GENERATE_API_BASE_URL,
+    OFFICIAL_OPENAI_CHAT_API_BASE_URL,
+    is_price_attested_openai_chat_base_url,
+)
 from app.models.auth import PlatformSetting, Secret
 from app.safety.crypto import decrypt
 
@@ -42,14 +82,175 @@ _MAX_TOKENS = 3000
 _SUBSCRIPTION_CHARS_PER_TOKEN = 8
 _HTTP_JSON_OVERHEAD_BYTES = 64 * 1024
 _ATLAS_SESSION_RESPONSE_MAX_BYTES = 32 * 1024
-
-
-class _SubscriptionOutputTooLarge(RuntimeError):
-    """The SDK streamed beyond Mnemos's finite client-side output ceiling."""
+ATLAS_GENERATION_DISABLED_REASON = (
+    "atlas_generation_disabled_missing_provider_budget_contract"
+)
 
 
 class _ProviderResponseTooLarge(RuntimeError):
     """A provider response exceeded Mnemos's finite client-side byte ceiling."""
+
+
+class ChatSemanticContractError(ValueError):
+    """A provider reply cannot become a bounded Chat semantic candidate."""
+
+    result_status = ResultStatus.SCHEMA_REJECTED
+
+
+@dataclass(frozen=True, slots=True)
+class ChatSemanticCodec:
+    """Consumer-owned contract at the provider-to-product boundary.
+
+    The adapter never stores raw provider text. It asks the owning Chat
+    surface to parse and normalize that text, atomically commits the resulting
+    encrypted candidate with the physical attempt, and can render the same
+    canonical candidate after a crash without another provider dispatch.
+    """
+
+    contract_name: str
+    binding_fingerprint: str
+    normalize_response: Callable[[str], Mapping[str, Any]]
+    normalizer: CandidateNormalizer
+    render_candidate: Callable[[Mapping[str, Any]], str]
+    parse_failure_code: str
+    schema_failure_code: str
+
+    def __post_init__(self) -> None:
+        contract_pattern = re.compile(r"[a-z0-9][a-z0-9._-]{2,95}\Z")
+        digest_pattern = re.compile(r"[0-9a-f]{64}\Z")
+        failure_pattern = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+        if (
+            not isinstance(self.contract_name, str)
+            or contract_pattern.fullmatch(self.contract_name) is None
+        ):
+            raise ChatSemanticContractError(
+                "chat semantic codec contract name is invalid"
+            )
+        if (
+            not isinstance(self.binding_fingerprint, str)
+            or digest_pattern.fullmatch(self.binding_fingerprint) is None
+        ):
+            raise ChatSemanticContractError(
+                "chat semantic codec binding is invalid"
+            )
+        if not all(
+            callable(callback)
+            for callback in (
+                self.normalize_response,
+                self.normalizer,
+                self.render_candidate,
+            )
+        ):
+            raise ChatSemanticContractError(
+                "chat semantic codec callbacks are invalid"
+            )
+        if any(
+            not isinstance(code, str)
+            or failure_pattern.fullmatch(code) is None
+            for code in (
+                self.parse_failure_code,
+                self.schema_failure_code,
+            )
+        ):
+            raise ChatSemanticContractError(
+                "chat semantic codec failure code is invalid"
+            )
+
+
+_CHAT_ANSWER_CONTRACT = "mnemos.chat.answer.v1"
+
+
+def normalize_chat_answer_candidate(
+    payload: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Return the sole canonical free-form Chat answer representation."""
+
+    if not isinstance(payload, Mapping) or set(payload) != {"contract", "reply"}:
+        raise ChatSemanticContractError(
+            "chat answer candidate must have the exact contract shape"
+        )
+    if payload.get("contract") != _CHAT_ANSWER_CONTRACT:
+        raise ChatSemanticContractError(
+            "chat answer candidate contract does not match"
+        )
+    reply = payload.get("reply")
+    if not isinstance(reply, str):
+        raise ChatSemanticContractError("chat answer candidate reply must be text")
+    canonical_reply = reply.strip()
+    if not canonical_reply:
+        raise ChatSemanticContractError("chat answer candidate reply is empty")
+    return {
+        "contract": _CHAT_ANSWER_CONTRACT,
+        "reply": canonical_reply,
+    }
+
+
+def _build_chat_answer_candidate(text: str) -> Mapping[str, Any]:
+    return normalize_chat_answer_candidate(
+        {"contract": _CHAT_ANSWER_CONTRACT, "reply": text}
+    )
+
+
+def _render_chat_answer_candidate(payload: Mapping[str, Any]) -> str:
+    canonical = normalize_chat_answer_candidate(payload)
+    return str(canonical["reply"])
+
+
+def chat_answer_semantic_codec(*binding_parts: str) -> ChatSemanticCodec:
+    """Build a stable answer codec bound to consumer-owned input identity."""
+
+    if not binding_parts:
+        raise ValueError("chat answer semantic binding requires input identity")
+    return ChatSemanticCodec(
+        contract_name=_CHAT_ANSWER_CONTRACT,
+        binding_fingerprint=fingerprint_input(
+            "mnemos.chat.answer.binding.v1",
+            *binding_parts,
+        ),
+        normalize_response=_build_chat_answer_candidate,
+        normalizer=normalize_chat_answer_candidate,
+        render_candidate=_render_chat_answer_candidate,
+        parse_failure_code="chat_answer_parse_rejected",
+        schema_failure_code="chat_answer_schema_rejected",
+    )
+
+
+@dataclass(slots=True)
+class ChatProviderAttemptState:
+    """Safe bridge from one provider candidate to its Chat consumer.
+
+    Provider payload text remains the existing return value.  Only the durable
+    attempt identity crosses into ``chat.py`` so rewrite parsing or final
+    answer acceptance can classify the already-finalized transport result.
+    """
+
+    attempt_id: uuid.UUID | None = None
+    consumer_result_status: ResultStatus | None = None
+    consumer_failure_code: str | None = None
+
+
+@dataclass(slots=True)
+class _ProviderObservation:
+    """Canonical, payload-free metadata for one provider response."""
+
+    usage: LLMUsageV1
+    attempt_status: AttemptStatus = AttemptStatus.COMPLETED
+    result_status: ResultStatus = ResultStatus.PENDING
+    resolved_model: str | None = None
+    provider_request_id: str | None = None
+    failure_code: str | None = None
+    finish_reason: str | None = None
+
+
+def _safe_provider_string(value: object, *, maximum: int) -> str | None:
+    """Return bounded provider metadata without logging or coercing it."""
+
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or len(candidate) > maximum:
+        return None
+    return candidate
 
 
 def _provider_input_reservation(system: str, prompt: str) -> int:
@@ -61,26 +262,123 @@ def _provider_input_reservation(system: str, prompt: str) -> int:
     belongs in the physical-call ledger and never overwrites this estimate.
     """
 
-    return max(1, len(system.encode("utf-8")) + len(prompt.encode("utf-8")) + 16)
+    return max(
+        1,
+        len(system.encode("utf-8"))
+        + len(prompt.encode("utf-8"))
+        + 256,
+    )
 
 
-def _reserve_provider_attempt(
-    run_budget: LLMRunBudget | None,
+def _bound_provider_operation_id(
+    namespace: uuid.UUID,
     *,
+    provider: str,
+    model: str,
+    route_fingerprint: str,
+    requested_max_output_tokens: int,
     system: str,
     prompt: str,
-    timeout_s: int,
+) -> uuid.UUID:
+    """Bind a stable consumer namespace to the complete provider request.
+
+    ``route_fingerprint`` is a one-way digest of non-secret endpoint/agent
+    configuration.  API keys are intentionally excluded so ordinary key
+    rotation does not invalidate an otherwise identical logical route.
+    """
+
+    return uuid.uuid5(
+        namespace,
+        "\x00".join(
+            (
+                provider,
+                model,
+                route_fingerprint,
+                str(requested_max_output_tokens),
+                fingerprint_input(system, prompt),
+            )
+        ),
+    )
+
+
+_PROVIDER_DISPATCH_NONCE = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderDispatchCapability:
+    """Module-private guard against accidental leaf calls before STARTED.
+
+    This is not a security boundary against intentionally malicious code in
+    the same Python process; such code can already monkeypatch/import private
+    internals. Public routes cannot supply callbacks or this capability.
+    """
+
+    attempt_id: uuid.UUID
+    provider: str
+    input_fingerprint: str
+    requested_max_output_tokens: int
+    deadline_monotonic: float
+    _nonce: object
+
+
+def _issue_provider_dispatch_capability(
+    ticket: AttemptTicket,
+    *,
+    provider: str,
+    system: str,
+    prompt: str,
+    timeout_s: float,
+    requested_max_output_tokens: int,
+) -> _ProviderDispatchCapability:
+    """Mint the leaf-network capability only from a durable start ticket."""
+
+    if (
+        not isinstance(ticket, AttemptTicket)
+        or not isinstance(ticket.attempt_id, uuid.UUID)
+        or provider not in {"openai", "gemini", "anthropic", "atlas"}
+        or timeout_s <= 0
+        or requested_max_output_tokens <= 0
+    ):
+        raise LLMLifecycleError("provider dispatch capability is invalid")
+    return _ProviderDispatchCapability(
+        attempt_id=ticket.attempt_id,
+        provider=provider,
+        input_fingerprint=fingerprint_input(system, prompt),
+        requested_max_output_tokens=requested_max_output_tokens,
+        deadline_monotonic=monotonic() + timeout_s,
+        _nonce=_PROVIDER_DISPATCH_NONCE,
+    )
+
+
+def _authorized_provider_timeout(
+    capability: _ProviderDispatchCapability,
+    *,
+    provider: str,
+    system: str,
+    prompt: str,
+    timeout_s: float,
     requested_max_output_tokens: int,
 ) -> float:
-    """Reserve one observable network/SDK attempt and return its timeout."""
+    """Validate exact authorized request facts at the physical leaf."""
 
-    if run_budget is None:
-        return float(timeout_s)
-    remaining = run_budget.reserve(
-        _provider_input_reservation(system, prompt),
-        requested_output_tokens=requested_max_output_tokens,
-    )
-    return max(0.001, min(float(timeout_s), remaining))
+    if not isinstance(capability, _ProviderDispatchCapability):
+        raise LLMLifecycleError(
+            "provider network dispatch lacks a STARTED capability"
+        )
+    remaining = capability.deadline_monotonic - monotonic()
+    if (
+        capability._nonce is not _PROVIDER_DISPATCH_NONCE
+        or capability.provider != provider
+        or capability.input_fingerprint != fingerprint_input(system, prompt)
+        or capability.requested_max_output_tokens
+        != requested_max_output_tokens
+    ):
+        raise LLMLifecycleError(
+            "provider network dispatch lacks a valid STARTED capability"
+        )
+    if remaining <= 0:
+        raise TimeoutError("provider dispatch capability deadline expired")
+    return min(float(timeout_s), remaining)
 
 
 def _provider_response_max_bytes(max_output_tokens: int) -> int:
@@ -101,6 +399,7 @@ async def _post_json_bounded(
     url: str,
     *,
     max_bytes: int,
+    timeout_s: float,
     headers: dict[str, str],
     payload: dict,
 ) -> dict:
@@ -109,29 +408,38 @@ async def _post_json_bounded(
     ``httpx.post`` buffers the entire body before returning.  Streaming here
     makes the byte ceiling a memory boundary rather than a check performed
     after an arbitrarily large provider response has already been allocated.
+    HTTPX read timeouts reset after each chunk, so an outer asyncio deadline
+    also bounds a slow-drip response's total wall time.
     """
 
-    async with client.stream("POST", url, headers=headers, json=payload) as response:
-        response.raise_for_status()
-        raw_length = response.headers.get("content-length")
-        if raw_length:
-            try:
-                if int(raw_length) > max_bytes:
+    async with asyncio.timeout(timeout_s):
+        async with client.stream(
+            "POST",
+            url,
+            headers=headers,
+            json=payload,
+            timeout=timeout_s,
+        ) as response:
+            response.raise_for_status()
+            raw_length = response.headers.get("content-length")
+            if raw_length:
+                try:
+                    if int(raw_length) > max_bytes:
+                        raise _ProviderResponseTooLarge(
+                            f"provider response exceeded {max_bytes} bytes"
+                        )
+                except ValueError:
+                    # Invalid transport metadata is ignored; the streamed byte
+                    # counter below remains authoritative.
+                    pass
+
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                if len(body) + len(chunk) > max_bytes:
                     raise _ProviderResponseTooLarge(
                         f"provider response exceeded {max_bytes} bytes"
                     )
-            except ValueError:
-                # Invalid transport metadata is ignored; the streamed byte
-                # counter below remains authoritative.
-                pass
-
-        body = bytearray()
-        async for chunk in response.aiter_bytes():
-            if len(body) + len(chunk) > max_bytes:
-                raise _ProviderResponseTooLarge(
-                    f"provider response exceeded {max_bytes} bytes"
-                )
-            body.extend(chunk)
+                body.extend(chunk)
 
     decoded = json.loads(body)
     if not isinstance(decoded, dict):
@@ -148,9 +456,10 @@ def _openai_output_limit_field(*, base_url: str, model: str) -> str:
     current contract.
     """
 
-    host = (urlparse(base_url).hostname or "").casefold()
     model_name = model.casefold().rsplit("/", 1)[-1]
-    if host == "api.openai.com" or model_name.startswith(("o1", "o3", "o4", "gpt-5")):
+    if is_price_attested_openai_chat_base_url(base_url) or model_name.startswith(
+        ("o1", "o3", "o4", "gpt-5")
+    ):
         return "max_completion_tokens"
     return "max_tokens"
 
@@ -162,7 +471,7 @@ SECRET_KIND = "llm_api_key"
 
 PROVIDER_ORDER = ["claudecode", "openai", "gemini", "atlas"]
 PROVIDER_LABELS = {
-    "claudecode": "Claude Code (구독/API)",
+    "claudecode": "Claude (Anthropic API 키 필수)",
     "openai": "OpenAI",
     "gemini": "Gemini",
     "atlas": "Atlas (hansol ai)",
@@ -175,7 +484,7 @@ _KEY_SUFFIX = {
     "claudecode": "anthropic",
 }
 _DEFAULT_MODEL = {
-    "openai": "gpt-4o",
+    "openai": "gpt-4o-2024-11-20",
     "gemini": "gemini-2.5-flash",
     "atlas": "",
     "claudecode": "claude-sonnet-4-6",
@@ -184,7 +493,7 @@ _DEFAULT_MODEL = {
 # The free-text field and the live "test" model fetch both override these,
 # so a stale entry here never blocks a newer model.
 SUGGESTED_MODELS = {
-    "openai": ["gpt-4o", "gpt-4o-mini", "gpt-5.4", "o3"],
+    "openai": ["gpt-4o-2024-11-20"],
     "gemini": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.5-flash", "gemini-2.0-flash"],
     "claudecode": ["claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5-20251001"],
     "atlas": [],
@@ -210,7 +519,7 @@ async def resolve_config(db: AsyncSession) -> dict[str, dict]:
     cfg["openai"].update(
         api_key=_env("OPENAI_API_KEY"),
         model=_env("OPENAI_MODEL"),
-        base_url="https://api.openai.com/v1",
+        base_url=OFFICIAL_OPENAI_CHAT_API_BASE_URL,
     )
     cfg["gemini"].update(
         api_key=_env("GEMINI_API_KEY"),
@@ -239,9 +548,11 @@ async def resolve_config(db: AsyncSession) -> dict[str, dict]:
             cfg[pid]["base_url"] = s["base_url"]
         if pid == "atlas" and s.get("agent_id"):
             cfg[pid]["agent_id"] = s["agent_id"]
-    # Claude runs on the local Claude Code subscription by default; "api"
-    # switches it to the direct Anthropic API (which needs a key).
-    cfg["claudecode"]["mode"] = (saved.get("claudecode") or {}).get("mode") or "subscription"
+    # ``subscription`` is retained only as a legacy stored value. Chat never
+    # dispatches it; ``api`` is the sole supported Claude Chat route.
+    cfg["claudecode"]["mode"] = (
+        (saved.get("claudecode") or {}).get("mode") or "api"
+    )
 
     # Secret: API-key overrides (encrypted at rest).
     by_suffix = {v: k for k, v in _KEY_SUFFIX.items()}
@@ -288,9 +599,15 @@ async def resolve_config(db: AsyncSession) -> dict[str, dict]:
 def is_provider_available(provider: str, cfg: dict[str, dict]) -> bool:
     c = cfg.get(provider) or {}
     if provider == "claudecode":
-        return bool(c.get("api_key")) or is_agent_sdk_available()
+        # Importability is not an auth/cost attestation. Claude Chat is the
+        # bounded direct Messages API only.
+        return bool(c.get("api_key")) and (c.get("mode") or "api") == "api"
     if provider == "atlas":
-        return bool(c.get("api_key") and c.get("agent_id") and c.get("base_url"))
+        # The current public-agent contract exposes no provider-enforced
+        # output-token cap, immutable price, usage, resolved model, or request
+        # receipt. A client byte ceiling cannot bound work already generated
+        # provider-side, so generation remains fail-disabled.
+        return False
     if provider in ("openai", "gemini"):
         return bool(c.get("api_key"))
     return False
@@ -299,19 +616,16 @@ def is_provider_available(provider: str, cfg: dict[str, dict]) -> bool:
 def output_token_limit_capability(provider: str, cfg: dict[str, dict]) -> dict:
     """Describe whether ``max_output_tokens`` survives the selected path.
 
-    OpenAI, Gemini, and the direct Anthropic API expose a request field.  The
-    Claude subscription SDK and Atlas public-agent endpoint do not, so Mnemos
-    enforces conservative client byte/character ceilings and rejects the
-    whole response on overflow.  Claude's provider id can fall back between
-    direct and subscription modes, so API-key configurations are labelled
-    ``partial``.
+    OpenAI, Gemini, and the direct Anthropic API expose a request field. Atlas
+    does not, so its logical two-POST route has bounded client-side response
+    bytes/characters but no claimed provider generation cap.
     """
 
     if provider == "openai":
         c = cfg.get(provider) or {}
         field = _openai_output_limit_field(
-            base_url=c.get("base_url") or "https://api.openai.com/v1",
-            model=c.get("model") or "gpt-4o",
+            base_url=c.get("base_url") or OFFICIAL_OPENAI_CHAT_API_BASE_URL,
+            model=c.get("model") or "gpt-4o-2024-11-20",
         )
         return {
             "output_token_limit_enforcement": "provider",
@@ -324,21 +638,19 @@ def output_token_limit_capability(provider: str, cfg: dict[str, dict]) -> dict:
         }
     if provider == "atlas":
         return {
-            "output_token_limit_enforcement": "client",
-            "output_token_limit_detail": "atlas_client_byte_and_character_ceiling",
+            "output_token_limit_enforcement": "unsupported",
+            "output_token_limit_detail": ATLAS_GENERATION_DISABLED_REASON,
         }
     if provider == "claudecode":
         c = cfg.get(provider) or {}
-        if c.get("api_key"):
+        if c.get("api_key") and (c.get("mode") or "api") == "api":
             return {
-                "output_token_limit_enforcement": "partial",
-                "output_token_limit_detail": (
-                    "anthropic_api_token_field_or_subscription_client_char_ceiling"
-                ),
+                "output_token_limit_enforcement": "provider",
+                "output_token_limit_detail": "anthropic_messages_max_tokens",
             }
         return {
-            "output_token_limit_enforcement": "client",
-            "output_token_limit_detail": ("claude_subscription_sdk_client_char_ceiling"),
+            "output_token_limit_enforcement": "unsupported",
+            "output_token_limit_detail": "anthropic_api_mode_and_key_required",
         }
     return {
         "output_token_limit_enforcement": "unsupported",
@@ -377,16 +689,18 @@ async def _openai_compatible(
     model: str,
     system: str,
     prompt: str,
-    timeout_s: int,
+    timeout_s: float,
     max_output_tokens: int,
-    run_budget: LLMRunBudget | None = None,
+    _dispatch: _ProviderDispatchCapability,
+    _observation: _ProviderObservation | None = None,
 ) -> str | None:
     """A /chat/completions call in the OpenAI wire format — serves both
     OpenAI proper and any OpenAI-compatible endpoint (Atlas)."""
     url = base_url.rstrip("/") + "/chat/completions"
     output_limit_field = _openai_output_limit_field(base_url=base_url, model=model)
-    attempt_timeout = _reserve_provider_attempt(
-        run_budget,
+    attempt_timeout = _authorized_provider_timeout(
+        _dispatch,
+        provider="openai",
         system=system,
         prompt=prompt,
         timeout_s=timeout_s,
@@ -397,6 +711,7 @@ async def _openai_compatible(
             client,
             url,
             max_bytes=_provider_response_max_bytes(max_output_tokens),
+            timeout_s=attempt_timeout,
             headers={"Authorization": f"Bearer {api_key}"},
             payload={
                 "model": model,
@@ -407,10 +722,81 @@ async def _openai_compatible(
                 ],
             },
         )
+        try:
+            resolved_model = _safe_provider_string(
+                response.get("model"), maximum=255
+            )
+            if _observation is not None:
+                _observation.resolved_model = resolved_model
+                _observation.provider_request_id = _safe_provider_string(
+                    response.get("id"), maximum=255
+                )
+            if (
+                _observation is not None
+                and
+                is_price_attested_openai_chat_base_url(base_url)
+                and resolved_model != model
+            ):
+                if _observation is not None:
+                    _observation.result_status = ResultStatus.NOT_APPLICABLE
+                    _observation.failure_code = PRICE_ATTESTATION_MODEL_MISMATCH
+                return None
+            usage = normalize_openai_chat_usage(response)
+        except LLMUsageContractError:
+            if _observation is not None:
+                _observation.result_status = ResultStatus.NOT_APPLICABLE
+                _observation.failure_code = "chat_usage_contract_invalid"
+            return None
+        if _observation is not None:
+            _observation.usage = usage
         choices = response.get("choices") or []
         if not choices:
+            if _observation is not None:
+                _observation.result_status = ResultStatus.EMPTY
+                _observation.failure_code = "chat_empty_response"
             return None
-        return (choices[0].get("message", {}).get("content") or "").strip() or None
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            if _observation is not None:
+                _observation.result_status = ResultStatus.SCHEMA_REJECTED
+                _observation.failure_code = "chat_response_schema_invalid"
+            return None
+        finish_reason = _safe_provider_string(
+            choice.get("finish_reason"), maximum=64
+        )
+        if _observation is not None:
+            _observation.finish_reason = finish_reason
+        if finish_reason == "length":
+            if _observation is not None:
+                _observation.result_status = ResultStatus.OUTPUT_LIMIT_REJECTED
+                _observation.failure_code = "chat_output_limit"
+            log.warning("chat: OpenAI-compatible provider hit its output limit")
+            return None
+        if finish_reason != "stop":
+            if _observation is not None:
+                _observation.result_status = ResultStatus.NOT_APPLICABLE
+                _observation.failure_code = "chat_finish_reason_invalid"
+            log.warning("chat: OpenAI-compatible provider rejected terminal result")
+            return None
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            if _observation is not None:
+                _observation.result_status = ResultStatus.SCHEMA_REJECTED
+                _observation.failure_code = "chat_response_schema_invalid"
+            return None
+        content = message.get("content")
+        if not isinstance(content, str):
+            if _observation is not None:
+                _observation.result_status = ResultStatus.SCHEMA_REJECTED
+                _observation.failure_code = "chat_response_schema_invalid"
+            return None
+        text = content.strip()
+        if not text:
+            if _observation is not None:
+                _observation.result_status = ResultStatus.EMPTY
+                _observation.failure_code = "chat_empty_response"
+            return None
+        return text
 
 
 async def _gemini_generate(
@@ -419,15 +805,20 @@ async def _gemini_generate(
     model: str,
     system: str,
     prompt: str,
-    timeout_s: int,
+    timeout_s: float,
     max_output_tokens: int,
-    run_budget: LLMRunBudget | None = None,
+    _dispatch: _ProviderDispatchCapability,
+    _observation: _ProviderObservation | None = None,
 ) -> str | None:
     # Auth via the x-goog-api-key header (current docs) — never the ?key=
     # query param, so the key never lands in a URL/log.
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    attempt_timeout = _reserve_provider_attempt(
-        run_budget,
+    url = (
+        f"{OFFICIAL_GEMINI_GENERATE_API_BASE_URL}/models/"
+        f"{model}:generateContent"
+    )
+    attempt_timeout = _authorized_provider_timeout(
+        _dispatch,
+        provider="gemini",
         system=system,
         prompt=prompt,
         timeout_s=timeout_s,
@@ -438,6 +829,7 @@ async def _gemini_generate(
             client,
             url,
             max_bytes=_provider_response_max_bytes(max_output_tokens),
+            timeout_s=attempt_timeout,
             headers={"x-goog-api-key": api_key},
             payload={
                 "systemInstruction": {"parts": [{"text": system}]},
@@ -445,11 +837,86 @@ async def _gemini_generate(
                 "generationConfig": {"maxOutputTokens": max_output_tokens},
             },
         )
+        try:
+            resolved_model = _safe_provider_string(
+                response.get("modelVersion"), maximum=255
+            )
+            if resolved_model is not None and resolved_model.startswith("models/"):
+                resolved_model = resolved_model.removeprefix("models/")
+            if _observation is not None:
+                _observation.resolved_model = resolved_model
+                _observation.provider_request_id = _safe_provider_string(
+                    response.get("responseId"), maximum=255
+                )
+            if _observation is not None and resolved_model != model:
+                if _observation is not None:
+                    _observation.result_status = ResultStatus.NOT_APPLICABLE
+                    _observation.failure_code = PRICE_ATTESTATION_MODEL_MISMATCH
+                return None
+            usage = normalize_gemini_usage(response)
+        except LLMUsageContractError:
+            if _observation is not None:
+                _observation.result_status = ResultStatus.NOT_APPLICABLE
+                _observation.failure_code = "chat_usage_contract_invalid"
+            return None
+        if _observation is not None:
+            _observation.usage = usage
         cands = response.get("candidates") or []
         if not cands:
+            if _observation is not None:
+                _observation.result_status = ResultStatus.EMPTY
+                _observation.failure_code = "chat_empty_response"
             return None
-        parts = (cands[0].get("content") or {}).get("parts") or []
-        return "".join(p.get("text", "") for p in parts).strip() or None
+        candidate = cands[0]
+        if not isinstance(candidate, dict):
+            if _observation is not None:
+                _observation.result_status = ResultStatus.SCHEMA_REJECTED
+                _observation.failure_code = "chat_response_schema_invalid"
+            return None
+        finish_reason = _safe_provider_string(
+            candidate.get("finishReason"), maximum=64
+        )
+        if _observation is not None:
+            _observation.finish_reason = finish_reason
+        if finish_reason == "MAX_TOKENS":
+            if _observation is not None:
+                _observation.result_status = ResultStatus.OUTPUT_LIMIT_REJECTED
+                _observation.failure_code = "chat_output_limit"
+            log.warning("chat: Gemini hit its output limit")
+            return None
+        if finish_reason != "STOP":
+            if _observation is not None:
+                _observation.result_status = ResultStatus.NOT_APPLICABLE
+                _observation.failure_code = "chat_finish_reason_invalid"
+            log.warning("chat: Gemini returned a rejected terminal result")
+            return None
+        content = candidate.get("content")
+        if not isinstance(content, dict):
+            if _observation is not None:
+                _observation.result_status = ResultStatus.SCHEMA_REJECTED
+                _observation.failure_code = "chat_response_schema_invalid"
+            return None
+        parts = content.get("parts")
+        if not isinstance(parts, list) or not parts:
+            if _observation is not None:
+                _observation.result_status = ResultStatus.SCHEMA_REJECTED
+                _observation.failure_code = "chat_response_schema_invalid"
+            return None
+        texts: list[str] = []
+        for part in parts:
+            if not isinstance(part, dict) or not isinstance(part.get("text"), str):
+                if _observation is not None:
+                    _observation.result_status = ResultStatus.SCHEMA_REJECTED
+                    _observation.failure_code = "chat_response_schema_invalid"
+                return None
+            texts.append(part["text"])
+        text = "".join(texts).strip()
+        if not text:
+            if _observation is not None:
+                _observation.result_status = ResultStatus.EMPTY
+                _observation.failure_code = "chat_empty_response"
+            return None
+        return text
 
 
 async def _atlas_chat(
@@ -459,9 +926,10 @@ async def _atlas_chat(
     agent_id: str,
     system: str,
     prompt: str,
-    timeout_s: int,
+    timeout_s: float,
     requested_max_output_tokens: int,
-    run_budget: LLMRunBudget | None = None,
+    _dispatch: _ProviderDispatchCapability,
+    _observation: _ProviderObservation | None = None,
 ) -> str | None:
     """AI-ATLAS public agent API (hansol). Two steps: create a session, then
     post the message; the reply is ``response.message``. Atlas has no system
@@ -475,40 +943,86 @@ async def _atlas_chat(
     # Atlas requires a remote session before its message endpoint.  Reserve
     # before that external dispatch: this deliberately fails safe if a crash
     # leaves it unclear whether the message was subsequently accepted.
-    attempt_timeout = _reserve_provider_attempt(
-        run_budget,
+    attempt_timeout = _authorized_provider_timeout(
+        _dispatch,
+        provider="atlas",
         system=system,
         prompt=prompt,
         timeout_s=timeout_s,
         requested_max_output_tokens=requested_max_output_tokens,
     )
+    deadline = monotonic() + attempt_timeout
+
+    def _remaining_timeout() -> float | None:
+        remaining = deadline - monotonic()
+        return remaining if remaining > 0 else None
+
     async with httpx.AsyncClient(timeout=attempt_timeout) as client:
+        session_timeout = _remaining_timeout()
+        if session_timeout is None:
+            if _observation is not None:
+                _observation.attempt_status = AttemptStatus.TIMEOUT
+                _observation.result_status = ResultStatus.NOT_APPLICABLE
+                _observation.failure_code = "chat_timeout"
+            return None
         session_response = await _post_json_bounded(
             client,
             f"{base}/agents/{agent_id}/sessions",
             max_bytes=_ATLAS_SESSION_RESPONSE_MAX_BYTES,
+            timeout_s=session_timeout,
             headers=headers,
             payload={"title": "Mnemos"},
         )
-        session_id = session_response.get("id")
-        if not session_id:
+        session_id = _safe_provider_string(
+            session_response.get("id"), maximum=255
+        )
+        if session_id is None:
+            if _observation is not None:
+                _observation.result_status = ResultStatus.SCHEMA_REJECTED
+                _observation.failure_code = "chat_atlas_session_invalid"
             return None
         message = f"{system}\n\n{prompt}" if system else prompt
+        message_timeout = _remaining_timeout()
+        if message_timeout is None:
+            if _observation is not None:
+                _observation.attempt_status = AttemptStatus.TIMEOUT
+                _observation.result_status = ResultStatus.NOT_APPLICABLE
+                _observation.failure_code = "chat_timeout"
+                _observation.usage = unavailable_usage(
+                    lost_after_dispatch=True,
+                    source=UsageSource.PROVIDER_API,
+                )
+            log.warning("chat: Atlas deadline expired before message dispatch")
+            return None
         answer_response = await _post_json_bounded(
             client,
             f"{base}/agents/{agent_id}/sessions/{session_id}/messages",
             max_bytes=_provider_response_max_bytes(requested_max_output_tokens),
+            timeout_s=message_timeout,
             headers=headers,
             payload={"message": message},
         )
         answer = answer_response.get("message")
         if not isinstance(answer, str):
+            if _observation is not None:
+                _observation.result_status = ResultStatus.SCHEMA_REJECTED
+                _observation.failure_code = "chat_response_schema_invalid"
             return None
         if len(answer) > output_char_ceiling:
+            if _observation is not None:
+                _observation.attempt_status = AttemptStatus.FAILED
+                _observation.result_status = ResultStatus.OUTPUT_LIMIT_REJECTED
+                _observation.failure_code = "chat_output_limit"
             raise _ProviderResponseTooLarge(
                 f"Atlas output exceeded {output_char_ceiling} chars"
             )
-        return answer.strip() or None
+        text = answer.strip()
+        if not text:
+            if _observation is not None:
+                _observation.result_status = ResultStatus.EMPTY
+                _observation.failure_code = "chat_empty_response"
+            return None
+        return text
 
 
 async def _claude_api(
@@ -517,133 +1031,106 @@ async def _claude_api(
     model: str | None,
     system: str,
     prompt: str,
-    timeout_s: int,
+    timeout_s: float,
     max_output_tokens: int,
-    run_budget: LLMRunBudget | None = None,
+    _dispatch: _ProviderDispatchCapability,
+    _observation: _ProviderObservation | None = None,
 ) -> str | None:
     """Direct Anthropic API — ~10-30s, far faster than the subprocess."""
-    try:
-        import anthropic  # noqa: PLC0415
+    from app.llm.privacy import enforce_provider_logging_privacy
 
-        client = anthropic.AsyncAnthropic(api_key=api_key)
-        attempt_timeout = _reserve_provider_attempt(
-            run_budget,
+    enforce_provider_logging_privacy()
+    import anthropic  # noqa: PLC0415
+
+    # The SDK defaults to hidden transport retries. Mnemos owns physical
+    # attempt accounting, so one reservation maps to one dispatch.
+    client = anthropic.AsyncAnthropic(
+        api_key=api_key,
+        base_url=OFFICIAL_ANTHROPIC_API_BASE_URL,
+        max_retries=0,
+    )
+    attempt_timeout = _authorized_provider_timeout(
+        _dispatch,
+        provider="anthropic",
+        system=system,
+        prompt=prompt,
+        timeout_s=timeout_s,
+        requested_max_output_tokens=max_output_tokens,
+    )
+    resp = await asyncio.wait_for(
+        client.messages.create(
+            model=model or "claude-sonnet-4-6",
             system=system,
-            prompt=prompt,
-            timeout_s=timeout_s,
-            requested_max_output_tokens=max_output_tokens,
+            max_tokens=max_output_tokens,
+            messages=[{"role": "user", "content": prompt}],
+        ),
+        timeout=attempt_timeout,
+    )
+    stop_reason = _safe_provider_string(
+        getattr(resp, "stop_reason", None), maximum=64
+    )
+    resolved_model = _safe_provider_string(
+        getattr(resp, "model", None), maximum=255
+    )
+    if _observation is not None:
+        _observation.resolved_model = resolved_model
+        _observation.provider_request_id = _safe_provider_string(
+            getattr(resp, "id", None), maximum=255
         )
-        resp = await asyncio.wait_for(
-            client.messages.create(
-                model=model or "claude-sonnet-4-6",
-                system=system,
-                max_tokens=max_output_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            ),
-            timeout=attempt_timeout,
-        )
-        parts = [getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text"]
-        return "\n".join(parts).strip() or None
-    except RunBudgetExceeded:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        log.warning("chat: anthropic API failed (%s); trying subscription", exc.__class__.__name__)
-        return None
-
-
-async def _claude_subscription(
-    *,
-    system: str,
-    prompt: str,
-    timeout_s: int,
-    requested_max_output_tokens: int = _MAX_TOKENS,
-    run_budget: LLMRunBudget | None = None,
-) -> str | None:
-    """Local Claude Code subscription — no API key, but ~60-180s/call."""
-    if not is_agent_sdk_available():
+        _observation.finish_reason = stop_reason
+    if (
+        _observation is not None
+        and resolved_model != (model or "claude-sonnet-4-6")
+    ):
+        if _observation is not None:
+            _observation.result_status = ResultStatus.NOT_APPLICABLE
+            _observation.failure_code = PRICE_ATTESTATION_MODEL_MISMATCH
         return None
     try:
-        from claude_agent_sdk import (  # noqa: PLC0415
-            AssistantMessage,
-            ClaudeAgentOptions,
-            TextBlock,
-            query,
-        )
-    except ImportError:
+        usage = normalize_anthropic_usage(resp)
+    except LLMUsageContractError:
+        if _observation is not None:
+            _observation.result_status = ResultStatus.NOT_APPLICABLE
+            _observation.failure_code = "chat_usage_contract_invalid"
         return None
-
-    output_char_ceiling = requested_max_output_tokens * _SUBSCRIPTION_CHARS_PER_TOKEN
-    log.info(
-        "chat: Claude subscription uses client output ceiling=%d chars "
-        "for requested max_output_tokens=%d",
-        output_char_ceiling,
-        requested_max_output_tokens,
-    )
-    opts = ClaudeAgentOptions(
-        allowed_tools=[],
-        disallowed_tools=["Bash", "Edit", "Write", "Read", "Task"],
-        system_prompt=system,
-        max_turns=1,
-        permission_mode="default",
-        cwd=os.environ.get("MNEMOS_AGENT_SDK_CWD", "/tmp"),
-    )
-
-    async def _drain(sink: list[str]) -> None:
-        collected_chars = 0
-        async for msg in query(prompt=prompt, options=opts):
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        separator_chars = 1 if sink else 0
-                        next_chars = collected_chars + separator_chars + len(block.text)
-                        if next_chars > output_char_ceiling:
-                            raise _SubscriptionOutputTooLarge(
-                                f"subscription output exceeded {output_char_ceiling} chars"
-                            )
-                        sink.append(block.text)
-                        collected_chars = next_chars
-
-    # The Agent SDK's control handshake ("initialize") is flaky on a cold CLI
-    # subprocess and raises *before* any tokens stream (observed on a large
-    # repo: "Control request timeout: initialize" → 503, while the very next
-    # call to the same prompt answers in ~90s). One retry warms it up. A real
-    # content timeout (TimeoutError) is not retried — it would just wait again.
-    for attempt in range(2):
-        out: list[str] = []
-        try:
-            attempt_timeout = _reserve_provider_attempt(
-                run_budget,
-                system=system,
-                prompt=prompt,
-                timeout_s=timeout_s,
-                requested_max_output_tokens=requested_max_output_tokens,
-            )
-            await asyncio.wait_for(_drain(out), timeout=attempt_timeout)
-        except RunBudgetExceeded:
-            raise
-        except TimeoutError:
-            log.warning("chat: subscription LLM timed out after %ds", timeout_s)
-            return None
-        except _SubscriptionOutputTooLarge:
-            # Do not return a sliced model answer and do not retry after any
-            # content has streamed: both would weaken grounding and can double
-            # the provider work that this budget exists to bound.
-            log.warning(
-                "chat: subscription LLM exceeded client output ceiling=%d chars",
-                output_char_ceiling,
-            )
-            return None
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "chat: subscription init attempt %d/2 failed: %s",
-                attempt + 1,
-                exc.__class__.__name__,
-            )
-            if out:
-                return None
+    if _observation is not None:
+        _observation.usage = usage
+    if stop_reason == "max_tokens":
+        if _observation is not None:
+            _observation.result_status = ResultStatus.OUTPUT_LIMIT_REJECTED
+            _observation.failure_code = "chat_output_limit"
+        log.warning("chat: anthropic API hit its output limit")
+        return None
+    if stop_reason != "end_turn":
+        if _observation is not None:
+            _observation.result_status = ResultStatus.NOT_APPLICABLE
+            _observation.failure_code = "chat_finish_reason_invalid"
+        log.warning("chat: anthropic API returned a rejected terminal result")
+        return None
+    content = getattr(resp, "content", None)
+    if not isinstance(content, list):
+        if _observation is not None:
+            _observation.result_status = ResultStatus.SCHEMA_REJECTED
+            _observation.failure_code = "chat_response_schema_invalid"
+        return None
+    parts: list[str] = []
+    for block in content:
+        if getattr(block, "type", "") != "text":
             continue
-        return "\n".join(out).strip() or None
-    return None
+        text = getattr(block, "text", None)
+        if not isinstance(text, str):
+            if _observation is not None:
+                _observation.result_status = ResultStatus.SCHEMA_REJECTED
+                _observation.failure_code = "chat_response_schema_invalid"
+            return None
+        parts.append(text)
+    answer = "\n".join(parts).strip()
+    if not answer:
+        if _observation is not None:
+            _observation.result_status = ResultStatus.EMPTY
+            _observation.failure_code = "chat_empty_response"
+        return None
+    return answer
 
 
 async def provider_chat(
@@ -655,13 +1142,18 @@ async def provider_chat(
     timeout_s: int = 180,
     max_output_tokens: int = _MAX_TOKENS,
     run_budget: LLMRunBudget | None = None,
+    operation_id: uuid.UUID | None = None,
+    attempt_state: ChatProviderAttemptState | None = None,
+    semantic_codec: ChatSemanticCodec | None = None,
 ) -> str | None:
     """Dispatch a one-shot answer to ``provider`` using the resolved
     config. Returns markdown, or ``None`` on any failure (logged).
 
     ``max_output_tokens`` is provider-enforced by OpenAI, Gemini, and direct
-    Anthropic calls.  Claude subscription and Atlas lack a token field, so
-    Mnemos rejects whole responses beyond conservative client-side ceilings.
+    Anthropic calls. Atlas is one conservative logical attempt covering its
+    required session+message POST pair and has client-side byte/character
+    ceilings. If a v1 callback is installed, STARTED is committed before the
+    first physical dispatch and every terminal path finalizes that row.
     """
     if (
         isinstance(max_output_tokens, bool)
@@ -670,95 +1162,390 @@ async def provider_chat(
     ):
         raise ValueError(f"max_output_tokens must be an integer in 1..{_MAX_TOKENS}")
     c = cfg.get(provider) or {}
+    callbacks = None
+    if attempt_state is not None:
+        attempt_state.attempt_id = None
+        attempt_state.consumer_result_status = None
+        attempt_state.consumer_failure_code = None
+
+    if provider == "openai":
+        canonical_provider = "openai"
+        requested_model = (
+            _safe_provider_string(c.get("model"), maximum=255)
+            or "gpt-4o-2024-11-20"
+        )
+        base_url = c.get("base_url") or OFFICIAL_OPENAI_CHAT_API_BASE_URL
+        billing_route = (
+            "openai_chat_completions_api"
+            if is_price_attested_openai_chat_base_url(base_url)
+            else None
+        )
+        route_fingerprint = fingerprint_input(
+            "mnemos.chat.provider-route.v2",
+            canonical_provider,
+            str(base_url),
+        )
+    elif provider == "gemini":
+        canonical_provider = "gemini"
+        requested_model = (
+            _safe_provider_string(c.get("model"), maximum=255)
+            or "gemini-2.5-flash"
+        )
+        base_url = None
+        billing_route = "gemini_generate_content_api"
+        route_fingerprint = fingerprint_input(
+            "mnemos.chat.provider-route.v2",
+            canonical_provider,
+            OFFICIAL_GEMINI_GENERATE_API_BASE_URL,
+        )
+    elif provider == "atlas":
+        log.warning("chat: %s", ATLAS_GENERATION_DISABLED_REASON)
+        return None
+    elif provider == "claudecode":
+        if (c.get("mode") or "api") != "api" or not c.get("api_key"):
+            return None
+        canonical_provider = "anthropic"
+        requested_model = (
+            _safe_provider_string(c.get("model"), maximum=255)
+            or "claude-sonnet-4-6"
+        )
+        base_url = None
+        billing_route = "anthropic_messages_api"
+        route_fingerprint = fingerprint_input(
+            "mnemos.chat.provider-route.v2",
+            canonical_provider,
+            f"{OFFICIAL_ANTHROPIC_API_BASE_URL}/v1/messages",
+        )
+    else:
+        return None
+
+    # No provider adapter owns persistence by itself.  The Chat request must
+    # install a task-local durable lifecycle capability before this public
+    # dispatch boundary; otherwise an internal/direct caller could spend
+    # tokens without first committing a physical-attempt row.
+    callbacks = require_attempt_callbacks("Chat provider dispatch")
+    if operation_id is None:
+        raise LLMLifecycleError("Chat attempt requires a stable operation id")
+    if callbacks.finish_candidate is None or (
+        callbacks.replay_attempt is None
+        and callbacks.replay_candidate is None
+    ):
+        raise LLMLifecycleError(
+            "Chat provider dispatch requires semantic candidate capabilities"
+        )
+    if semantic_codec is None:
+        # Direct adapter callers still receive the same crash-durable contract.
+        # The product route supplies a stronger project/purpose binding below.
+        semantic_codec = chat_answer_semantic_codec(system, prompt)
+
+    estimate = _provider_input_reservation(system, prompt)
+    input_fingerprint = fingerprint_input(system, prompt)
+    bound_operation_id = _bound_provider_operation_id(
+        operation_id,
+        provider=canonical_provider,
+        model=requested_model,
+        route_fingerprint=route_fingerprint,
+        requested_max_output_tokens=max_output_tokens,
+        system=system,
+        prompt=prompt,
+    )
+    # Production budget reservation belongs to the durable start callback.
+    # Keeping a local reservation here would make an already-stored exact
+    # candidate unreplayable under a smaller/exhausted fresh request budget.
+    local_timeout = float(timeout_s)
+    ticket: AttemptTicket | None = None
+    if callbacks is not None:
+        try:
+            ticket = await callbacks.start(
+                AttemptStartMetadata(
+                    operation_id=bound_operation_id,
+                    attempt_no=1,
+                    attempt_kind=AttemptKind.PRIMARY,
+                    provider=canonical_provider,
+                    provider_mode="api",
+                    requested_model=requested_model,
+                    input_fingerprint=input_fingerprint,
+                    estimated_input_tokens=estimate,
+                    input_estimate_method="utf8_bytes_upper_v1",
+                    requested_max_output_tokens=max_output_tokens,
+                    usage_source=UsageSource.PROVIDER_API,
+                    billing_route=billing_route,
+                )
+            )
+        except LLMAttemptReplayBlocked:
+            replay_request = SemanticCandidateReplayRequest(
+                operation_id=bound_operation_id,
+                attempt_no=1,
+                input_fingerprint=input_fingerprint,
+                contract_name=semantic_codec.contract_name,
+                binding_fingerprint=semantic_codec.binding_fingerprint,
+                normalizer=semantic_codec.normalizer,
+            )
+            if callbacks.replay_attempt is not None:
+                replay = await callbacks.replay_attempt(replay_request)
+                if replay.state == AttemptReplayState.STARTED:
+                    raise LLMAttemptReplayBlocked(
+                        "Chat operation is still in progress"
+                    )
+                if replay.state == AttemptReplayState.ABSENT:
+                    raise LLMSemanticCandidateCorrupt(
+                        "Chat duplicate attempt disappeared"
+                    )
+                if attempt_state is not None:
+                    attempt_state.attempt_id = replay.attempt_id
+                    attempt_state.consumer_result_status = replay.result_status
+                    attempt_state.consumer_failure_code = replay.failure_code
+                if replay.state == AttemptReplayState.TERMINAL_WITHOUT_CANDIDATE:
+                    return None
+            else:
+                replayer = callbacks.replay_candidate
+                if replayer is None:  # pragma: no cover - guarded above
+                    raise LLMLifecycleError("Chat semantic replayer disappeared")
+                replay = await replayer(replay_request)
+            if attempt_state is not None:
+                attempt_state.attempt_id = replay.attempt_id
+                attempt_state.consumer_result_status = replay.result_status
+                attempt_state.consumer_failure_code = (
+                    "chat_candidate_rejected"
+                    if replay.candidate_status == "rejected"
+                    else None
+                )
+            if replay.candidate_status not in {"candidate", "accepted"}:
+                return None
+            if replay.result_status not in {
+                ResultStatus.PENDING,
+                ResultStatus.ACCEPTED,
+            }:
+                raise LLMSemanticCandidateCorrupt(
+                    "Chat replay candidate classification is inconsistent"
+                )
+            try:
+                return semantic_codec.render_candidate(replay.payload)
+            except Exception:
+                raise LLMSemanticCandidateCorrupt(
+                    "Chat replay candidate rendering failed"
+                ) from None
+        remaining_seconds = ticket.remaining_seconds
+        if remaining_seconds <= 0:
+            outcome = AttemptOutcome(
+                attempt_status=AttemptStatus.TIMEOUT,
+                result_status=ResultStatus.NOT_APPLICABLE,
+                usage=unavailable_usage(
+                    lost_after_dispatch=False,
+                    source=UsageSource.PROVIDER_API,
+                ),
+                failure_code="chat_timeout",
+            )
+            await callbacks.finish(ticket, outcome)
+            if attempt_state is not None:
+                attempt_state.attempt_id = ticket.attempt_id
+                attempt_state.consumer_result_status = outcome.result_status
+                attempt_state.consumer_failure_code = outcome.failure_code
+            return None
+        local_timeout = min(local_timeout, remaining_seconds)
+
+    if ticket is None:
+        raise LLMLifecycleError(
+            "Chat provider dispatch has no durable STARTED ticket"
+        )
+    dispatch_capability = _issue_provider_dispatch_capability(
+        ticket,
+        provider=canonical_provider,
+        system=system,
+        prompt=prompt,
+        timeout_s=local_timeout,
+        requested_max_output_tokens=max_output_tokens,
+    )
+
+    observation = _ProviderObservation(
+        usage=unavailable_usage(source=UsageSource.PROVIDER_API)
+    )
+
+    def _outcome() -> AttemptOutcome:
+        return AttemptOutcome(
+            attempt_status=observation.attempt_status,
+            result_status=observation.result_status,
+            usage=observation.usage,
+            resolved_model=observation.resolved_model,
+            provider_request_id=observation.provider_request_id,
+            failure_code=observation.failure_code,
+            finish_reason=observation.finish_reason,
+        )
+
+    async def _finish(candidate: SemanticCandidate | None = None) -> None:
+        if callbacks is None or ticket is None:
+            return
+        if candidate is not None:
+            if callbacks.finish_candidate is None:  # pragma: no cover - guarded above
+                raise LLMLifecycleError(
+                    "Chat semantic candidate finalizer is unavailable"
+                )
+            await callbacks.finish_candidate(ticket, _outcome(), candidate)
+            return
+        await callbacks.finish(ticket, _outcome())
+
+    def _set_attempt_state() -> None:
+        if ticket is not None and attempt_state is not None:
+            attempt_state.attempt_id = ticket.attempt_id
+            attempt_state.consumer_result_status = observation.result_status
+            attempt_state.consumer_failure_code = observation.failure_code
+
+    if callbacks is not None and callbacks.mark_provider_dispatch is not None:
+        callbacks.mark_provider_dispatch()
     try:
         if provider == "openai":
-            return await _openai_compatible(
-                base_url=c.get("base_url") or "https://api.openai.com/v1",
+            reply = await _openai_compatible(
+                base_url=base_url,
                 api_key=c.get("api_key") or "",
-                model=c.get("model") or "gpt-4o",
+                model=requested_model,
                 system=system,
                 prompt=prompt,
-                timeout_s=timeout_s,
+                timeout_s=local_timeout,
                 max_output_tokens=max_output_tokens,
-                run_budget=run_budget,
+                _dispatch=dispatch_capability,
+                _observation=observation,
             )
-        if provider == "atlas":
-            return await _atlas_chat(
-                base_url=c.get("base_url") or "",
+        elif provider == "atlas":
+            reply = await _atlas_chat(
+                base_url=base_url,
                 api_key=c.get("api_key") or "",
                 agent_id=c.get("agent_id") or "",
                 system=system,
                 prompt=prompt,
-                timeout_s=timeout_s,
+                timeout_s=local_timeout,
                 requested_max_output_tokens=max_output_tokens,
-                run_budget=run_budget,
+                _dispatch=dispatch_capability,
+                _observation=observation,
             )
-        if provider == "gemini":
-            return await _gemini_generate(
+        elif provider == "gemini":
+            reply = await _gemini_generate(
                 api_key=c.get("api_key") or "",
-                model=c.get("model") or "gemini-2.5-flash",
+                model=requested_model,
                 system=system,
                 prompt=prompt,
-                timeout_s=timeout_s,
+                timeout_s=local_timeout,
                 max_output_tokens=max_output_tokens,
-                run_budget=run_budget,
+                _dispatch=dispatch_capability,
+                _observation=observation,
             )
-        if provider == "claudecode":
-            mode = c.get("mode") or "subscription"
-            key = c.get("api_key")
-            if mode == "api" and key:
-                reply = await _claude_api(
-                    api_key=key,
-                    model=c.get("model"),
-                    system=system,
-                    prompt=prompt,
-                    timeout_s=timeout_s,
-                    max_output_tokens=max_output_tokens,
-                    run_budget=run_budget,
-                )
-                if reply is not None:
-                    return reply
-                # API failed → fall back to the subscription so chat still works.
-                return await _claude_subscription(
-                    system=system,
-                    prompt=prompt,
-                    timeout_s=timeout_s,
-                    requested_max_output_tokens=max_output_tokens,
-                    run_budget=run_budget,
-                )
-            # Subscription mode (default): use the local Claude Code login.
-            reply = await _claude_subscription(
+        else:
+            reply = await _claude_api(
+                api_key=c.get("api_key") or "",
+                model=requested_model,
                 system=system,
                 prompt=prompt,
-                timeout_s=timeout_s,
-                requested_max_output_tokens=max_output_tokens,
-                run_budget=run_budget,
+                timeout_s=local_timeout,
+                max_output_tokens=max_output_tokens,
+                _dispatch=dispatch_capability,
+                _observation=observation,
             )
-            if reply is not None:
-                return reply
-            # Subscription unavailable → use an API key if one is configured.
-            if key:
-                return await _claude_api(
-                    api_key=key,
-                    model=c.get("model"),
-                    system=system,
-                    prompt=prompt,
-                    timeout_s=timeout_s,
-                    max_output_tokens=max_output_tokens,
-                    run_budget=run_budget,
-                )
-            return None
+    except asyncio.CancelledError:
+        observation.attempt_status = AttemptStatus.CANCELLED
+        observation.result_status = ResultStatus.NOT_APPLICABLE
+        observation.failure_code = "chat_cancelled"
+        observation.usage = unavailable_usage(
+            lost_after_dispatch=True,
+            source=UsageSource.PROVIDER_API,
+        )
+        await asyncio.shield(_finish())
+        raise
+    except (TimeoutError, httpx.TimeoutException):
+        observation.attempt_status = AttemptStatus.TIMEOUT
+        observation.result_status = ResultStatus.NOT_APPLICABLE
+        observation.failure_code = "chat_timeout"
+        observation.usage = unavailable_usage(
+            lost_after_dispatch=True,
+            source=UsageSource.PROVIDER_API,
+        )
+        log.warning("chat provider %s timed out", provider)
+        await _finish()
+        return None
+    except _ProviderResponseTooLarge:
+        observation.attempt_status = AttemptStatus.FAILED
+        observation.result_status = ResultStatus.OUTPUT_LIMIT_REJECTED
+        observation.failure_code = "chat_output_limit"
+        observation.usage = unavailable_usage(
+            lost_after_dispatch=True,
+            source=UsageSource.PROVIDER_API,
+        )
+        log.warning("chat provider %s exceeded its retained response limit", provider)
+        await _finish()
+        return None
+    except json.JSONDecodeError:
+        observation.attempt_status = AttemptStatus.COMPLETED
+        observation.result_status = ResultStatus.PARSE_REJECTED
+        observation.failure_code = "chat_response_parse_invalid"
+        log.warning("chat provider %s returned invalid JSON", provider)
+        await _finish()
         return None
     except httpx.HTTPStatusError as exc:
+        observation.attempt_status = AttemptStatus.FAILED
+        observation.result_status = ResultStatus.NOT_APPLICABLE
+        observation.failure_code = "chat_http_error"
+        observation.usage = unavailable_usage(
+            lost_after_dispatch=True,
+            source=UsageSource.PROVIDER_API,
+        )
         log.warning(
             "chat provider %s HTTP %s",
             provider,
             exc.response.status_code,
         )
+        await _finish()
         return None
+    except (LLMLifecycleError, RunBudgetExceeded):
+        raise
     except Exception as exc:  # noqa: BLE001
+        observation.attempt_status = AttemptStatus.FAILED
+        observation.result_status = ResultStatus.NOT_APPLICABLE
+        observation.failure_code = "chat_transport_error"
+        observation.usage = unavailable_usage(
+            lost_after_dispatch=True,
+            source=UsageSource.PROVIDER_API,
+        )
         log.warning("chat provider %s failed: %s", provider, exc.__class__.__name__)
+        await _finish()
         return None
+
+    if reply is None and observation.result_status == ResultStatus.PENDING:
+        observation.result_status = ResultStatus.NOT_APPLICABLE
+        observation.failure_code = "chat_provider_rejected"
+    if reply is None:
+        await _finish()
+        _set_attempt_state()
+        return None
+
+    try:
+        normalized_payload = semantic_codec.normalizer(
+            semantic_codec.normalize_response(reply)
+        )
+        canonical_reply = semantic_codec.render_candidate(normalized_payload)
+        candidate = SemanticCandidate(
+            contract_name=semantic_codec.contract_name,
+            binding_fingerprint=semantic_codec.binding_fingerprint,
+            payload=normalized_payload,
+        )
+    except Exception as exc:  # noqa: BLE001
+        result_status = getattr(exc, "result_status", ResultStatus.SCHEMA_REJECTED)
+        if result_status not in {
+            ResultStatus.PARSE_REJECTED,
+            ResultStatus.SCHEMA_REJECTED,
+        }:
+            result_status = ResultStatus.SCHEMA_REJECTED
+        observation.result_status = result_status
+        observation.failure_code = (
+            semantic_codec.parse_failure_code
+            if result_status == ResultStatus.PARSE_REJECTED
+            else semantic_codec.schema_failure_code
+        )
+        await _finish()
+        _set_attempt_state()
+        log.warning("chat provider semantic response contract rejected")
+        return None
+
+    await _finish(candidate)
+    _set_attempt_state()
+    return canonical_reply
 
 
 # ── Live connection test + model discovery ────────────────────────────
@@ -775,9 +1562,19 @@ async def test_provider(
     key = c.get("api_key")
     try:
         if provider == "openai":
-            base = c.get("base_url") or "https://api.openai.com/v1"
+            base = c.get("base_url") or OFFICIAL_OPENAI_CHAT_API_BASE_URL
             if not key:
                 return {"ok": False, "message": "missing key", "models": []}
+            if not is_price_attested_openai_chat_base_url(base):
+                # Do not send a platform API key to an arbitrary compatible
+                # endpoint. Custom OpenAI wire-compatible generation is not
+                # price-attested and is already denied by the paid-dispatch
+                # lifecycle, so its unaudited live probe is denied as well.
+                return {
+                    "ok": False,
+                    "message": "OpenAI base URL is not price-attested",
+                    "models": [],
+                }
             async with httpx.AsyncClient(timeout=timeout_s) as cl:
                 r = await cl.get(
                     base.rstrip("/") + "/models", headers={"Authorization": f"Bearer {key}"}
@@ -791,23 +1588,24 @@ async def test_provider(
             agent = c.get("agent_id")
             if not (base and key and agent):
                 return {"ok": False, "message": "missing key / agent ID / base URL", "models": []}
-            # Creating a session validates the key + agent + base URL.
-            async with httpx.AsyncClient(timeout=timeout_s) as cl:
-                r = await cl.post(
-                    base.rstrip("/") + f"/agents/{agent}/sessions",
-                    headers={"x-api-key": key, "Content-Type": "application/json"},
-                    json={"title": "Mnemos connection test"},
-                )
-                r.raise_for_status()
-                name = r.json().get("agent_name") or agent
-            return {"ok": True, "message": f"OK — agent: {name}", "models": []}
+            # Atlas exposes no read-only discovery probe in this contract.
+            # Creating a session is an external mutation and could initialize
+            # provider-side agent work without a project/attempt identity.
+            return {
+                "ok": False,
+                "message": (
+                    "Atlas live test disabled — no read-only, unattributed "
+                    "connection probe is available"
+                ),
+                "models": [],
+            }
 
         if provider == "gemini":
             if not key:
                 return {"ok": False, "message": "missing key", "models": []}
             async with httpx.AsyncClient(timeout=timeout_s) as cl:
                 r = await cl.get(
-                    "https://generativelanguage.googleapis.com/v1beta/models",
+                    f"{OFFICIAL_GEMINI_GENERATE_API_BASE_URL}/models",
                     headers={"x-goog-api-key": key},
                 )
                 r.raise_for_status()
@@ -823,28 +1621,25 @@ async def test_provider(
             }
 
         if provider == "claudecode":
-            mode = c.get("mode") or "subscription"
-            if mode == "subscription" or not key:
-                if not is_agent_sdk_available():
-                    return {
-                        "ok": False,
-                        "message": "Claude Code subscription not detected "
-                        "(run Mnemos inside Claude Code)",
-                        "models": [],
-                    }
-                # Real round-trip — proves the subscription actually answers,
-                # not just that the SDK is importable.
-                reply = await _claude_subscription(
-                    system="You are a connection test. Reply with exactly: OK",
-                    prompt="Reply with the single word OK.",
-                    timeout_s=max(60, min(timeout_s, 120)),
-                )
-                if reply:
-                    return {"ok": True, "message": "OK — Claude 구독 응답 확인", "models": []}
-                return {"ok": False, "message": "구독 호출 실패 또는 시간 초과", "models": []}
+            mode = c.get("mode") or "api"
+            if mode != "api":
+                # Importability cannot prove subscription billing, and this
+                # connection-test endpoint has no durable physical-attempt
+                # ledger.  Do not perform an unattributed provider call even
+                # when the SDK happens to be installed.
+                return {
+                    "ok": False,
+                    "message": (
+                        "Agent SDK Chat 비활성 — Anthropic API 모드와 키가 필요함; "
+                        "내부 SDK 호출은 인증·비용 출처 확인 및 128K 예약 필요"
+                    ),
+                    "models": [],
+                }
+            if not key:
+                return {"ok": False, "message": "missing key", "models": []}
             async with httpx.AsyncClient(timeout=timeout_s) as cl:
                 r = await cl.get(
-                    "https://api.anthropic.com/v1/models",
+                    f"{OFFICIAL_ANTHROPIC_API_BASE_URL}/v1/models",
                     headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
                 )
                 r.raise_for_status()

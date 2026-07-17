@@ -10,9 +10,10 @@ summaries and zero findings — the platform was effectively blind to it.
 That is a fatal gap for a tool that bills itself as polyglot.
 
 This module closes it: for an uncovered language we hand each source
-file to the operator's **Claude Code subscription** (the Agent SDK,
-no API key required) and ask it to extract a structured symbol/edge
-list. The result flows into the same graph ingest path as the
+file to the operator's **Claude Code credential context** (the Agent SDK)
+and ask it to extract a structured symbol/edge list. OAuth needs no API key,
+but API/cloud credentials can take precedence and are classified from the
+SDK init message. The result flows into the same graph ingest path as the
 deterministic analyzers, so summaries, findings, MCP queries and the
 dashboard all light up.
 
@@ -24,14 +25,56 @@ the platform from going blind.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import hashlib
 import logging
 import os
-from collections.abc import Callable, Mapping
+import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from app.extractor.agent_sdk import _parse_json_response, is_agent_sdk_available
+from app.extractor.agent_sdk import (
+    AGENT_SDK_BUDGETED_MODEL,
+    AGENT_SDK_MAX_PROVIDER_INPUT_TOKENS,
+    AGENT_SDK_MAX_PROVIDER_OUTPUT_TOKENS,
+    AGENT_SDK_TERMINAL_ACCEPTED,
+    AGENT_SDK_TERMINAL_ERROR,
+    AGENT_SDK_TERMINAL_OUTPUT_LIMIT,
+    AgentSDKAssistantContract,
+    AgentSDKAuthContract,
+    _parse_json_response,
+    agent_sdk_isolation_options,
+    inspect_agent_sdk_result,
+    is_agent_sdk_available,
+)
+from app.llm.contracts import (
+    AttemptKind,
+    AttemptStatus,
+    LLMUsageV1,
+    LLMUsageContractError,
+    LLMPurpose,
+    ResultStatus,
+    UsageSource,
+    normalize_agent_sdk_usage,
+    unavailable_usage,
+)
+from app.llm.lifecycle import (
+    AttemptCallbacks,
+    AttemptOutcome,
+    AttemptStartMetadata,
+    AttemptTicket,
+    LLMAttemptReplayBlocked,
+    LLMLifecycleError,
+    LLMSemanticCandidateError,
+    SemanticCandidate,
+    SemanticCandidateReplay,
+    SemanticCandidateReplayRequest,
+    fingerprint_input,
+    require_attempt_callbacks,
+)
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +88,13 @@ MAX_AGENT_EDGES = 1_000
 MAX_AGENT_COLUMNS = 200
 MAX_AGENT_CALLS = 200
 MAX_AGENT_SUMMARY_CHARS = 160
+# This caps retained UTF-8 stream memory only.  Agent SDK does not expose a
+# per-request max_tokens control, so provider output spend is budgeted
+# separately at the model ceiling before dispatch.
+MAX_AGENT_EXTRACT_OUTPUT_BYTES = 256 * 1024
+
+AGENT_EXTRACT_CANDIDATE_CONTRACT = "mnemos.agent_extract.v1"
+_AGENT_EXTRACT_BINDING_CONTRACT = "mnemos.agent_extract.binding.v1"
 
 _CODE_TOP_LEVEL_KEYS = frozenset({"symbols", "edges", "data_access"})
 _DB_TOP_LEVEL_KEYS = frozenset({"entities", "edges"})
@@ -79,6 +129,26 @@ class AgentExtractContractError(ValueError):
         super().__init__(
             f"{path}: expected {expected}, got {self.actual}. {hint}"
         )
+
+
+class AgentExtractOutputLimitError(RuntimeError):
+    """The bounded Agent SDK response buffer reached its hard ceiling."""
+
+
+@dataclass(frozen=True, slots=True)
+class AgentExtractSemanticBinding:
+    """Consumer-owned identity that prevents cross-run candidate reuse."""
+
+    project_id: uuid.UUID
+    run_id: uuid.UUID
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.project_id, uuid.UUID) or not isinstance(
+            self.run_id, uuid.UUID
+        ):
+            raise LLMLifecycleError(
+                "agent extraction semantic binding is invalid"
+            )
 
 
 def _contract_shape(value: Any) -> str:
@@ -462,6 +532,110 @@ AGENT_LANGUAGE_EXTENSIONS: dict[str, tuple[str, ...]] = {
 # rather than code Symbol nodes. Drives the prompt + envelope shape.
 AGENT_DB_LANGUAGES = frozenset({"sql"})
 
+
+def normalize_agent_extract_candidate(
+    payload: Mapping[str, Any],
+    *,
+    language: str,
+) -> dict[str, Any]:
+    """Validate the encrypted replay wrapper and its extraction payload.
+
+    This is intentionally stricter than accepting an arbitrary stored mapping:
+    the wrapper has one exact contract and the language is consumer-owned, so
+    a candidate cannot be replayed through a different extractor dialect.
+    """
+
+    root = _mapping_contract(payload, path="$")
+    keys = frozenset({"contract", "language", "result"})
+    _exact_keys(root, path="$", allowed=keys, required=keys)
+    contract = _text_contract(
+        root["contract"], path="$.contract", maximum=96
+    )
+    if contract != AGENT_EXTRACT_CANDIDATE_CONTRACT:
+        _fail(
+            "$.contract",
+            AGENT_EXTRACT_CANDIDATE_CONTRACT,
+            contract,
+            "Use the agent extraction candidate contract.",
+        )
+    candidate_language = _text_contract(
+        root["language"], path="$.language", maximum=40
+    )
+    if candidate_language != language:
+        _fail(
+            "$.language",
+            "the consumer-bound language",
+            candidate_language,
+            "Replay only through the original language consumer.",
+        )
+    result = normalize_agent_extract_payload(
+        _mapping_contract(root["result"], path="$.result"),
+        language=language,
+    )
+    return {
+        "contract": AGENT_EXTRACT_CANDIDATE_CONTRACT,
+        "language": language,
+        "result": result,
+    }
+
+
+def _agent_extract_semantic_identity(
+    *,
+    binding: AgentExtractSemanticBinding,
+    language: str,
+    file_rel: str,
+    code: str,
+    input_fingerprint: str,
+) -> tuple[uuid.UUID, str]:
+    """Return stable operation and candidate binding identities.
+
+    Only hashes reach persistence.  The binding nevertheless commits to the
+    project, run, extractor dialect, project-relative path, exact bounded
+    source text, and exact Mnemos-controlled provider input.
+    """
+
+    if (
+        not isinstance(binding, AgentExtractSemanticBinding)
+        or not isinstance(language, str)
+        or not language
+        or len(language) > 40
+        or not isinstance(file_rel, str)
+        or not file_rel
+        or len(file_rel) > 2_048
+        or "\\" in file_rel
+        or file_rel.startswith("/")
+        or any(part in {"", ".", ".."} for part in file_rel.split("/"))
+        or not isinstance(code, str)
+        or not isinstance(input_fingerprint, str)
+        or len(input_fingerprint) != 64
+        or any(ch not in "0123456789abcdef" for ch in input_fingerprint)
+    ):
+        raise LLMLifecycleError(
+            "agent extraction semantic identity is invalid"
+        )
+    target_id = f"agent:{language}:{file_rel}"
+    operation_id = uuid.uuid5(
+        binding.run_id,
+        "\0".join(
+            (
+                "agent_extract",
+                target_id,
+                input_fingerprint,
+            )
+        ),
+    )
+    source_fingerprint = hashlib.sha256(code.encode("utf-8")).hexdigest()
+    binding_fingerprint = fingerprint_input(
+        _AGENT_EXTRACT_BINDING_CONTRACT,
+        binding.project_id.hex,
+        binding.run_id.hex,
+        language,
+        file_rel,
+        source_fingerprint,
+        input_fingerprint,
+    )
+    return operation_id, binding_fingerprint
+
 # Directories that never hold first-party source — skip to spend the
 # (bounded) LLM budget on code that matters.
 _SKIP_DIRS = {
@@ -675,6 +849,49 @@ def _build_db_extract_prompt(file_rel: str, code: str) -> str:
     )
 
 
+def _result_from_candidate_replay(
+    replay: SemanticCandidateReplay,
+    *,
+    semantic_binding: AgentExtractSemanticBinding,
+    language: str,
+    operation_id: uuid.UUID,
+    input_fingerprint: str,
+    binding_fingerprint: str,
+) -> dict[str, Any] | None:
+    """Return only an exact, still-consumable terminal replay candidate."""
+
+    expected_status = {
+        "candidate": ResultStatus.PENDING,
+        "accepted": ResultStatus.ACCEPTED,
+    }
+    if (
+        not isinstance(replay, SemanticCandidateReplay)
+        or replay.operation_id != operation_id
+        or replay.attempt_no != 1
+        or replay.project_id != semantic_binding.project_id
+        or replay.purpose != LLMPurpose.AGENT_EXTRACT
+        or replay.input_fingerprint != input_fingerprint
+        or replay.contract_name != AGENT_EXTRACT_CANDIDATE_CONTRACT
+        or replay.binding_fingerprint != binding_fingerprint
+        or replay.attempt_status != AttemptStatus.COMPLETED
+        or expected_status.get(replay.candidate_status)
+        != replay.result_status
+    ):
+        raise LLMSemanticCandidateError(
+            "agent extraction replay identity is invalid"
+        )
+    canonical = normalize_agent_extract_candidate(
+        replay.payload,
+        language=language,
+    )
+    result = canonical["result"]
+    if not isinstance(result, dict):  # pragma: no cover - normalizer owns it
+        raise LLMSemanticCandidateError(
+            "agent extraction replay result is invalid"
+        )
+    return result
+
+
 async def extract_file_via_agent_sdk(
     *,
     language: str,
@@ -683,11 +900,18 @@ async def extract_file_via_agent_sdk(
     model: str = "claude-sonnet-4-6",
     timeout_s: int = 150,
     max_code_chars: int = MAX_AGENT_CODE_CHARS,
-    on_provider_start: Callable[[], None] | None = None,
+    semantic_binding: AgentExtractSemanticBinding | None = None,
+    attempt_callbacks: AttemptCallbacks | None = None,
 ) -> dict[str, Any] | None:
     """Extract ``{"symbols": [...], "edges": [...]}`` from one file via the
-    Claude Code subscription. Returns None on any failure (never raises);
-    the caller treats None as "this file contributed nothing"."""
+    Claude Code credential context.
+
+    Provider/content failures return ``None`` so the caller can retain prior
+    graph facts.  Lifecycle callback failures propagate: treating a refused
+    durable start or an uncommitted finish as a provider fallback would hide
+    accounting loss.  Only hashes, estimates, normalized usage, and bounded
+    status codes cross the lifecycle boundary; prompts and model output do not.
+    """
     # A prefix-only extraction cannot prove coverage for the omitted portion
     # of a file.  Reject it instead of returning plausible partial facts that
     # the orchestration layer might count as an authoritative file result.
@@ -699,8 +923,22 @@ async def extract_file_via_agent_sdk(
             max_code_chars,
         )
         return None
+    if model != AGENT_SDK_BUDGETED_MODEL:
+        log.warning("agent_extract: unsupported budget model refused")
+        return None
     if not is_agent_sdk_available():
         return None
+    callbacks = attempt_callbacks or require_attempt_callbacks(
+        "Agent extraction"
+    )
+    if callbacks.finish_candidate is None or callbacks.replay_candidate is None:
+        raise LLMLifecycleError(
+            "Agent extraction requires semantic candidate capabilities"
+        )
+    if semantic_binding is None:
+        raise LLMLifecycleError(
+            "Agent extraction requires a consumer semantic binding"
+        )
     try:
         from claude_agent_sdk import (
             AssistantMessage,
@@ -714,68 +952,353 @@ async def extract_file_via_agent_sdk(
 
     is_db = language in AGENT_DB_LANGUAGES
     snippet = code
+    system_prompt = _DB_EXTRACT_SYSTEM if is_db else _EXTRACT_SYSTEM
     prompt = (
         _build_db_extract_prompt(file_rel, snippet)
         if is_db
         else _build_extract_prompt(language, file_rel, snippet)
     )
+    input_fingerprint = fingerprint_input(system_prompt, prompt)
+    operation_id, binding_fingerprint = _agent_extract_semantic_identity(
+        binding=semantic_binding,
+        language=language,
+        file_rel=file_rel,
+        code=code,
+        input_fingerprint=input_fingerprint,
+    )
+    candidate_normalizer = functools.partial(
+        normalize_agent_extract_candidate,
+        language=language,
+    )
     opts = ClaudeAgentOptions(
-        allowed_tools=[],
+        **agent_sdk_isolation_options(),
         disallowed_tools=["Bash", "Edit", "Write", "Read", "Task"],
-        system_prompt=_DB_EXTRACT_SYSTEM if is_db else _EXTRACT_SYSTEM,
+        system_prompt=system_prompt,
         max_turns=1,
-        permission_mode="default",
+        permission_mode="dontAsk",
         cwd=os.environ.get("MNEMOS_AGENT_SDK_CWD", "/tmp"),
         model=model if model and "claude" in model else None,
     )
 
     collected: list[str] = []
-    collected_chars = 0
-    is_error = False
-    try:
-        import asyncio
+    collected_bytes = 0
+    result_message: Any | None = None
+    ticket: AttemptTicket | None = None
+    assistant_contract = AgentSDKAssistantContract(expected_model=model)
+    auth_contract = AgentSDKAuthContract()
 
-        async def _drain() -> bool:
-            nonlocal collected_chars
-            # Accounting boundary: local validation/options work is complete
-            # and the next operation dispatches the provider stream.  The
-            # synchronous hook adds no cancellation point before iteration.
-            if on_provider_start is not None:
-                on_provider_start()
+    async def _finish(outcome: AttemptOutcome) -> None:
+        if ticket is not None:
+            await callbacks.finish(
+                ticket,
+                replace(outcome, provider_mode=auth_contract.provider_mode),
+            )
+
+    async def _finish_candidate(
+        outcome: AttemptOutcome,
+        candidate: SemanticCandidate,
+    ) -> None:
+        if ticket is not None:
+            # Capability presence was checked before durable start/dispatch.
+            finish_candidate = callbacks.finish_candidate
+            if finish_candidate is None:  # pragma: no cover - guarded above
+                raise LLMLifecycleError(
+                    "Agent extraction semantic finalizer disappeared"
+                )
+            await finish_candidate(
+                ticket,
+                replace(outcome, provider_mode=auth_contract.provider_mode),
+                candidate,
+            )
+
+    def _result_usage(message: Any | None) -> LLMUsageV1:
+        try:
+            return normalize_agent_sdk_usage(message)
+        except LLMUsageContractError:
+            # A changed SDK usage dialect must not become fabricated zero
+            # usage or leak the raw ResultMessage.  The transport/content
+            # result can still be recorded truthfully as usage-unavailable.
+            log.warning("agent_extract: unsupported Agent SDK usage metadata")
+            return unavailable_usage(source=UsageSource.AGENT_SDK)
+
+    # All local validation and option construction is complete.  The start
+    # hook atomically commits the shared budget and a v1 STARTED row.  Only a
+    # returned ticket authorizes the provider iterator below.
+    metadata = AttemptStartMetadata(
+                operation_id=operation_id,
+                attempt_no=1,
+                attempt_kind=AttemptKind.PRIMARY,
+                provider="anthropic",
+                provider_mode="unknown",
+                requested_model=model,
+                input_fingerprint=input_fingerprint,
+                estimated_input_tokens=AGENT_SDK_MAX_PROVIDER_INPUT_TOKENS,
+                input_estimate_method="model_context_ceiling_v1",
+                requested_max_output_tokens=(
+                    AGENT_SDK_MAX_PROVIDER_OUTPUT_TOKENS
+                ),
+                usage_source=UsageSource.AGENT_SDK,
+                billing_route="claude_agent_sdk",
+            )
+    try:
+        ticket = await callbacks.start(metadata)
+    except LLMAttemptReplayBlocked:
+        replayer = callbacks.replay_candidate
+        if replayer is None:  # pragma: no cover - guarded above
+            raise LLMLifecycleError(
+                "Agent extraction semantic replayer disappeared"
+            ) from None
+        replay = await replayer(
+            SemanticCandidateReplayRequest(
+                operation_id=operation_id,
+                attempt_no=1,
+                input_fingerprint=input_fingerprint,
+                contract_name=AGENT_EXTRACT_CANDIDATE_CONTRACT,
+                binding_fingerprint=binding_fingerprint,
+                normalizer=candidate_normalizer,
+            )
+        )
+        return _result_from_candidate_replay(
+            replay,
+            semantic_binding=semantic_binding,
+            language=language,
+            operation_id=operation_id,
+            input_fingerprint=input_fingerprint,
+            binding_fingerprint=binding_fingerprint,
+        )
+    provider_timeout = min(float(timeout_s), ticket.remaining_seconds)
+    if provider_timeout <= 0:
+        await _finish(
+            AttemptOutcome(
+                attempt_status=AttemptStatus.TIMEOUT,
+                result_status=ResultStatus.NOT_APPLICABLE,
+                usage=unavailable_usage(
+                    lost_after_dispatch=False,
+                    source=UsageSource.AGENT_SDK,
+                ),
+                failure_code="agent_extract_timeout",
+            )
+        )
+        return None
+    if callbacks.mark_provider_dispatch is not None:
+        callbacks.mark_provider_dispatch()
+    try:
+        async def _drain() -> Any | None:
+            nonlocal collected_bytes, result_message
             async for msg in query(prompt=prompt, options=opts):
+                auth_contract.observe(msg)
                 if isinstance(msg, AssistantMessage):
+                    if not assistant_contract.observe(msg):
+                        continue
                     for block in msg.content:
                         if isinstance(block, TextBlock):
-                            collected_chars += len(block.text)
-                            if collected_chars > 256 * 1024:
-                                raise ValueError("agent_extract_output_too_large")
+                            collected_bytes += len(block.text.encode("utf-8"))
+                            if collected_bytes > MAX_AGENT_EXTRACT_OUTPUT_BYTES:
+                                raise AgentExtractOutputLimitError
                             collected.append(block.text)
                 elif isinstance(msg, ResultMessage):
-                    return msg.is_error
-            return False
+                    result_message = msg
+                    return msg
+            return None
 
-        is_error = await asyncio.wait_for(_drain(), timeout=timeout_s)
+        result_message = await asyncio.wait_for(
+            _drain(), timeout=provider_timeout
+        )
+    except asyncio.CancelledError:
+        # The orchestrator owns outer deadline/cancellation classification.
+        # A direct caller that is hard-cancelled intentionally leaves STARTED
+        # for the stale-attempt reconciler rather than guessing dispatch fate.
+        raise
     except asyncio.TimeoutError:
-        log.warning("agent_extract: %s timed out after %ds", file_rel, timeout_s)
+        await _finish(
+            AttemptOutcome(
+                attempt_status=AttemptStatus.TIMEOUT,
+                result_status=ResultStatus.NOT_APPLICABLE,
+                usage=unavailable_usage(
+                    lost_after_dispatch=True,
+                    source=UsageSource.AGENT_SDK,
+                ),
+                failure_code="agent_extract_timeout",
+            )
+        )
+        log.warning(
+            "agent_extract: %s timed out after %.3fs",
+            file_rel,
+            provider_timeout,
+        )
+        return None
+    except AgentExtractOutputLimitError:
+        await _finish(
+            AttemptOutcome(
+                attempt_status=AttemptStatus.FAILED,
+                result_status=ResultStatus.OUTPUT_LIMIT_REJECTED,
+                usage=unavailable_usage(
+                    lost_after_dispatch=True,
+                    source=UsageSource.AGENT_SDK,
+                ),
+                failure_code="agent_extract_output_limit",
+            )
+        )
+        log.warning("agent_extract: provider output exceeded the local limit")
         return None
     except Exception as exc:  # noqa: BLE001
+        await _finish(
+            AttemptOutcome(
+                attempt_status=AttemptStatus.FAILED,
+                result_status=ResultStatus.NOT_APPLICABLE,
+                usage=unavailable_usage(
+                    lost_after_dispatch=True,
+                    source=UsageSource.AGENT_SDK,
+                ),
+                failure_code="agent_extract_transport_error",
+            )
+        )
         # SDK exceptions may embed source/prompt fragments.  Keep diagnostics
         # structural and never echo the raw exception into logs.
         log.warning("agent_extract: provider failed: %s", exc.__class__.__name__)
         return None
 
-    if is_error or not collected:
+    usage = (
+        unavailable_usage(
+            lost_after_dispatch=True,
+            source=UsageSource.AGENT_SDK,
+        )
+        if result_message is None
+        else _result_usage(result_message)
+    )
+    terminal = inspect_agent_sdk_result(result_message)
+    resolved_model = assistant_contract.resolved_model
+    # Agent session identity is not a provider request/message identity.
+    provider_request_id = None
+    finish_reason = terminal.finish_reason
+    if (
+        result_message is None
+        or terminal.disposition == AGENT_SDK_TERMINAL_ERROR
+    ):
+        await _finish(
+            AttemptOutcome(
+                attempt_status=AttemptStatus.FAILED,
+                result_status=ResultStatus.NOT_APPLICABLE,
+                usage=usage,
+                failure_code=(
+                    "agent_extract_result_missing"
+                    if result_message is None
+                    else "agent_extract_result_error"
+                ),
+                resolved_model=resolved_model,
+                provider_request_id=provider_request_id,
+                finish_reason=finish_reason,
+            )
+        )
+        return None
+    if terminal.disposition == AGENT_SDK_TERMINAL_OUTPUT_LIMIT:
+        await _finish(
+            AttemptOutcome(
+                attempt_status=AttemptStatus.COMPLETED,
+                result_status=ResultStatus.OUTPUT_LIMIT_REJECTED,
+                usage=usage,
+                failure_code="agent_extract_output_limit",
+                resolved_model=resolved_model,
+                provider_request_id=provider_request_id,
+                finish_reason=finish_reason,
+            )
+        )
+        return None
+    if terminal.disposition != AGENT_SDK_TERMINAL_ACCEPTED:
+        await _finish(
+            AttemptOutcome(
+                attempt_status=AttemptStatus.FAILED,
+                result_status=ResultStatus.NOT_APPLICABLE,
+                usage=usage,
+                failure_code="agent_extract_finish_reason_invalid",
+                resolved_model=resolved_model,
+                provider_request_id=provider_request_id,
+                finish_reason=finish_reason,
+            )
+        )
+        return None
+    if not assistant_contract.valid:
+        await _finish(
+            AttemptOutcome(
+                attempt_status=AttemptStatus.FAILED,
+                result_status=ResultStatus.NOT_APPLICABLE,
+                usage=usage,
+                failure_code="agent_extract_assistant_contract_invalid",
+                resolved_model=resolved_model,
+                provider_request_id=provider_request_id,
+                finish_reason=finish_reason,
+            )
+        )
+        return None
+    if not collected:
+        await _finish(
+            AttemptOutcome(
+                attempt_status=AttemptStatus.COMPLETED,
+                result_status=ResultStatus.EMPTY,
+                usage=usage,
+                failure_code="agent_extract_empty",
+                resolved_model=resolved_model,
+                provider_request_id=provider_request_id,
+                finish_reason=finish_reason,
+            )
+        )
         return None
     parsed = _parse_json_response("\n".join(collected))
     if parsed is None:
+        await _finish(
+            AttemptOutcome(
+                attempt_status=AttemptStatus.COMPLETED,
+                result_status=ResultStatus.PARSE_REJECTED,
+                usage=usage,
+                failure_code="agent_extract_parse_rejected",
+                resolved_model=resolved_model,
+                provider_request_id=provider_request_id,
+                finish_reason=finish_reason,
+            )
+        )
         return None
     try:
-        return normalize_agent_extract_payload(parsed, language=language)
+        normalized = normalize_agent_extract_payload(parsed, language=language)
     except AgentExtractContractError as exc:
+        await _finish(
+            AttemptOutcome(
+                attempt_status=AttemptStatus.COMPLETED,
+                result_status=ResultStatus.SCHEMA_REJECTED,
+                usage=usage,
+                failure_code="agent_extract_schema_rejected",
+                resolved_model=resolved_model,
+                provider_request_id=provider_request_id,
+                finish_reason=finish_reason,
+            )
+        )
         # The diagnostic contains a path and type/size only; raw provider text
         # and source code are deliberately absent.
         log.warning("agent_extract: contract rejected: %s", exc)
         return None
+    candidate_payload = normalize_agent_extract_candidate(
+        {
+            "contract": AGENT_EXTRACT_CANDIDATE_CONTRACT,
+            "language": language,
+            "result": normalized,
+        },
+        language=language,
+    )
+    await _finish_candidate(
+        AttemptOutcome(
+            attempt_status=AttemptStatus.COMPLETED,
+            result_status=ResultStatus.PENDING,
+            usage=usage,
+            resolved_model=resolved_model,
+            provider_request_id=provider_request_id,
+            finish_reason=finish_reason,
+        ),
+        SemanticCandidate(
+            contract_name=AGENT_EXTRACT_CANDIDATE_CONTRACT,
+            binding_fingerprint=binding_fingerprint,
+            payload=candidate_payload,
+        ),
+    )
+    return normalized
 
 
 def _bounded_text(value: Any, *, limit: int, default: str = "") -> str:

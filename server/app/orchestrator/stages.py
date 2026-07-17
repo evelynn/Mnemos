@@ -15,9 +15,9 @@ Usage::
             await stage.increment()
         stage.set_stats({"symbols": totals["symbols"]})
 
-If the ``with`` block raises, the stage is closed as ``failed`` with the
-exception text; budget timeouts raise :class:`StageBudgetExceeded` and the
-stage closes as ``partial``.
+If the ``with`` block raises, the stage is closed with a privacy-safe static
+failure code; budget timeouts raise :class:`StageBudgetExceeded` and the stage
+closes as ``partial``.
 """
 
 from __future__ import annotations
@@ -26,22 +26,20 @@ import asyncio
 import time
 import uuid
 from datetime import datetime, timezone
+from types import TracebackType
 from typing import Any
 
 from sqlalchemy import update
 
 from app.db import SessionLocal
 from app.models.stages import AnalysisStage
+from app.orchestrator.failure_codes import (
+    AnalysisCancelled,
+    StagePartialReason,
+    exception_failure_code,
+    validate_stage_partial_reason,
+)
 from app.orchestrator.progress import ProgressBus
-
-_MAX_STAGE_ERROR_CHARS = 2048
-
-
-def _bounded_stage_error(value: Any) -> str:
-    text = str(value)
-    if len(text) <= _MAX_STAGE_ERROR_CHARS:
-        return text
-    return text[: _MAX_STAGE_ERROR_CHARS - 16] + "\n...[truncated]"
 
 
 class StageBudgetExceeded(Exception):
@@ -77,7 +75,7 @@ class StageTracker:
         self._stage_id: uuid.UUID | None = None
         self._publish_every = 25
         self._last_publish = 0
-        self._partial_reason: str | None = None
+        self._partial_reason: StagePartialReason | None = None
 
     async def __aenter__(self) -> "StageTracker":
         async with SessionLocal() as session:
@@ -110,12 +108,21 @@ class StageTracker:
         )
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
-        if exc_type is not None and (
-            issubclass(exc_type, asyncio.CancelledError)
-            or exc_type.__name__ == "AnalysisCancelled"
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        if exc_type is not None and issubclass(
+            exc_type, (AnalysisCancelled, asyncio.CancelledError)
         ):
-            await self._close("cancelled", error_log="analysis_cancelled")
+            error_code = exception_failure_code(
+                exc if exc is not None else RuntimeError(),
+                domain="stage",
+                cancelled=True,
+            )
+            await self._close("cancelled", error_log=error_code)
             await self._bus.publish(
                 self._run_id,
                 {
@@ -128,8 +135,12 @@ class StageTracker:
             )
             return False
         if exc_type is StageBudgetExceeded:
-            bounded_error = _bounded_stage_error(exc)
-            await self._close("partial", error_log=bounded_error)
+            error_code = exception_failure_code(
+                exc if exc is not None else RuntimeError(),
+                domain="stage",
+                budget_exceeded=True,
+            )
+            await self._close("partial", error_log=error_code)
             await self._bus.publish(
                 self._run_id,
                 {
@@ -144,21 +155,23 @@ class StageTracker:
             )
             return self._suppress_budget_exceeded
         if exc_type is not None:
-            bounded_error = _bounded_stage_error(exc)
-            await self._close("failed", error_log=bounded_error)
+            error_code = exception_failure_code(
+                exc if exc is not None else RuntimeError(),
+                domain="stage",
+            )
+            await self._close("failed", error_log=error_code)
             await self._bus.publish(
                 self._run_id,
                 {
                     "event": "stage_failed",
                     "stage_id": str(self._stage_id),
                     "name": self._name,
-                    "error": bounded_error,
+                    "error": error_code,
                 },
             )
             return False
         if self._partial_reason is not None:
-            bounded_reason = _bounded_stage_error(self._partial_reason)
-            await self._close("partial", error_log=bounded_reason)
+            await self._close("partial", error_log=self._partial_reason)
             await self._bus.publish(
                 self._run_id,
                 {
@@ -168,7 +181,7 @@ class StageTracker:
                     "items_done": self._items_done,
                     "items_total": self._items_total,
                     "stats": self._stats,
-                    "reason": bounded_reason,
+                    "reason": self._partial_reason,
                 },
             )
             return False
@@ -196,7 +209,7 @@ class StageTracker:
     def mark_partial(self, reason: str) -> None:
         """Close an otherwise non-throwing stage as explicitly incomplete."""
 
-        self._partial_reason = reason
+        self._partial_reason = validate_stage_partial_reason(reason)
 
     async def increment(self, amount: int = 1) -> None:
         self._items_done += amount

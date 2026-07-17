@@ -10,16 +10,20 @@ real answer with an LLM.
 message (the same lexical ranker the search uses), enriches them with
 graph facts (data access, call counts, signature) and a slice of the
 actual source code, then hands that context plus the conversation history
-to Claude via the local subscription (``claude_agent_sdk``). The reply is
-free-form markdown. With no LLM available it returns 503 — the lexical
+to the selected bounded provider route. Claude Chat uses only the direct
+Anthropic Messages API. The reply is free-form markdown. With no LLM
+available it returns 503 — the lexical
 ``/ask`` stays the offline fallback.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
+from collections.abc import Mapping
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -29,14 +33,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.ask import _entity_name, _short_path
 from app.api.graph_guard import require_readable_current_graph
 from app.api.llm_providers import (
+    ChatProviderAttemptState,
+    ChatSemanticCodec,
     any_provider_available,
     available_providers,
+    chat_answer_semantic_codec,
     default_provider,
     is_provider_available,
     output_token_limit_capability,
     provider_chat,
     resolve_config,
 )
+import app.db as app_db
 from app.mcp.file_read import read_project_file
 from app.models.graph import Node
 from app.audit.logger import record as audit_record
@@ -44,7 +52,31 @@ from app.auth.deps import CurrentUser
 from app.auth.org_scope import require_project_org
 from app.auth.rbac import require_operator
 from app.db import get_session
-from app.extractor.cost import LLMRunBudget
+from app.extractor.cost import (
+    BudgetExceeded,
+    LLMRunBudget,
+    RunBudgetExceeded,
+)
+from app.llm.contracts import LLMPurpose, ResultStatus
+from app.llm.lifecycle import (
+    AttemptCallbacks,
+    AttemptOutcome,
+    AttemptReplayResult,
+    AttemptStartMetadata,
+    AttemptTicket,
+    BudgetScopeKind,
+    LLMLifecycleError,
+    SemanticCandidate,
+    SemanticCandidateReplay,
+    SemanticCandidateReplayRequest,
+    begin_attempt,
+    classify_attempt_result,
+    finalize_attempt,
+    fingerprint_input,
+    load_attempt_replay,
+    load_terminal_semantic_candidate,
+    use_attempt_callbacks,
+)
 from app.mcp.queries import get_data_access, get_symbol, search_symbols
 
 log = logging.getLogger("mnemos.chat")
@@ -137,6 +169,125 @@ class ChatRequest(BaseModel):
     )
     top_k: int = Field(default=6, ge=1, le=12)
     timeout_s: int = Field(default=180, ge=10, le=300)
+
+
+def _chat_operation_id(
+    project_id: uuid.UUID,
+    purpose: LLMPurpose,
+) -> uuid.UUID:
+    """Stable project/purpose namespace bound to exact input by the adapter."""
+
+    return uuid.uuid5(project_id, purpose.value)
+
+
+def _chat_attempt_callbacks(
+    *,
+    project_id: uuid.UUID,
+    purpose: LLMPurpose,
+    run_budget: LLMRunBudget,
+) -> AttemptCallbacks:
+    """Create short-lived accounting callbacks for one Chat provider call.
+
+    The request's graph-reading session is never held across a provider
+    dispatch. Each accounting transition gets a fresh runtime-resolved
+    ``SessionLocal`` so STARTED is committed and visible before network I/O.
+    """
+
+    async def _start(metadata: AttemptStartMetadata) -> AttemptTicket:
+        async with app_db.SessionLocal() as accounting_db:
+            return await begin_attempt(
+                accounting_db,
+                project_id=project_id,
+                analysis_run_id=None,
+                purpose=purpose,
+                target_id=f"chat:{purpose.value.removeprefix('chat_')}",
+                level=0,
+                run_budget=run_budget,
+                scope_kind=BudgetScopeKind.REQUEST,
+                metadata=metadata,
+                pre_reserved=None,
+                require_atomic_dollar_reservation=True,
+            )
+
+    async def _finish(
+        ticket: AttemptTicket,
+        outcome: AttemptOutcome,
+    ) -> None:
+        async with app_db.SessionLocal() as accounting_db:
+            await finalize_attempt(
+                accounting_db,
+                ticket=ticket,
+                outcome=outcome,
+            )
+
+    async def _finish_candidate(
+        ticket: AttemptTicket,
+        outcome: AttemptOutcome,
+        candidate: SemanticCandidate,
+    ) -> None:
+        async with app_db.SessionLocal() as accounting_db:
+            await finalize_attempt(
+                accounting_db,
+                ticket=ticket,
+                outcome=outcome,
+                candidate=candidate,
+            )
+
+    async def _replay_candidate(
+        request: SemanticCandidateReplayRequest,
+    ) -> SemanticCandidateReplay:
+        async with app_db.SessionLocal() as accounting_db:
+            return await load_terminal_semantic_candidate(
+                accounting_db,
+                operation_id=request.operation_id,
+                attempt_no=request.attempt_no,
+                project_id=project_id,
+                purpose=purpose,
+                input_fingerprint=request.input_fingerprint,
+                contract_name=request.contract_name,
+                binding_fingerprint=request.binding_fingerprint,
+                normalizer=request.normalizer,
+            )
+
+    async def _replay_attempt(
+        request: SemanticCandidateReplayRequest,
+    ) -> AttemptReplayResult:
+        async with app_db.SessionLocal() as accounting_db:
+            return await load_attempt_replay(
+                accounting_db,
+                operation_id=request.operation_id,
+                attempt_no=request.attempt_no,
+                project_id=project_id,
+                purpose=purpose,
+                input_fingerprint=request.input_fingerprint,
+                contract_name=request.contract_name,
+                binding_fingerprint=request.binding_fingerprint,
+                normalizer=request.normalizer,
+            )
+
+    return AttemptCallbacks(
+        start=_start,
+        finish=_finish,
+        finish_candidate=_finish_candidate,
+        replay_candidate=_replay_candidate,
+        replay_attempt=_replay_attempt,
+        mark_provider_dispatch=lambda: None,
+    )
+
+
+async def _classify_chat_candidate(
+    attempt_id: uuid.UUID,
+    *,
+    result_status: ResultStatus,
+    failure_code: str | None = None,
+) -> None:
+    async with app_db.SessionLocal() as accounting_db:
+        await classify_attempt_result(
+            accounting_db,
+            attempt_id=attempt_id,
+            result_status=result_status,
+            failure_code=failure_code,
+        )
 
 
 async def _project_overview(
@@ -491,8 +642,8 @@ def _build_prompt(history: list[ChatMessage], context: str, question: str) -> st
 # Korean (and other non-ASCII) code concepts → the English keywords that
 # actually appear in source. The lexical ranker only matches ASCII tokens,
 # so ``"인증은 어떻게 동작해?"`` tokenises to nothing and never reaches the
-# ``auth`` code. Mapping the concept words in is instant (no extra LLM call,
-# which on the local subscription cold-starts for 60-150s) and matched by
+# ``auth`` code. Mapping the concept words in is instant (no extra provider
+# call) and matched by
 # substring since Korean is agglutinative ("인증은"/"인증을" both contain
 # "인증"). Extend freely — uncovered concepts just fall back to the lexical
 # hits and the model answers what it can.
@@ -612,6 +763,14 @@ def _weak_recall(
 class RewriteTermsContractError(ValueError):
     """Safe diagnostic for the provider → search-term JSON boundary."""
 
+    result_status = ResultStatus.SCHEMA_REJECTED
+
+
+class RewriteTermsParseError(RewriteTermsContractError):
+    """The provider text did not contain the supported JSON dialect."""
+
+    result_status = ResultStatus.PARSE_REJECTED
+
 
 def _actual_shape(value) -> str:  # noqa: ANN001
     if isinstance(value, str):
@@ -664,17 +823,78 @@ def _parse_rewrite_terms(text: str) -> list[str]:
     if candidate.startswith("```"):
         lines = candidate.splitlines()
         if not lines or lines[0].strip().lower() not in {"```", "```json"}:
-            raise RewriteTermsContractError("$: unsupported fenced payload")
+            raise RewriteTermsParseError("$: unsupported fenced payload")
         if len(lines) < 3 or lines[-1].strip() != "```":
-            raise RewriteTermsContractError("$: unterminated JSON fence")
+            raise RewriteTermsParseError("$: unterminated JSON fence")
         candidate = "\n".join(lines[1:-1]).strip()
     try:
         payload = json.loads(candidate)
     except json.JSONDecodeError as exc:
-        raise RewriteTermsContractError(
+        raise RewriteTermsParseError(
             f"$@char{exc.pos}: invalid JSON; return one JSON array only"
         ) from exc
     return _normalize_rewrite_terms(payload)
+
+
+_CHAT_REWRITE_CONTRACT = "mnemos.chat.rewrite.v1"
+
+
+def _normalize_chat_rewrite_candidate(
+    payload: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Validate the encrypted/replayed rewrite candidate without raw text."""
+
+    if not isinstance(payload, Mapping) or set(payload) != {"contract", "terms"}:
+        raise RewriteTermsContractError(
+            "$: expected the exact chat rewrite candidate object"
+        )
+    if payload.get("contract") != _CHAT_REWRITE_CONTRACT:
+        raise RewriteTermsContractError("$: chat rewrite contract does not match")
+    return {
+        "contract": _CHAT_REWRITE_CONTRACT,
+        "terms": _normalize_rewrite_terms(payload.get("terms")),
+    }
+
+
+def _build_chat_rewrite_candidate(text: str) -> Mapping[str, Any]:
+    return _normalize_chat_rewrite_candidate(
+        {
+            "contract": _CHAT_REWRITE_CONTRACT,
+            "terms": _parse_rewrite_terms(text),
+        }
+    )
+
+
+def _render_chat_rewrite_candidate(payload: Mapping[str, Any]) -> str:
+    canonical = _normalize_chat_rewrite_candidate(payload)
+    return json.dumps(
+        canonical["terms"],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _chat_rewrite_semantic_codec(
+    *,
+    binding_identity: str,
+    system: str,
+    prompt: str,
+) -> ChatSemanticCodec:
+    return ChatSemanticCodec(
+        contract_name=_CHAT_REWRITE_CONTRACT,
+        binding_fingerprint=fingerprint_input(
+            "mnemos.chat.rewrite.binding.v1",
+            binding_identity,
+            LLMPurpose.CHAT_REWRITE.value,
+            system,
+            prompt,
+        ),
+        normalize_response=_build_chat_rewrite_candidate,
+        normalizer=_normalize_chat_rewrite_candidate,
+        render_candidate=_render_chat_rewrite_candidate,
+        parse_failure_code="chat_rewrite_parse_rejected",
+        schema_failure_code="chat_rewrite_schema_rejected",
+    )
 
 
 async def _llm_search_terms(
@@ -684,6 +904,9 @@ async def _llm_search_terms(
     cfg: dict,
     timeout_s: int,
     run_budget: LLMRunBudget | None = None,
+    operation_id: uuid.UUID | None = None,
+    attempt_state: ChatProviderAttemptState | None = None,
+    semantic_binding: str | None = None,
 ) -> list[str]:
     """LLM → English code-search terms grounded in THIS project.
 
@@ -719,17 +942,45 @@ async def _llm_search_terms(
             timeout_s=min(timeout_s, 90),
             max_output_tokens=CHAT_REWRITE_MAX_OUTPUT_TOKENS,
             run_budget=run_budget,
+            operation_id=operation_id,
+            attempt_state=attempt_state,
+            semantic_codec=_chat_rewrite_semantic_codec(
+                binding_identity=(
+                    semantic_binding
+                    or (str(operation_id) if operation_id is not None else "unit")
+                ),
+                system=system,
+                prompt=prompt,
+            ),
         )
+    except (BudgetExceeded, RunBudgetExceeded, LLMLifecycleError, asyncio.CancelledError):
+        raise
     except Exception as exc:  # noqa: BLE001
-        log.warning("chat: search-term rewrite failed: %s", exc)
+        # Provider/client exceptions may embed request or response content.
+        # Keep the fallback observable without copying that payload to logs.
+        log.warning(
+            "chat: search-term rewrite failed: %s",
+            exc.__class__.__name__,
+        )
         return []
     if not raw:
         return []
     try:
-        return _parse_rewrite_terms(raw)
+        terms = _parse_rewrite_terms(raw)
     except RewriteTermsContractError as exc:
+        if attempt_state is not None:
+            attempt_state.consumer_result_status = exc.result_status
+            attempt_state.consumer_failure_code = (
+                "chat_rewrite_parse_rejected"
+                if exc.result_status == ResultStatus.PARSE_REJECTED
+                else "chat_rewrite_schema_rejected"
+            )
         log.warning("chat: search-term rewrite contract rejected: %s", exc)
         return []
+    if attempt_state is not None:
+        attempt_state.consumer_result_status = ResultStatus.ACCEPTED
+        attempt_state.consumer_failure_code = None
+    return terms
 
 
 @router.post("/chat", dependencies=[Depends(require_operator)])
@@ -780,14 +1031,56 @@ async def chat(
             max_output_tokens=CHAT_MAX_RESERVED_OUTPUT_TOKENS,
             wall_time_sec=body.timeout_s,
         )
-        rewrite_terms = await _llm_search_terms(
-            body.message,
-            overview,
-            provider,
-            cfg,
-            body.timeout_s,
-            run_budget=llm_run_budget,
-        )
+        rewrite_state = ChatProviderAttemptState()
+        try:
+            async with use_attempt_callbacks(
+                _chat_attempt_callbacks(
+                    project_id=project_id,
+                    purpose=LLMPurpose.CHAT_REWRITE,
+                    run_budget=llm_run_budget,
+                )
+            ):
+                rewrite_terms = await _llm_search_terms(
+                    body.message,
+                    overview,
+                    provider,
+                    cfg,
+                    body.timeout_s,
+                    run_budget=llm_run_budget,
+                    operation_id=_chat_operation_id(
+                        project_id, LLMPurpose.CHAT_REWRITE
+                    ),
+                    attempt_state=rewrite_state,
+                    semantic_binding=str(project_id),
+                )
+            if rewrite_state.attempt_id is not None:
+                rewrite_status = rewrite_state.consumer_result_status
+                # Transport/model failures are already terminal physical
+                # outcomes and have no semantic candidate to classify.  The
+                # optional rewrite must continue with deterministic lexical
+                # retrieval instead of feeding NOT_APPLICABLE into the
+                # semantic CAS (which intentionally rejects that status).
+                if rewrite_status not in {
+                    None,
+                    ResultStatus.PENDING,
+                    ResultStatus.NOT_APPLICABLE,
+                }:
+                    await _classify_chat_candidate(
+                        rewrite_state.attempt_id,
+                        result_status=rewrite_status,
+                        failure_code=rewrite_state.consumer_failure_code,
+                    )
+        except (BudgetExceeded, RunBudgetExceeded) as exc:
+            reason = getattr(exc, "reason", exc.__class__.__name__)
+            raise HTTPException(
+                status_code=429,
+                detail=f"llm_request_budget_exceeded:{reason}",
+            ) from exc
+        except LLMLifecycleError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="llm_accounting_failed",
+            ) from exc
         if rewrite_terms:
             more = await search_symbols(
                 db,
@@ -822,15 +1115,50 @@ async def chat(
             wall_time_sec=body.timeout_s,
         )
 
-    reply = await provider_chat(
-        provider,
-        cfg,
-        system=_SYSTEM,
-        prompt=prompt,
-        timeout_s=body.timeout_s,
-        max_output_tokens=CHAT_ANSWER_MAX_OUTPUT_TOKENS,
-        run_budget=llm_run_budget,
-    )
+    answer_state = ChatProviderAttemptState()
+    try:
+        async with use_attempt_callbacks(
+            _chat_attempt_callbacks(
+                project_id=project_id,
+                purpose=LLMPurpose.CHAT_ANSWER,
+                run_budget=llm_run_budget,
+            )
+        ):
+            reply = await provider_chat(
+                provider,
+                cfg,
+                system=_SYSTEM,
+                prompt=prompt,
+                timeout_s=body.timeout_s,
+                max_output_tokens=CHAT_ANSWER_MAX_OUTPUT_TOKENS,
+                run_budget=llm_run_budget,
+                operation_id=_chat_operation_id(
+                    project_id, LLMPurpose.CHAT_ANSWER
+                ),
+                attempt_state=answer_state,
+                semantic_codec=chat_answer_semantic_codec(
+                    str(project_id),
+                    LLMPurpose.CHAT_ANSWER.value,
+                    _SYSTEM,
+                    prompt,
+                ),
+            )
+        if reply is not None and answer_state.attempt_id is not None:
+            await _classify_chat_candidate(
+                answer_state.attempt_id,
+                result_status=ResultStatus.ACCEPTED,
+            )
+    except (BudgetExceeded, RunBudgetExceeded) as exc:
+        reason = getattr(exc, "reason", exc.__class__.__name__)
+        raise HTTPException(
+            status_code=429,
+            detail=f"llm_request_budget_exceeded:{reason}",
+        ) from exc
+    except LLMLifecycleError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="llm_accounting_failed",
+        ) from exc
     if reply is None:
         if llm_run_budget.exhausted:
             raise HTTPException(
@@ -842,9 +1170,13 @@ async def chat(
     await audit_record(
         actor=f"user:{user.id}",
         action="qa.chat",
-        target=body.message[:120],
+        target=(
+            "query_sha256:"
+            + fingerprint_input("mnemos.audit.chat-query.v1", body.message)
+        ),
         project_id=project_id,
         details={
+            "query_chars": len(body.message),
             "symbols": [c.get("name") for c in included_ctx],
             "code": used_code,
             "provider": provider,

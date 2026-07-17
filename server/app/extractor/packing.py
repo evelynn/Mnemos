@@ -13,6 +13,10 @@ from typing import Any, Iterable
 
 
 MAX_EVIDENCE_PROMPT_CHARS = 16_000
+# Finite allowance for provider message framing/system delimiters around
+# Mnemos-controlled text.  Direct adapters reserve this on top of the UTF-8
+# byte upper bound; opaque Agent SDK paths reserve the full model context.
+PROVIDER_INPUT_ENVELOPE_TOKENS = 256
 
 
 class EvidencePromptTooLarge(ValueError):
@@ -34,7 +38,7 @@ def serialize_evidence(
 
     if max_chars <= 0:
         raise ValueError("max_chars must be positive")
-    serialized = json.dumps(evidence, default=str)
+    serialized = json.dumps(evidence, default=str, sort_keys=True)
     if len(serialized) > max_chars:
         raise EvidencePromptTooLarge(
             f"evidence JSON exceeds hard limit ({len(serialized)} > {max_chars})"
@@ -78,11 +82,21 @@ def evidence_hash(evidence: list[dict[str, Any]]) -> str:
 
 
 def _approx_tokens(obj: Any) -> int:
-    """Conservative JSON estimate used by the packer's hard bound."""
-    # Match the provider prompt serializer (default JSON separators) so the
-    # bound cannot be defeated by whitespace omitted only in the estimate.
-    chars = len(json.dumps(obj, default=str))
-    return max(1, (chars + 3) // 4)
+    """Return a tokenizer-independent upper bound for JSON input tokens.
+
+    Provider tokenizers are not interchangeable and ``characters / 4`` is
+    not an upper bound for source code, Korean text, or adversarial byte
+    sequences.  Canonical JSON's UTF-8 byte length is conservative because a
+    text token must consume at least one input byte.  Callers add their finite
+    provider-envelope allowance separately.
+
+    The historical private name remains to avoid a broad compatibility
+    break; its semantics are now a hard upper-bound reservation, not an
+    approximation.
+    """
+
+    serialized = json.dumps(obj, default=str, sort_keys=True)
+    return max(1, len(serialized.encode("utf-8")))
 
 
 def _bounded_item(item: dict[str, Any], max_tokens: int) -> dict[str, Any]:
@@ -141,8 +155,10 @@ def pack_by_budget(
     has many files: each chunk yields one partial summary, then a rollup
     pass condenses the partials.
     """
-    if max_tokens < 32:
-        raise ValueError("max_tokens must be >= 32")
+    # A privacy-safe truncation sentinel includes a full SHA-256 digest and
+    # therefore cannot fit under the byte-based token upper bound below 128.
+    if max_tokens < 128:
+        raise ValueError("max_tokens must be >= 128")
     chunks: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     for item in items:

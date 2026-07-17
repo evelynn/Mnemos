@@ -72,9 +72,12 @@ def test_llm_cost_sums_physical_call_tokens():
     assert "tokens_used" in slab
     assert "total_tokens" in slab
     assert "LLMCall" in slab
-    # Estimated USD from a configurable per-Mtok rate.
+    # Known spend and unknown billable attempts are distinct; neither the API
+    # nor report is allowed to render an unknown provider call as free.
     assert "estimated_usd" in slab
-    assert "MNEMOS_LLM_USD_PER_MTOK" in slab
+    assert "project_budget_exposure" in slab
+    assert "unknown_provider_calls" in slab
+    assert "cost_indeterminate" in slab
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +139,7 @@ def test_report_shows_cost():
     body = _read(_APP / "dashboard" / "templates" / "report.html")
     assert "rp-cost" in body
     assert "estimated_usd" in body
+    assert "exact cost is indeterminate" in body
 
 
 def test_report_honours_project_query_param():

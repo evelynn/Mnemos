@@ -1,0 +1,209 @@
+{
+  "bounds": {
+    "analyzer_queue_maxsize": 64,
+    "max_buffered_candidates_observed": 50,
+    "records_collected_in_memory": 0,
+    "stage_batch_size": 50
+  },
+  "cleanup": {
+    "private_schema_dropped": true,
+    "temporary_source_tree_removed": true
+  },
+  "contract": "mnemos.postgres_50k_soak.v1",
+  "corpus": {
+    "content_fingerprint": "c2d154bbc5c4769921c70c5ba496d5140c4eee56c8de57a36f83e5bfa47534d2",
+    "directories": 100,
+    "files": 50000,
+    "source_bytes": 1888890,
+    "wall_seconds": 86.005117
+  },
+  "coverage_scope": "deterministic ggoss-py symbols and PostgreSQL graph publication; no optional LLM provider and no non-symbol analyzer verbs",
+  "initial": {
+    "analyzer_stage": {
+      "accepted_records": 50000,
+      "analyzer_queue_maxsize": 64,
+      "analyzer_stage_wall_seconds": 152.836315,
+      "invalid_records": 0,
+      "max_buffered_candidates": 50,
+      "records_per_second": 327.147,
+      "stage_batches": 1000,
+      "stage_db_wall_seconds": 31.494054,
+      "stage_rows_changed": 50000,
+      "staged_candidates": 50000,
+      "stderr_records": 0,
+      "stdout_records": 50000
+    },
+    "base_generation": 0,
+    "graph_rows_after_promotion": {
+      "current_edges": 0,
+      "current_nodes": 50000,
+      "total_edges": 0,
+      "total_nodes": 50000
+    },
+    "promotion": {
+      "counts": {
+        "edges_closed": 0,
+        "edges_downgrade_ignored": 0,
+        "edges_inserted": 0,
+        "edges_unchanged": 0,
+        "nodes_closed": 0,
+        "nodes_downgrade_ignored": 0,
+        "nodes_inserted": 50000,
+        "nodes_unchanged": 0,
+        "stale_edges_closed": 0,
+        "stale_nodes_closed": 0
+      },
+      "generation": 1,
+      "idempotent_retry": false
+    },
+    "promotion_wall_seconds": 65.945067,
+    "published_rows_before_promotion": {
+      "current_edges": 0,
+      "current_nodes": 0,
+      "total_edges": 0,
+      "total_nodes": 0
+    },
+    "receipt": {
+      "atomic": true,
+      "authoritative_sources": [
+        "ggoss-py"
+      ],
+      "base_generation": 0,
+      "counts": {
+        "edges_closed": 0,
+        "edges_downgrade_ignored": 0,
+        "edges_inserted": 0,
+        "edges_unchanged": 0,
+        "nodes_closed": 0,
+        "nodes_downgrade_ignored": 0,
+        "nodes_inserted": 50000,
+        "nodes_unchanged": 0,
+        "stale_edges_closed": 0,
+        "stale_nodes_closed": 0
+      },
+      "generation": 1
+    },
+    "stage_rows_before_promotion": {
+      "edges": 0,
+      "nodes": 50000
+    }
+  },
+  "limitations": [
+    "The corpus exercises one Python symbol per file; calls, contracts, data-access, mixed-language, Git checkout, Redis, HTTP/MCP, and optional LLM paths are outside this component soak.",
+    "The coverage seal is justified by the generator invariant (function declarations only), not by a signed analyzer terminal coverage record; that terminal record is a documented Phase-2 gap.",
+    "RSS is sampled rather than a kernel job-object accounting total."
+  ],
+  "llm_usage": {
+    "after": {
+      "all_token_fields_zero": 1,
+      "calls": 0,
+      "input_tokens": 0,
+      "legacy_tokens": 0,
+      "output_tokens": 0,
+      "provider_total_tokens": 0
+    },
+    "before": {
+      "all_token_fields_zero": 1,
+      "calls": 0,
+      "input_tokens": 0,
+      "legacy_tokens": 0,
+      "output_tokens": 0,
+      "provider_total_tokens": 0
+    },
+    "default_path_zero_calls_and_tokens": true
+  },
+  "peak_rss": {
+    "controller_peak_rss_bytes": 101916672,
+    "max_direct_children": 1,
+    "method": "windows_psapi_sampled_controller_plus_direct_children",
+    "process_tree_peak_rss_bytes": 111190016,
+    "sample_interval_seconds": 0.25,
+    "samples": 2066,
+    "scope_note": "process-tree RSS is sampled and includes the benchmark controller plus direct analyzer children"
+  },
+  "postgres": {
+    "database": "mnemos_test",
+    "private_schema": true,
+    "version": "17.10",
+    "version_num": 170010
+  },
+  "private_schema": {
+    "dropped": true,
+    "name": "mnemos_e4_50k_70e521b912f94758a2f348dfea43d047"
+  },
+  "same_content_refresh": {
+    "analyzer_stage": {
+      "accepted_records": 50000,
+      "analyzer_queue_maxsize": 64,
+      "analyzer_stage_wall_seconds": 125.987488,
+      "invalid_records": 0,
+      "max_buffered_candidates": 50,
+      "records_per_second": 396.865,
+      "stage_batches": 1000,
+      "stage_db_wall_seconds": 18.764421,
+      "stage_rows_changed": 50000,
+      "staged_candidates": 50000,
+      "stderr_records": 0,
+      "stdout_records": 50000
+    },
+    "base_generation": 1,
+    "graph_rows_after_promotion": {
+      "current_edges": 0,
+      "current_nodes": 50000,
+      "total_edges": 0,
+      "total_nodes": 50000
+    },
+    "promotion": {
+      "counts": {
+        "edges_closed": 0,
+        "edges_downgrade_ignored": 0,
+        "edges_inserted": 0,
+        "edges_unchanged": 0,
+        "nodes_closed": 0,
+        "nodes_downgrade_ignored": 0,
+        "nodes_inserted": 0,
+        "nodes_unchanged": 50000,
+        "stale_edges_closed": 0,
+        "stale_nodes_closed": 0
+      },
+      "generation": 2,
+      "idempotent_retry": false
+    },
+    "promotion_wall_seconds": 11.354563,
+    "published_rows_before_promotion": {
+      "current_edges": 0,
+      "current_nodes": 50000,
+      "total_edges": 0,
+      "total_nodes": 50000
+    },
+    "receipt": {
+      "atomic": true,
+      "authoritative_sources": [
+        "ggoss-py"
+      ],
+      "base_generation": 1,
+      "counts": {
+        "edges_closed": 0,
+        "edges_downgrade_ignored": 0,
+        "edges_inserted": 0,
+        "edges_unchanged": 0,
+        "nodes_closed": 0,
+        "nodes_downgrade_ignored": 0,
+        "nodes_inserted": 0,
+        "nodes_unchanged": 50000,
+        "stale_edges_closed": 0,
+        "stale_nodes_closed": 0
+      },
+      "generation": 2
+    },
+    "semantic_noop": true,
+    "stage_rows_before_promotion": {
+      "edges": 0,
+      "nodes": 50000
+    },
+    "total_refresh_wall_seconds": 137.387075
+  },
+  "schema_setup_wall_seconds": 1.482513,
+  "status": "passed",
+  "total_wall_seconds": 541.036669
+}

@@ -23,6 +23,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("fake_llm_attempt_callbacks")
+
 
 # ─── SDK 환경 감지 ─────────────────────────────────────────────────
 
@@ -256,8 +258,7 @@ def test_is_agent_sdk_disabled_via_env(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_summarize_handles_sdk_timeout(monkeypatch):
-    """If the SDK call exceeds timeout_s, function returns None
-    rather than raising into the caller."""
+    """The adapter preserves timeout as a typed owning-runner outcome."""
     from app.extractor import agent_sdk
 
     import asyncio as _asyncio
@@ -286,8 +287,9 @@ async def test_summarize_handles_sdk_timeout(monkeypatch):
     })
 
     with patch.dict("sys.modules", {"claude_agent_sdk": fake_mod}):
-        result = await agent_sdk.summarize_via_agent_sdk(
-            model="x", level=1, target_id="t",
-            evidence=[], timeout_s=1,
-        )
-    assert result is None
+        with pytest.raises(TimeoutError, match="agent_sdk_timeout"):
+            await agent_sdk.summarize_via_agent_sdk(
+                model=agent_sdk.AGENT_SDK_BUDGETED_MODEL,
+                level=1, target_id="t",
+                evidence=[], timeout_s=1,
+            )

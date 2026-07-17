@@ -1,15 +1,14 @@
-"""PR-90 — embedding scaffold (spec §11.3, §15) wired through search.
+"""Embedding math/schema scaffold with cloud execution fail-closed.
 
 The Q&A reviewer's CRITICAL #2 was that ``search_symbols`` was BM25-
 only — the vector half of the spec's "벡터 + BM25 앙상블 (RRF)" was
 unimplemented and no scaffold existed. Per the user's instruction
-to "preempt with the library / migration", this PR ships the full
-turn-on path:
+to "preempt with the library / migration", this PR shipped the schema and
+deterministic fusion helpers. The former direct cloud adapter is now disabled
+until it owns durable project accounting and a hard price contract:
 
-* ``app/mcp/embeddings.py`` — provider adapter (Voyage / OpenAI),
-  ``embed_query``/``embed_batch``/``rrf_fuse``/``cosine_similarity``.
-  Returns ``None`` when no provider is configured, so the existing
-  pure-lexical search stays unchanged.
+* ``app/mcp/embeddings.py`` — ``embed_query``/``embed_batch`` fail closed;
+  ``rrf_fuse``/``cosine_similarity`` remain pure helpers.
 * ``alembic 0022`` — opt-in: adds the ``nodes.embedding`` column +
   HNSW cosine index. Skips itself cleanly when ``pgvector`` isn't
   installed on the connecting Postgres.
@@ -17,14 +16,15 @@ turn-on path:
   the column exists, the lexical and vector rankings are RRF-fused.
 * ``pyproject.toml`` — ``[search]`` extra with ``pgvector``.
 
-The vector half stays disabled until an operator installs the extra,
-runs the migration and sets the env vars — no behaviour change in
-the default install. Unit-tested helpers below.
+Cloud vector search cannot be activated by environment variables. Unit-tested
+helpers and the no-dispatch boundary are below.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
 
 
 def test_rrf_fuse_combines_two_ranked_lists():
@@ -57,12 +57,18 @@ def test_embeddings_disabled_by_default(monkeypatch):
     assert embeddings.is_enabled() is False
 
 
-def test_embeddings_picks_up_voyage_provider(monkeypatch):
+@pytest.mark.asyncio
+async def test_configured_cloud_embeddings_stay_fail_closed(monkeypatch, caplog):
     from app.mcp import embeddings
 
     monkeypatch.setenv("MNEMOS_EMBEDDING_PROVIDER", "voyage")
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
-    assert embeddings.is_enabled() is True
+    assert embeddings._load_config().provider == "voyage"
+    assert embeddings.is_enabled() is False
+    assert await embeddings.embed_batch(["bounded query"]) is None
+    assert embeddings.CLOUD_EMBEDDING_DISABLED_REASON in caplog.text
+    # The disabled module has no HTTP client left to accidentally call.
+    assert not hasattr(embeddings, "httpx")
 
 
 def test_pyproject_declares_search_extra():

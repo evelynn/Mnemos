@@ -20,6 +20,9 @@ The split between hard and soft mirrors the spec:
 - Crypto round-trip must work. A broken FERNET_KEY means the
   first secret read throws — by then a webhook may already
   be enqueued.
+- A reachable PostgreSQL database using an isolation level that
+  invalidates atomic dollar reservations is an unsafe config and
+  must fail hard. Runtime accounting repeats this guard.
 - DB / Redis being briefly down at startup is normal during
   ``docker compose restart`` — soft.
 - Analyzer binaries are advisory by design (PR-98).
@@ -65,24 +68,38 @@ async def _check_crypto() -> None:
 
 
 async def _check_db_soft() -> bool:
-    """Best-effort DB probe. Returns False (with a log) on failure
-    — startup proceeds, /health/ready will flip 503 until it
-    recovers. Returning ``False`` rather than raising matches the
-    spec: "the platform should keep running through transient
-    dependency blips" (§2.7 always-on)."""
+    """Probe availability and reject a reachable unsafe transaction mode.
+
+    Connectivity remains soft so a normal dependency restart does not brick
+    the service. Once PostgreSQL is reachable, an isolation mode that can
+    undercount a serialized dollar reservation is configuration corruption,
+    not an availability blip, and therefore fails startup hard.
+    """
     try:
         from sqlalchemy import text
 
         from app.db import SessionLocal
+        from app.llm.lifecycle import (
+            LLMLifecycleError,
+            assert_attempt_accounting_isolation,
+        )
 
         async with SessionLocal() as db:
             await db.execute(text("SELECT 1"))
+            try:
+                await assert_attempt_accounting_isolation(db)
+            except LLMLifecycleError as exc:
+                raise StartupCheckFailed(
+                    "database.postgresql_isolation_requires_read_committed"
+                ) from exc
         log.info("startup_verify.database OK")
         return True
-    except Exception as exc:  # noqa: BLE001
+    except StartupCheckFailed:
+        raise
+    except Exception:  # noqa: BLE001
         log.warning(
-            "startup_verify.database FAILED (soft): %s: %s — /health/ready will reflect this",
-            exc.__class__.__name__, exc,
+            "startup_verify.database FAILED (soft) "
+            "failure_code=database_unavailable — /health/ready will reflect this"
         )
         return False
 
@@ -97,10 +114,10 @@ async def _check_redis_soft() -> bool:
             raise RuntimeError("no pong")
         log.info("startup_verify.redis OK")
         return True
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         log.warning(
-            "startup_verify.redis FAILED (soft): %s: %s — /health/ready will reflect this",
-            exc.__class__.__name__, exc,
+            "startup_verify.redis FAILED (soft) "
+            "failure_code=redis_unavailable — /health/ready will reflect this"
         )
         return False
 
@@ -125,44 +142,22 @@ def _check_analyzers_soft() -> None:
 
 
 def _check_embeddings_soft() -> None:
-    """PR-138 — surface MNEMOS_EMBEDDING_PROVIDER misconfigs at boot.
-
-    The MCP audit found that setting ``MNEMOS_EMBEDDING_PROVIDER=voyage``
-    without (a) installing the ``[search]`` extra or (b) running
-    alembic 0022 collapses vector search to BM25-only **silently**. By
-    the time anyone notices, every search has been lexical-only for
-    days. Catching it at boot (advisory only — the platform still
-    serves) tells the operator on log line 1 instead of after a
-    support escalation.
-    """
+    """Surface the deliberately disabled cloud-embedding route at boot."""
     import os
+
+    from app.mcp.embeddings import CLOUD_EMBEDDING_DISABLED_REASON
 
     provider = (os.environ.get("MNEMOS_EMBEDDING_PROVIDER") or "").strip()
     if not provider:
         return  # operator hasn't asked for embeddings — nothing to verify
-    # pgvector is an optional install — surface its absence loudly.
-    try:
-        import pgvector  # noqa: F401
-    except ImportError:
-        log.warning(
-            "startup_verify.embeddings MISCONFIGURED: "
-            "MNEMOS_EMBEDDING_PROVIDER=%s but pgvector is not installed. "
-            "Vector search will silently degrade to BM25. "
-            "Fix: pip install 'mnemos-platform[search]'",
-            provider,
-        )
-        return
-    # API key is per-provider — list the one we need.
-    key_var = "VOYAGE_API_KEY" if provider == "voyage" else "OPENAI_API_KEY"
-    if not (os.environ.get(key_var) or "").strip():
-        log.warning(
-            "startup_verify.embeddings MISCONFIGURED: "
-            "MNEMOS_EMBEDDING_PROVIDER=%s set but %s is empty. "
-            "Vector search will silently degrade to BM25.",
-            provider, key_var,
-        )
-        return
-    log.info("startup_verify.embeddings OK (provider=%s)", provider)
+    log.warning(
+        "startup_verify.embeddings DISABLED: "
+        "MNEMOS_EMBEDDING_PROVIDER is configured but cannot authorize cloud inference "
+        "(%s). Search remains deterministic BM25/lexical; unset this "
+        "variable until project-scoped durable accounting and immutable "
+        "price bounds are implemented.",
+        CLOUD_EMBEDDING_DISABLED_REASON,
+    )
 
 
 async def run_startup_verify() -> None:
@@ -178,9 +173,7 @@ async def run_startup_verify() -> None:
         # Anything other than the explicit StartupCheckFailed
         # (e.g. cryptography ImportError, missing key) is also a
         # hard fail by design — a broken crypto path = unsafe boot.
-        raise StartupCheckFailed(
-            f"crypto.{exc.__class__.__name__}: {exc}"
-        ) from exc
+        raise StartupCheckFailed("crypto_unavailable") from exc
     await _check_db_soft()
     await _check_redis_soft()
     _check_analyzers_soft()

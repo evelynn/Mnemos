@@ -106,6 +106,10 @@ def test_sandbox_tool_explains_safety_boundaries():
     # decisions: network, filesystem, and timeout.
     assert "allowlist" in slab.lower() or "allowlisted" in slab.lower()
     assert "network" in slab.lower() or "read-only" in slab.lower()
+    assert "sandbox_backend_unavailable" in slab
+    assert "MNEMOS_TRUSTED_LOCAL_EXECUTION=1" in slab
+    assert "always disabled in production" in slab.lower()
+    assert "no os-level" in slab.lower()
 
 
 def test_sensitive_data_tools_state_refusal_behaviour():

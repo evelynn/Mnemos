@@ -266,7 +266,7 @@ async def refresh_sample(
             detail={
                 "schema": "mnemos.error.v1",
                 "error": GRAPH_SNAPSHOT_UNAVAILABLE_CODE,
-                "reason": str(exc),
+                "reason": GRAPH_SNAPSHOT_UNAVAILABLE_CODE,
             },
         ) from exc
     entity = (
@@ -585,7 +585,7 @@ async def query_data(
             details={"kind": exc.kind, "purpose": body.purpose},
         )
         raise HTTPException(status_code=400, detail=f"write_blocked:{exc.kind}")
-    except Exception as exc:  # sqlglot.ParseError and friends
+    except Exception:  # sqlglot.ParseError and friends
         # Surface a structured detail so the dashboard can render a
         # friendlier error than the raw sqlglot exception string —
         # 4th-round audit (scenario 2 / C3).
@@ -597,7 +597,7 @@ async def query_data(
                 "or a write keyword that slipped through (INSERT/UPDATE/"
                 "DELETE/MERGE)."
             ),
-            "parser_error": str(exc)[:300],
+            "parser_error": "sql_parse_rejected",
         }
         raise HTTPException(status_code=400, detail=detail)
 

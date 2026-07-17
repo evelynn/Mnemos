@@ -96,10 +96,11 @@ class GitSourceSnapshot:
     revision: str
     mirrors: tuple[Path, ...]
     tree_prefix: str
-    # Present only for an implicit "current graph" resolution.  Consumers
-    # that perform I/O after resolution must revalidate this stamp after that
-    # I/O, because PostgreSQL READ COMMITTED can publish a new generation in
-    # between. Explicit historical reads intentionally carry no stamp.
+    # Present whenever this run owns the ready current graph, whether selected
+    # implicitly or by an explicit run id. Consumers that perform I/O after
+    # resolution must revalidate this stamp after that I/O, because PostgreSQL
+    # READ COMMITTED can publish a new generation in between. A genuinely
+    # historical explicit read intentionally carries no stamp.
     graph_stamp: GraphReadStamp | None = None
 
 
@@ -406,6 +407,19 @@ async def resolve_git_source_snapshot(
         selected_run_id = graph_stamp.current_run_id
     else:
         selected_run_id = requested_run_id
+        # An explicit selector is not necessarily historical: callers may pin
+        # the ready current run by id. Preserve the current-head stamp in that
+        # case so downstream publication and post-I/O revalidation use the
+        # same visibility contract as an implicit current read.
+        try:
+            observed_stamp = await read_graph_stamp(db, project_id=project_id)
+        except GraphPublicationError:
+            observed_stamp = None
+        if (
+            observed_stamp is not None
+            and observed_stamp.current_run_id == requested_run_id
+        ):
+            graph_stamp = observed_stamp
 
     stmt = select(AnalysisRun).where(
         AnalysisRun.project_id == project_id,

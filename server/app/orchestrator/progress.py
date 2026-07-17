@@ -7,6 +7,7 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+
 def _channel(run_id: uuid.UUID) -> str:
     return f"mnemos:run:{run_id}"
 
@@ -42,9 +43,20 @@ class ProgressBus:
                 if not data:
                     continue
                 try:
-                    yield json.loads(data)
-                except json.JSONDecodeError:
-                    yield {"raw": data}
+                    event = json.loads(data)
+                except (json.JSONDecodeError, TypeError):
+                    yield {
+                        "event": "progress_unavailable",
+                        "error": "progress_event_invalid",
+                    }
+                    continue
+                if not isinstance(event, dict):
+                    yield {
+                        "event": "progress_unavailable",
+                        "error": "progress_event_invalid",
+                    }
+                    continue
+                yield event
         finally:
             await pubsub.unsubscribe(_channel(run_id))
             await pubsub.close()

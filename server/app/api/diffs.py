@@ -31,6 +31,7 @@ from app.review_revision import (
     lock_review_graph_revision,
     read_review_graph_stamp,
     require_review_revision,
+    resolve_review_revision_from_stamp,
 )
 from app.sandbox.worktree import (
     WorktreeRevisionError,
@@ -148,6 +149,11 @@ async def submit_diff(
             db,
             project_id=plan.project_id,
         )
+        product_revision = await resolve_review_revision_from_stamp(
+            db,
+            project_id=plan.project_id,
+            stamp=review_stamp,
+        )
     except GraphPublicationError as exc:
         await db.rollback()
         raise HTTPException(
@@ -162,6 +168,7 @@ async def submit_diff(
         project_id=plan.project_id,
         plan_id=plan.id,
         diff=body.diff,
+        review_revision=product_revision,
     )
     try:
         review_revision = await lock_review_graph_revision(

@@ -66,13 +66,28 @@ _RAW_DATA_KEYS = {
     "code",
     "content",
     "content_base64",
+    "contract_errors",
+    "error",
+    "error_log",
+    "errors",
+    "exception",
     "file_text",
     "full_text",
     "payload",
+    "prompt",
     "raw",
+    "request",
+    "request_body",
+    "response",
+    "response_body",
     "snippet",
     "source_text",
+    "system_prompt",
+    "traceback",
 }
+_MAX_OUTPUT_DEPTH = 4
+_MAX_OUTPUT_KEYS = 80
+_MAX_OUTPUT_ITEMS = 50
 _LOW_SIGNAL_PATH_SEGMENTS = {
     "tests",
     "test",
@@ -189,24 +204,65 @@ def _signature_excerpt(value: Any) -> str | None:
     return f"{first_line[:_MAX_SIGNATURE_CHARS]}... [truncated chars={len(value)}]"
 
 
+def _safe_node_value(value: Any, *, key_s: str, depth: int) -> Any:
+    low = key_s.lower()
+    if key_s == "signature":
+        return _signature_excerpt(value)
+    if (
+        low in _RAW_DATA_KEYS
+        or low.endswith("_raw")
+        or low.endswith("_content")
+        or low.endswith("_blob")
+        or low.endswith("_prompt")
+        or low.endswith("_request")
+        or low.endswith("_response")
+    ):
+        return {"omitted": "raw_payload"}
+    if depth >= _MAX_OUTPUT_DEPTH:
+        return {"omitted": "max_depth"}
+    if isinstance(value, str):
+        if len(value) > _MAX_OUTPUT_STRING_CHARS:
+            return {"omitted": "large_string", "chars": len(value)}
+        return value
+    if isinstance(value, bytes):
+        return {"omitted": "bytes", "bytes": len(value)}
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for index, (child_key, child_value) in enumerate(value.items()):
+            if index >= _MAX_OUTPUT_KEYS:
+                break
+            child_key_s = (
+                child_key
+                if isinstance(child_key, str)
+                else f"__non_string_key_{index}__"
+            )
+            out[child_key_s] = _safe_node_value(
+                child_value,
+                key_s=child_key_s,
+                depth=depth + 1,
+            )
+        if len(value) > _MAX_OUTPUT_KEYS:
+            out["__truncated_keys__"] = len(value) - _MAX_OUTPUT_KEYS
+        return out
+    if isinstance(value, list):
+        out = [
+            _safe_node_value(item, key_s=key_s, depth=depth + 1)
+            for item in value[:_MAX_OUTPUT_ITEMS]
+        ]
+        if len(value) > _MAX_OUTPUT_ITEMS:
+            out.append({"__truncated_items__": len(value) - _MAX_OUTPUT_ITEMS})
+        return out
+    if value is None or type(value) in {bool, int, float}:
+        return value
+    return {"omitted": "unsupported_type"}
+
+
 def _safe_node_data(data: dict[str, Any] | None) -> dict[str, Any]:
     out: dict[str, Any] = {}
-    for key, value in (data or {}).items():
-        key_s = str(key)
+    for index, (key, value) in enumerate((data or {}).items()):
+        key_s = key if isinstance(key, str) else f"__non_string_key_{index}__"
         low = key_s.lower()
-        if key_s == "signature":
-            out[key_s] = _signature_excerpt(value)
-        elif (
-            low in _RAW_DATA_KEYS
-            or low.endswith("_raw")
-            or low.endswith("_content")
-            or low.endswith("_blob")
-        ):
-            out[key_s] = {"omitted": "raw_payload"}
-        elif isinstance(value, str) and len(value) > _MAX_OUTPUT_STRING_CHARS:
-            out[key_s] = {"omitted": "large_string", "chars": len(value)}
-        else:
-            out[key_s] = value
+        out[key_s] = _safe_node_value(value, key_s=low, depth=0)
     return out
 
 
@@ -1332,13 +1388,13 @@ def _publication_asof(run: AnalysisRun) -> tuple[datetime | None, str | None]:
     """
 
     if run.status not in {"completed", "partial"}:
-        return None, f"run status {run.status!r} is not a terminal publication"
+        return None, "run_not_terminal_publication"
     if run.completed_at is None:
         return None, "terminal publication has no completed_at"
     try:
         publication = validate_graph_publication_receipt(run)
-    except GraphPublicationInvariantError as exc:
-        return None, str(exc)
+    except GraphPublicationInvariantError:
+        return None, "run_graph_publication_invalid"
     return publication.published_at, None
 
 

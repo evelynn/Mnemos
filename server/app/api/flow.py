@@ -18,32 +18,61 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select, update
+from sqlalchemy import case, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
 from app.auth.deps import CurrentUser
 from app.auth.org_scope import require_project_org
 from app.auth.rbac import require_operator
+import app.db as app_db
 from app.db import get_session
 from app.api.graph_guard import require_readable_current_graph
 from app.extractor.agent_flow import (
     FLOW_LEVEL,
     FLOW_RESULT_CONTRACT,
+    FlowAttemptState,
     FlowContractError,
     analyze_flow_via_agent_sdk,
     build_flow_summary_content,
+    flow_candidate_binding_fingerprint,
     is_agent_sdk_available,
+    normalize_flow_payload,
 )
 from app.extractor.cost import (
     BudgetExceeded,
     LLMRunBudget,
     RunBudgetExceeded,
-    require_budget,
 )
 from app.graph_publication import GraphPublicationError
-from app.models.findings import LLMCall, Summary
-from app.models.graph import Edge, Node
+from app.models.findings import Summary
+from app.llm.contracts import LLMPurpose, ResultStatus
+from app.llm.lifecycle import (
+    AttemptCallbacks,
+    AttemptOutcome,
+    AttemptReplayResult,
+    AttemptStartMetadata,
+    AttemptTicket,
+    BudgetScopeKind,
+    LLMLifecycleError,
+    SemanticCandidate,
+    SemanticCandidateReplay,
+    SemanticCandidateReplayRequest,
+    begin_attempt,
+    classify_attempt_result,
+    finalize_attempt,
+    fingerprint_input,
+    load_attempt_replay,
+    load_terminal_semantic_candidate,
+    lock_semantic_candidate_for_product,
+    use_attempt_callbacks,
+)
+from app.models.graph import (
+    ANALYSIS_RUN_SOURCE_PUBLISHED_STATUSES,
+    AnalysisRun,
+    Edge,
+    Node,
+)
 from app.mcp.file_read import read_project_file
 from app.source_snapshot import (
     GitSourceSnapshot,
@@ -139,12 +168,17 @@ async def _load_snapshot_sources(
 
     sources: list[dict] = []
     skipped: list[str] = []
+    seen_paths: set[str] = set()
     for index, raw in enumerate(project_paths):
         try:
             project_path = normalize_project_path(raw)
         except SourceSnapshotError:
             skipped.append(f"input[{index}]:invalid_project_path")
             continue
+        if project_path in seen_paths:
+            skipped.append(f"{project_path}:duplicate_source_path")
+            continue
+        seen_paths.add(project_path)
 
         window = await read_project_file(
             db,
@@ -235,20 +269,29 @@ async def _gather_files_from_graph(
     terms = [t for t in re.split(r"[^a-z0-9]+", entry.lower()) if len(t) >= 3]
     if not terms:
         return []
-    conds = []
+    term_matches = []
     for t in terms:
         like = f"%{t}%"
-        conds.append(Node.data["name"].astext.ilike(like))
-        conds.append(Node.data["id"].astext.ilike(like))
-        conds.append(Node.data["signature"].astext.ilike(like))
+        term_matches.append(
+            or_(
+                Node.data["name"].astext.ilike(like),
+                Node.data["id"].astext.ilike(like),
+                Node.data["signature"].astext.ilike(like),
+            )
+        )
+    relevance = sum(
+        (case((term_match, 1), else_=0) for term_match in term_matches),
+        start=literal(0),
+    )
     seeds = (
         await db.execute(
             select(Node)
             .where(
                 Node.project_id == project_id,
                 Node.valid_to.is_(None),
-                or_(*conds),
+                or_(*term_matches),
             )
+            .order_by(relevance.desc(), Node.id.asc())
             .limit(20)
         )
     ).scalars().all()
@@ -264,7 +307,14 @@ async def _gather_files_from_graph(
                     Edge.project_id == project_id,
                     Edge.valid_to.is_(None),
                     or_(Edge.source_id.in_(seed_ids), Edge.target_id.in_(seed_ids)),
-                ).limit(200)
+                )
+                .order_by(
+                    Edge.kind.asc(),
+                    Edge.source_id.asc(),
+                    Edge.target_id.asc(),
+                    Edge.id.asc(),
+                )
+                .limit(200)
             )
         ).scalars().all()
         neighbour_ids = {e.source_id for e in edges} | {e.target_id for e in edges}
@@ -277,6 +327,7 @@ async def _gather_files_from_graph(
                         Node.valid_to.is_(None),
                         Node.id.in_(neighbour_ids),
                     )
+                    .order_by(Node.id.asc())
                 )
             ).scalars().all()
             for n in extra:
@@ -303,56 +354,177 @@ async def _analyze_and_persist(
     snapshot: GitSourceSnapshot,
 ) -> dict:
     run_budget = LLMRunBudget.from_env()
+    attempt_state = FlowAttemptState()
 
-    async def _before_provider_call() -> None:
-        await require_budget(db, project_id)
-
-    async def _record_physical_call(
-        status: str, fallback_reason: str | None, model: str
-    ) -> None:
-        # Agent SDK usage is not trustworthy/available, so NULL is the honest
-        # token value.  Commit the physical-attempt fact independently before
-        # any flow validation or Summary write can fail.
-        db.add(
-            LLMCall(
-                project_id=project_id,
-                analysis_run_id=snapshot.run_id,
-                target_id=f"flow:{_slug(entry)}",
-                level=FLOW_LEVEL,
-                model_used=f"claude_code:{model}",
-                tokens_used=None,
-                status=status,
-                fallback_reason=fallback_reason,
-                generated_at=datetime.now(tz=timezone.utc),
-            )
+    async def _start_attempt(
+        metadata: AttemptStartMetadata,
+    ) -> AttemptTicket:
+        return await begin_attempt(
+            db,
+            project_id=project_id,
+            # The immutable source run remains on the Summary product. This
+            # user-triggered provider budget is a fresh request scope.
+            analysis_run_id=None,
+            purpose=LLMPurpose.FLOW,
+            target_id=f"flow:{_slug(entry)}",
+            level=FLOW_LEVEL,
+            run_budget=run_budget,
+            scope_kind=BudgetScopeKind.REQUEST,
+            metadata=metadata,
+            pre_reserved=None,
+            require_atomic_dollar_reservation=True,
         )
-        try:
-            await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
+
+    async def _finish_attempt(
+        ticket: AttemptTicket,
+        outcome: AttemptOutcome,
+    ) -> None:
+        await finalize_attempt(db, ticket=ticket, outcome=outcome)
+
+    async def _finish_candidate(
+        ticket: AttemptTicket,
+        outcome: AttemptOutcome,
+        candidate: SemanticCandidate,
+    ) -> None:
+        await finalize_attempt(
+            db,
+            ticket=ticket,
+            outcome=outcome,
+            candidate=candidate,
+        )
+
+    async def _replay_candidate(
+        request: SemanticCandidateReplayRequest,
+    ) -> SemanticCandidateReplay:
+        # Snapshot/source reads on the request session may already own a
+        # transaction. Candidate replay is a read-only exact-identity lookup
+        # and deliberately uses a fresh accounting session.
+        async with app_db.SessionLocal() as accounting_db:
+            return await load_terminal_semantic_candidate(
+                accounting_db,
+                operation_id=request.operation_id,
+                attempt_no=request.attempt_no,
+                project_id=project_id,
+                purpose=LLMPurpose.FLOW,
+                input_fingerprint=request.input_fingerprint,
+                contract_name=request.contract_name,
+                binding_fingerprint=request.binding_fingerprint,
+                normalizer=request.normalizer,
+            )
+
+    async def _replay_attempt(
+        request: SemanticCandidateReplayRequest,
+    ) -> AttemptReplayResult:
+        async with app_db.SessionLocal() as accounting_db:
+            return await load_attempt_replay(
+                accounting_db,
+                operation_id=request.operation_id,
+                attempt_no=request.attempt_no,
+                project_id=project_id,
+                purpose=LLMPurpose.FLOW,
+                input_fingerprint=request.input_fingerprint,
+                contract_name=request.contract_name,
+                binding_fingerprint=request.binding_fingerprint,
+                normalizer=request.normalizer,
+            )
+
+    callbacks = AttemptCallbacks(
+        start=_start_attempt,
+        finish=_finish_attempt,
+        finish_candidate=_finish_candidate,
+        replay_candidate=_replay_candidate,
+        replay_attempt=_replay_attempt,
+        mark_provider_dispatch=lambda: None,
+    )
+
+    visibility_identity = (
+        "current"
+        f":{snapshot.graph_stamp.generation}"
+        f":{snapshot.graph_stamp.overlay_generation}"
+        if snapshot.graph_stamp is not None
+        else "historical"
+    )
+    operation_namespace = uuid.uuid5(
+        project_id,
+        "\x00".join(
+            (
+                LLMPurpose.FLOW.value,
+                str(snapshot.run_id),
+                snapshot.revision,
+                visibility_identity,
+                f"flow:{_slug(entry)}",
+            )
+        ),
+    )
+    semantic_binding_identity = fingerprint_input(
+        "mnemos.flow.consumer.v2",
+        str(project_id),
+        str(snapshot.run_id),
+        snapshot.revision,
+        visibility_identity,
+        entry,
+    )
 
     try:
-        envelope = await analyze_flow_via_agent_sdk(
-            entry=entry,
-            sources=sources,
-            run_budget=run_budget,
-            before_provider_call=_before_provider_call,
-            record_physical_call=_record_physical_call,
-        )
+        async with use_attempt_callbacks(callbacks):
+            envelope = await analyze_flow_via_agent_sdk(
+                entry=entry,
+                sources=sources,
+                run_budget=run_budget,
+                attempt_state=attempt_state,
+                operation_id=operation_namespace,
+                semantic_binding_identity=semantic_binding_identity,
+            )
     except BudgetExceeded as exc:
         raise HTTPException(status_code=429, detail="flow_budget_exceeded") from exc
     except RunBudgetExceeded as exc:
         raise HTTPException(status_code=429, detail=exc.reason) from exc
+    except LLMLifecycleError as exc:
+        raise HTTPException(status_code=503, detail="flow_accounting_failed") from exc
+
+    async def _reject_invalid_pending_candidate(failure_code: str) -> None:
+        binding = attempt_state.candidate_binding_fingerprint
+        attempt_id = attempt_state.attempt_id
+        if (
+            attempt_state.result_status != ResultStatus.PENDING
+            or not isinstance(attempt_id, uuid.UUID)
+            or not isinstance(binding, str)
+        ):
+            return
+        try:
+            await lock_semantic_candidate_for_product(
+                db,
+                attempt_id=attempt_id,
+                project_id=project_id,
+                purpose=LLMPurpose.FLOW,
+                contract_name=FLOW_RESULT_CONTRACT,
+                binding_fingerprint=binding,
+                normalizer=normalize_flow_payload,
+            )
+            await classify_attempt_result(
+                db,
+                attempt_id=attempt_id,
+                result_status=ResultStatus.SCHEMA_REJECTED,
+                failure_code=failure_code,
+            )
+        except LLMLifecycleError as exc:
+            await db.rollback()
+            raise HTTPException(
+                status_code=503,
+                detail="flow_accounting_failed",
+            ) from exc
 
     if not isinstance(envelope, dict) or set(envelope) != {"flow", "source_scope"}:
+        await _reject_invalid_pending_candidate("flow_envelope_invalid")
         raise HTTPException(status_code=502, detail="flow_analysis_failed")
     flow = envelope.get("flow")
     if not isinstance(flow, dict) or flow.get("contract") != FLOW_RESULT_CONTRACT:
+        await _reject_invalid_pending_candidate("flow_envelope_invalid")
         raise HTTPException(status_code=502, detail="flow_analysis_failed")
     source_scope = envelope.get("source_scope")
     scope_files = source_scope.get("files") if isinstance(source_scope, dict) else None
     if not isinstance(scope_files, list) or not scope_files:
+        await _reject_invalid_pending_candidate("flow_source_scope_invalid")
         raise HTTPException(status_code=502, detail="flow_source_scope_missing")
     included_labels = [
         item.get("label")
@@ -365,10 +537,40 @@ async def _analyze_and_persist(
         or len(set(included_labels)) != len(included_labels)
         or any(label not in source_by_label for label in included_labels)
     ):
+        await _reject_invalid_pending_candidate("flow_source_scope_invalid")
         raise HTTPException(status_code=502, detail="flow_source_scope_invalid")
     analyzed_sources = [source_by_label[label] for label in included_labels]
     omitted_scope = source_scope.get("omitted_files")
     omitted_scope = omitted_scope if isinstance(omitted_scope, list) else []
+    attempt_id = attempt_state.attempt_id
+    if attempt_id is None:
+        raise HTTPException(status_code=503, detail="flow_accounting_failed")
+    candidate_binding_fingerprint = flow_candidate_binding_fingerprint(
+        semantic_binding_identity,
+        source_scope,
+    )
+
+    async def _lock_exact_candidate():  # noqa: ANN202
+        replay = await lock_semantic_candidate_for_product(
+            db,
+            attempt_id=attempt_id,
+            project_id=project_id,
+            purpose=LLMPurpose.FLOW,
+            contract_name=FLOW_RESULT_CONTRACT,
+            binding_fingerprint=candidate_binding_fingerprint,
+            normalizer=normalize_flow_payload,
+        )
+        if (
+            replay.candidate_status not in {"candidate", "accepted"}
+            or replay.result_status
+            not in {ResultStatus.PENDING, ResultStatus.ACCEPTED}
+            or replay.payload != flow
+        ):
+            raise LLMLifecycleError(
+                "flow candidate does not match grounded product input"
+            )
+        return replay
+
     try:
         summary_content = build_flow_summary_content(
             flow,
@@ -377,6 +579,19 @@ async def _analyze_and_persist(
             source_scope=source_scope,
         )
     except FlowContractError as exc:
+        try:
+            await _lock_exact_candidate()
+            await classify_attempt_result(
+                db,
+                attempt_id=attempt_id,
+                result_status=ResultStatus.SCHEMA_REJECTED,
+                failure_code="flow_product_contract_invalid",
+            )
+        except LLMLifecycleError:
+            await db.rollback()
+            raise HTTPException(
+                status_code=503, detail="flow_accounting_failed"
+            ) from exc
         raise HTTPException(status_code=502, detail="flow_analysis_failed") from exc
 
     # The provider may run long enough for a new source or overlay generation
@@ -384,99 +599,242 @@ async def _analyze_and_persist(
     try:
         await revalidate_current_source_snapshot(db, snapshot=snapshot)
     except SourceSnapshotError as exc:
+        try:
+            await _lock_exact_candidate()
+            await classify_attempt_result(
+                db,
+                attempt_id=attempt_id,
+                result_status=ResultStatus.GROUNDING_REJECTED,
+                failure_code="flow_source_snapshot_changed",
+            )
+        except LLMLifecycleError:
+            await db.rollback()
+            raise HTTPException(
+                status_code=503, detail="flow_accounting_failed"
+            ) from exc
         raise _source_snapshot_http_error(exc) from exc
 
     summary_id: str | None = None
-    if persist:
-        evidence_hash = hashlib.sha256(
-            json.dumps(
-                {
-                    "analysis_run_id": str(snapshot.run_id),
-                    "revision": snapshot.revision,
-                    "entry": entry,
-                    "files": included_labels,
-                    "file_windows": scope_files,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
-        target_id = f"flow:{_slug(entry)}"
-        row_id = uuid.uuid4()
-        validated_generation: int | None = None
-        validated_overlay_generation: int | None = None
-        validated_at: datetime | None = None
-        current_stamp = snapshot.graph_stamp
-        if current_stamp is not None:
-            try:
-                await lock_ready_summary_generation(
-                    db,
-                    project_id=project_id,
-                    expected_generation=current_stamp.generation,
-                    expected_overlay_generation=current_stamp.overlay_generation,
-                )
-            except GraphPublicationError as exc:
-                raise HTTPException(
-                    status_code=409,
-                    detail="graph_snapshot_changed_retry",
-                ) from exc
+    evidence_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "analysis_run_id": str(snapshot.run_id),
+                "revision": snapshot.revision,
+                "entry": entry,
+                "files": included_labels,
+                "file_windows": scope_files,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    projection = {
+        "summary": flow["summary"],
+        "detailed": flow["detailed"],
+        "claims": summary_content.sections,
+        "open_questions": flow["open_questions"],
+    }
+    projection_sha256 = hashlib.sha256(
+        json.dumps(
+            projection,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    target_id = f"flow:{_slug(entry)}"
+    row_id = uuid.uuid5(attempt_id, "mnemos.flow.summary-product.v1")
+    validated_generation: int | None = None
+    validated_overlay_generation: int | None = None
+    validated_at: datetime | None = None
+    current_stamp = snapshot.graph_stamp
+    try:
+        if persist and current_stamp is not None:
+            await lock_ready_summary_generation(
+                db,
+                project_id=project_id,
+                expected_generation=current_stamp.generation,
+                expected_overlay_generation=current_stamp.overlay_generation,
+            )
             validated_generation = current_stamp.generation
             validated_overlay_generation = current_stamp.overlay_generation
             validated_at = datetime.now(tz=timezone.utc)
-            supersede_scope = (
-                # Retire every validated current-lineage row for this logical
-                # target, including a row pinned to an older graph revision.
-                # Explicit historical rows have null markers and remain
-                # queryable by their immutable run provenance.
-                Summary.validated_graph_generation.is_not(None),
+        elif persist:
+            # Historical products have no GraphHead marker. Serialize all
+            # Flow publications for the immutable run so two different
+            # provider inputs cannot both remain unsuperseded for one target.
+            historical_run = (
+                await db.execute(
+                    select(AnalysisRun)
+                    .where(
+                        AnalysisRun.id == snapshot.run_id,
+                        AnalysisRun.project_id == project_id,
+                        AnalysisRun.status.in_(
+                            ANALYSIS_RUN_SOURCE_PUBLISHED_STATUSES
+                        ),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if historical_run is None:
+                raise LLMLifecycleError(
+                    "historical Flow publication run is unavailable"
+                )
+
+        receipt = await _lock_exact_candidate()
+        if not persist:
+            await classify_attempt_result(
+                db,
+                attempt_id=attempt_id,
+                result_status=ResultStatus.ACCEPTED,
             )
         else:
-            # Explicit historical flow analysis remains queryable by its run
-            # provenance but can never displace or appear as a current flow.
-            supersede_scope = (
-                Summary.validated_graph_generation.is_(None),
-                Summary.validated_overlay_generation.is_(None),
-                Summary.analysis_run_id == snapshot.run_id,
+            existing_rows = (
+                await db.execute(
+                    select(Summary)
+                    .where(
+                        or_(
+                            Summary.id == row_id,
+                            Summary.llm_attempt_id == attempt_id,
+                        )
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalars().all()
+            if len(existing_rows) > 1:
+                raise LLMLifecycleError(
+                    "flow attempt owns multiple Summary products"
+                )
+            existing = existing_rows[0] if existing_rows else None
+            await classify_attempt_result(
+                db,
+                attempt_id=attempt_id,
+                result_status=ResultStatus.ACCEPTED,
+                commit=False,
             )
-        await db.execute(
-            update(Summary)
-            .where(
-                Summary.project_id == project_id,
-                Summary.target_id == target_id,
-                Summary.level == FLOW_LEVEL,
-                Summary.superseded_by.is_(None),
-                Summary.id != row_id,
-                *supersede_scope,
+            model_used = receipt.resolved_model or receipt.requested_model
+            expected_product = (
+                row_id,
+                project_id,
+                target_id,
+                FLOW_LEVEL,
+                snapshot.run_id,
+                validated_generation,
+                validated_overlay_generation,
+                projection["summary"],
+                projection["detailed"],
+                projection["claims"],
+                projection["open_questions"],
+                evidence_hash,
+                model_used,
+                receipt.total_tokens,
+                None,
+                attempt_id,
+                candidate_binding_fingerprint,
+                projection_sha256,
+                None,
             )
-            .values(superseded_by=row_id)
-        )
-        row = Summary(
-            id=row_id,
-            project_id=project_id,
-            target_id=target_id,
-            level=FLOW_LEVEL,
-            analysis_run_id=snapshot.run_id,
-            validated_graph_generation=validated_generation,
-            validated_overlay_generation=validated_overlay_generation,
-            validated_at=validated_at,
-            summary=flow["summary"],
-            detailed=flow["detailed"],
-            claims=summary_content.sections,
-            open_questions=flow["open_questions"],
-            evidence_hash=evidence_hash,
-            model_used=f"claude_code:{FLOW_RESULT_CONTRACT}",
-        )
-        db.add(row)
-        await db.commit()
-        await db.refresh(row)
-        summary_id = str(row.id)
+            if existing is not None:
+                actual_product = (
+                    existing.id,
+                    existing.project_id,
+                    existing.target_id,
+                    existing.level,
+                    existing.analysis_run_id,
+                    existing.validated_graph_generation,
+                    existing.validated_overlay_generation,
+                    existing.summary,
+                    existing.detailed,
+                    existing.claims,
+                    existing.open_questions,
+                    existing.evidence_hash,
+                    existing.model_used,
+                    existing.tokens_used,
+                    existing.fallback_reason,
+                    existing.llm_attempt_id,
+                    existing.semantic_binding_fingerprint,
+                    existing.projection_sha256,
+                    existing.superseded_by,
+                )
+                if actual_product != expected_product:
+                    raise LLMLifecycleError(
+                        "flow product replay projection changed"
+                    )
+                await db.commit()
+                summary_id = str(existing.id)
+            else:
+                if current_stamp is not None:
+                    supersede_scope = (
+                        Summary.validated_graph_generation.is_not(None),
+                    )
+                else:
+                    supersede_scope = (
+                        Summary.validated_graph_generation.is_(None),
+                        Summary.validated_overlay_generation.is_(None),
+                        Summary.analysis_run_id == snapshot.run_id,
+                    )
+                await db.execute(
+                    update(Summary)
+                    .where(
+                        Summary.project_id == project_id,
+                        Summary.target_id == target_id,
+                        Summary.level == FLOW_LEVEL,
+                        Summary.superseded_by.is_(None),
+                        Summary.id != row_id,
+                        *supersede_scope,
+                    )
+                    .values(superseded_by=row_id)
+                )
+                db.add(
+                    Summary(
+                        id=row_id,
+                        project_id=project_id,
+                        target_id=target_id,
+                        level=FLOW_LEVEL,
+                        analysis_run_id=snapshot.run_id,
+                        validated_graph_generation=validated_generation,
+                        validated_overlay_generation=validated_overlay_generation,
+                        validated_at=validated_at,
+                        summary=projection["summary"],
+                        detailed=projection["detailed"],
+                        claims=projection["claims"],
+                        open_questions=projection["open_questions"],
+                        evidence_hash=evidence_hash,
+                        model_used=model_used,
+                        tokens_used=receipt.total_tokens,
+                        llm_attempt_id=attempt_id,
+                        semantic_binding_fingerprint=(
+                            candidate_binding_fingerprint
+                        ),
+                        projection_sha256=projection_sha256,
+                    )
+                )
+                await db.commit()
+                summary_id = str(row_id)
+    except GraphPublicationError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="graph_snapshot_changed_retry",
+        ) from exc
+    except LLMLifecycleError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="flow_product_provenance_invalid",
+        ) from exc
 
     await audit_record(
         actor=f"user:{user.id}",
         action="flow.trace",
-        target=entry,
+        target=(
+            "entry_sha256:"
+            + fingerprint_input("mnemos.audit.flow-entry.v1", entry)
+        ),
         project_id=project_id,
         details={
+            "entry_chars": len(entry),
             "tiers": sorted({s["tier"] for s in analyzed_sources}),
             "files_provided": len(sources),
             "files_analyzed": len(analyzed_sources),

@@ -88,7 +88,10 @@ async def _secret(db: AsyncSession) -> str | None:
         except Exception:  # noqa: BLE001
             # A configured encrypted secret that cannot decrypt is ambiguous
             # authority. Do not silently fall back to plaintext legacy state.
-            log.exception("gitlab_webhook_secret decrypt failed")
+            log.error(
+                "gitlab_webhook_secret decrypt failed "
+                "failure_code=webhook_secret_unavailable"
+            )
             return None
 
     row = (
@@ -253,11 +256,15 @@ async def gitlab_webhook(
                 run.error_log = "analysis_enqueue_cancelled"
                 await asyncio.shield(db.commit())
                 raise
-            except Exception as exc:  # noqa: BLE001 — terminalize the row
-                log.exception("webhook analysis enqueue failed run_id=%s", run.id)
+            except Exception:  # noqa: BLE001 — terminalize the row
+                log.error(
+                    "webhook analysis enqueue failed run_id=%s "
+                    "failure_code=analysis_enqueue_failed",
+                    run.id,
+                )
                 run.status = "failed"
                 run.completed_at = datetime.now(tz=timezone.utc)
-                run.error_log = f"analysis_enqueue_failed:{type(exc).__name__}"
+                run.error_log = "analysis_enqueue_failed"
                 await db.commit()
                 skip_reason = "analysis_enqueue_failed"
             else:

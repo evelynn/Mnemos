@@ -44,6 +44,7 @@ async def ready() -> JSONResponse:
     # overall=503 unless crypto is broken (secrets can't decrypt).
     crypto_ok, crypto_msg = _check_crypto()
     analyzers_status, analyzers_msg = _check_analyzers()
+    llm_paid_ok, llm_paid_msg = _check_llm_paid_dispatch()
 
     parts = {
         "database": {"ok": db_ok, "message": db_msg},
@@ -51,6 +52,7 @@ async def ready() -> JSONResponse:
         "worker": {"ok": worker_ok, "message": worker_msg},
         "crypto": {"ok": crypto_ok, "message": crypto_msg},
         "analyzers": {"ok": analyzers_status, "message": analyzers_msg},
+        "llm_paid_dispatch": {"ok": llm_paid_ok, "message": llm_paid_msg},
     }
     # Analyzers being partially installed is degraded-but-running.
     # Crypto failing means every secret decrypt will throw → 503.
@@ -60,6 +62,28 @@ async def ready() -> JSONResponse:
         status_code=status,
         content={"status": "ok" if overall else "degraded", "checks": parts},
     )
+
+
+def _check_llm_paid_dispatch() -> tuple[bool, str]:
+    """Report whether new paid LLM attempts have explicit dollar authority.
+
+    This is advisory for service readiness because deterministic indexing and
+    replay remain available without a paid-provider budget. Production LLM
+    callsites independently enforce the same policy in ``begin_attempt``.
+    """
+
+    from app.extractor.cost import (
+        BudgetConfigurationError,
+        configured_project_dollar_budget,
+    )
+
+    try:
+        policy = configured_project_dollar_budget()
+    except BudgetConfigurationError:
+        return False, "disabled_budget_invalid"
+    if policy is None:
+        return False, "disabled_budget_required"
+    return True, "enabled"
 
 
 def _check_crypto() -> tuple[bool, str]:
@@ -73,8 +97,8 @@ def _check_crypto() -> tuple[bool, str]:
         ct, iv = encrypt(probe.decode())
         out = decrypt(ct, iv)
         return out.encode() == probe, "ok"
-    except Exception as exc:  # noqa: BLE001
-        return False, f"{exc.__class__.__name__}: {exc}"
+    except Exception:  # noqa: BLE001
+        return False, "crypto_unavailable"
 
 
 def _check_analyzers() -> tuple[bool, str]:
@@ -105,8 +129,8 @@ async def _check_db() -> tuple[bool, str]:
         async with SessionLocal() as db:
             await asyncio.wait_for(db.execute(text("SELECT 1")), timeout=2.0)
         return True, "ok"
-    except Exception as exc:  # noqa: BLE001
-        return False, f"{exc.__class__.__name__}: {exc}"
+    except Exception:  # noqa: BLE001
+        return False, "database_unavailable"
 
 
 async def _check_redis() -> tuple[bool, str]:
@@ -114,8 +138,8 @@ async def _check_redis() -> tuple[bool, str]:
         redis = await get_redis()
         pong = await asyncio.wait_for(redis.ping(), timeout=2.0)
         return bool(pong), "ok" if pong else "no_pong"
-    except Exception as exc:  # noqa: BLE001
-        return False, f"{exc.__class__.__name__}: {exc}"
+    except Exception:  # noqa: BLE001
+        return False, "redis_unavailable"
 
 
 @router.get("/api/v1/health/metrics_summary")
@@ -184,10 +208,10 @@ async def metrics_summary() -> JSONResponse:
                     {"cutoff": cutoff},
                 )
             ).scalar() or 0
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         return JSONResponse(
             status_code=503,
-            content={"status": "error", "error": f"{exc.__class__.__name__}"},
+            content={"status": "error", "error": "metrics_unavailable"},
         )
     return JSONResponse({"status": "ok", **out})
 
@@ -204,8 +228,8 @@ async def _check_worker() -> tuple[bool, str]:
     try:
         redis = await get_redis()
         beat = await redis.get(_WORKER_HEARTBEAT_KEY)
-    except Exception as exc:  # noqa: BLE001
-        return False, f"{exc.__class__.__name__}: {exc}"
+    except Exception:  # noqa: BLE001
+        return False, "worker_heartbeat_unavailable"
     if not beat:
         return False, "no_heartbeat"
     try:
