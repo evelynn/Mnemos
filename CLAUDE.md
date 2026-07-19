@@ -165,9 +165,11 @@ usage, immutable price, and durable-attempt contract.
   DISTINCT+LIMIT on `data.location.file`; L3: full-row loads restricted to the selected modules).
   The remaining pre-call scan is L3's narrow key scan of one `target_id` string per current L2
   summary — O(#summarized files), no longer O(#symbols) full-object materialization.
-- Lexical symbol search uses an unanchored `ILIKE` candidate scan capped at 2,000 rows before
-  application scoring. On a very large graph this can miss the globally best result; cloud vector
-  search stays disabled, so do not claim CBM-like local semantic-search coverage or latency.
+- Lexical symbol search keeps its 2,000-row candidate cap but fills it by priority tier
+  (exact name → name prefix → unanchored substring, deterministic id order), so exact/prefix
+  matches can no longer be crowded out. A very large graph can still miss a globally best
+  substring/stem-only match beyond the cap, the scan itself remains O(graph) DB-side, and cloud
+  vector search stays disabled — do not claim CBM-like local semantic-search coverage or latency.
 - Gate-B submissions are bounded at ingress: `DiffSubmit.diff` rejects past
   `DIFF_INPUT_MAX_CHARS` (1 M chars, 422) and `run_pipeline` fail-closes its non-HTTP callers
   (break-glass rerun, MCP dev tools) with `DiffInputTooLarge` before any deterministic pass scans

@@ -372,6 +372,15 @@ def _score_symbol(
     return score * _path_score_multiplier(path)
 
 
+# The candidate scan stays capped so a huge graph stays bounded, but the cap
+# is filled by priority tier (exact name → name prefix → unanchored
+# substring), so arbitrary substring rows can no longer crowd out the
+# globally best candidates. Application scoring still ranks the pool.
+_SEARCH_CANDIDATE_CAP = 2000
+_SEARCH_EXACT_TIER_CAP = 200
+_SEARCH_PREFIX_TIER_CAP = 800
+
+
 async def search_symbols(
     session: AsyncSession,
     *,
@@ -404,6 +413,9 @@ async def search_symbols(
         # reaches the ``auth`` in ``AuthError`` / ``api-auth.ts`` that a
         # full substring match misses. The ranking below (not SQL) orders.
         conds = []
+        exact_conds = []
+        prefix_conds = []
+        name_lower = sa.func.lower(Node.data["name"].astext)
         for t in terms:
             like = f"%{t}%"
             conds.append(Node.id.ilike(like))
@@ -413,9 +425,41 @@ async def search_symbols(
                 stem = f"%{t[:4]}%"
                 conds.append(Node.id.ilike(stem))
                 conds.append(Node.data["name"].astext.ilike(stem))
-        stmt = stmt.where(or_(*conds))
-    # Cap the candidate scan so a huge graph stays bounded.
-    rows = (await session.execute(stmt.limit(2000))).scalars().all()
+            exact_conds.append(name_lower == t)
+            prefix_conds.append(Node.data["name"].astext.ilike(f"{t}%"))
+        # Tiered fill of the bounded candidate pool. Each tier is
+        # deterministic (id order) and later tiers exclude ids already
+        # collected, so the pool keeps its full unique size.
+        rows = []
+        seen_ids: set[str] = set()
+        for tier_stmt, tier_cap in (
+            (stmt.where(or_(*exact_conds)), _SEARCH_EXACT_TIER_CAP),
+            (stmt.where(or_(*prefix_conds)), _SEARCH_PREFIX_TIER_CAP),
+            (stmt.where(or_(*conds)), _SEARCH_CANDIDATE_CAP),
+        ):
+            remaining = _SEARCH_CANDIDATE_CAP - len(rows)
+            if remaining <= 0:
+                break
+            if seen_ids:
+                tier_stmt = tier_stmt.where(Node.id.not_in(seen_ids))
+            tier_rows = (
+                await session.execute(
+                    tier_stmt.order_by(Node.id.asc())
+                    .limit(min(tier_cap, remaining))
+                )
+            ).scalars().all()
+            for r in tier_rows:
+                if r.id not in seen_ids:
+                    seen_ids.add(r.id)
+                    rows.append(r)
+    else:
+        # No terms — keep the plain bounded scan (kind/component filters
+        # may still apply), deterministic by id.
+        rows = (
+            await session.execute(
+                stmt.order_by(Node.id.asc()).limit(_SEARCH_CANDIDATE_CAP)
+            )
+        ).scalars().all()
 
     scored: list[tuple[float, Node]] = []
     for r in rows:
