@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,7 +40,7 @@ from app.sandbox.worktree import (
     verify_worktree_revision,
     worktree_path,
 )
-from app.safety.review import run_pipeline
+from app.safety.review import DIFF_INPUT_MAX_CHARS, run_pipeline
 from app.safety.tokens import hash_token as _hash_token
 
 
@@ -87,7 +87,10 @@ router = APIRouter(tags=["diffs"])
 class DiffSubmit(BaseModel):
     plan_id: uuid.UUID
     task_id: str
-    diff: str
+    # Rejected at ingress (422) so the deterministic Gate-B passes never
+    # scan an unbounded string; run_pipeline enforces the same ceiling for
+    # its non-HTTP callers.
+    diff: str = Field(max_length=DIFF_INPUT_MAX_CHARS)
     test_results: dict[str, Any] | None = None
     self_review_notes: str | None = None
 

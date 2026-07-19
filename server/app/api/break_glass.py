@@ -53,7 +53,7 @@ from app.review_revision import (
     read_review_graph_stamp,
     resolve_review_revision_from_stamp,
 )
-from app.safety.review import run_pipeline
+from app.safety.review import DiffInputTooLarge, run_pipeline
 from app.safety.tokens import hash_token
 
 router = APIRouter(tags=["break_glass"])
@@ -152,13 +152,23 @@ async def issue_break_glass_grant(
     # Re-run the ultrareview pipeline before granting. The grant is only
     # valid if the *current* diff state passes — we never hand out a
     # bypass for a diff that ultrareview still considers blocked.
-    report = await run_pipeline(
-        db,
-        project_id=plan.project_id,
-        plan_id=plan.id,
-        diff=reviewed_diff,
-        review_revision=product_revision,
-    )
+    try:
+        report = await run_pipeline(
+            db,
+            project_id=plan.project_id,
+            plan_id=plan.id,
+            diff=reviewed_diff,
+            review_revision=product_revision,
+        )
+    except DiffInputTooLarge as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "diff_exceeds_input_ceiling",
+                "message": "Stored diff exceeds the review input ceiling",
+            },
+        ) from exc
     if report.coverage != "complete":
         await db.rollback()
         raise HTTPException(

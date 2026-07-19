@@ -36,7 +36,7 @@ from app.review_revision import (
     read_review_graph_stamp,
     resolve_review_revision_from_stamp,
 )
-from app.safety.review import run_pipeline
+from app.safety.review import DiffInputTooLarge, run_pipeline
 from app.sandbox.runner import SandboxResult, run_in_sandbox
 from app.sandbox.worktree import (
     WorktreeRevisionError,
@@ -447,6 +447,14 @@ async def submit_diff(
     except MCPAuthenticationError:
         await session.rollback()
         return mcp_authentication_error()
+    except DiffInputTooLarge:
+        await session.rollback()
+        return {
+            "schema": "mnemos.error.v1",
+            "error": "diff_exceeds_input_ceiling",
+            "reason": "diff exceeds the Gate-B review input ceiling",
+            "retryable": False,
+        }
     except GraphGenerationChanged:
         await session.rollback()
         return {
