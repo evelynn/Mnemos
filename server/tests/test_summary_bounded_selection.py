@@ -178,28 +178,45 @@ async def test_l2_limit_selects_first_files_lexicographically(monkeypatch):
     assert l2_targets == ["a.py", "b.py"]
 
 
-async def _max_bind_params(session, coro_factory):
-    """Run a coroutine and report the widest bind-parameter list it sent.
+async def _read_profile(session, coro_factory):
+    """Run a coroutine and profile the SELECTs it sent.
 
     The point of the bounded-selection rewrite is that pre-call database
     work scales with ``limit``, not with project size. Outcome assertions
     cannot see that — the Python-side slice clamps the *result* either way
-    — so this measures the actual statements instead. With the SQL limit
-    in place the follow-up ``IN`` list carries only the selected files;
-    without it, it carries every file in the project.
+    — so this inspects the actual statements.
+
+    Two complementary signals, because either alone is defeatable:
+
+    ``widest`` — the widest bind list of any SELECT. Without the SQL limit
+    the follow-up ``IN`` list carries every file in the project.
+
+    ``unbounded_selections`` — SELECTs that read the selection columns
+    (the `location.file` path expression, or `summaries.target_id`
+    distinctly) without a LIMIT. This catches the case the bind-width
+    signal misses entirely: dropping the SQL ``LIMIT`` and slicing in
+    Python after materializing every row keeps the later ``IN`` list
+    narrow while still shipping the whole project to the app.
     """
     import sqlalchemy as sa
 
     widest = 0
+    unbounded_selections = 0
 
     def _watch(conn, cursor, statement, parameters, context, executemany):
-        nonlocal widest
+        nonlocal widest, unbounded_selections
         if executemany or parameters is None:
             return
+        normalized = " ".join(statement.split()).lower()
         # Only reads matter here: writes legitimately carry one bind per
         # column per inserted summary row.
-        if " ".join(statement.split()).lower().startswith("select"):
-            widest = max(widest, len(parameters))
+        if not normalized.startswith("select"):
+            return
+        widest = max(widest, len(parameters))
+        selects_files = "'$.\"file\"'" in normalized or '"file"' in normalized
+        selects_targets = normalized.startswith("select distinct")
+        if (selects_files or selects_targets) and " limit " not in normalized:
+            unbounded_selections += 1
 
     bind = session.get_bind()
     target = getattr(bind, "sync_engine", bind)
@@ -208,7 +225,7 @@ async def _max_bind_params(session, coro_factory):
         await coro_factory()
     finally:
         sa.event.remove(target, "before_cursor_execute", _watch)
-    return widest
+    return widest, unbounded_selections
 
 
 @pytest.mark.asyncio
@@ -227,7 +244,7 @@ async def test_l2_database_work_is_bounded_by_limit(monkeypatch):
             session.add(summary)
         await session.commit()
 
-        widest = await _max_bind_params(
+        widest, unbounded = await _read_profile(
             session,
             lambda: summarise_l2(
                 session,
@@ -244,6 +261,10 @@ async def test_l2_database_work_is_bounded_by_limit(monkeypatch):
     assert widest < 20, (
         f"L2 sent a statement with {widest} bind params for limit=2 over 100 "
         "files — selection is not bounded in SQL"
+    )
+    assert unbounded == 0, (
+        f"L2 issued {unbounded} unbounded file-selection SELECT(s) — the "
+        "bound must be in SQL, not a Python slice after materialization"
     )
 
 
@@ -281,7 +302,7 @@ async def test_l3_database_work_is_bounded_by_limit(monkeypatch):
             )
         await session.commit()
 
-        widest = await _max_bind_params(
+        widest, _unbounded = await _read_profile(
             session,
             lambda: summarise_l3(
                 session,
@@ -293,6 +314,8 @@ async def test_l3_database_work_is_bounded_by_limit(monkeypatch):
         )
 
     await engine.dispose()
+    # L3 deliberately scans one narrow key per current L2 summary (documented
+    # in CLAUDE.md), so only the full-row loads must stay bounded.
     assert widest < 20, (
         f"L3 sent a statement with {widest} bind params for limit=2 over 100 "
         "modules — selection is not bounded before the full-row loads"

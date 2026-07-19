@@ -172,10 +172,13 @@ usage, immutable price, and durable-attempt contract.
   summary — O(#summarized files), no longer O(#symbols) full-object materialization.
 - Lexical symbol search keeps its 2,000-row candidate cap and its single filtered scan, but orders
   that scan by priority tier (exact name → name prefix → anything else matched, `id` breaking ties),
-  so exact/prefix matches can no longer be crowded out of the cap. A very large graph can still miss
-  a globally best substring/stem-only match beyond the cap, the scan remains O(graph) DB-side over
-  unindexed `data->>'name'`/`signature` expressions, and cloud vector search stays disabled — do not
-  claim CBM-like local semantic-search coverage or latency.
+  so exact/prefix matches can no longer be crowded out of the cap. This costs more than the old
+  unordered scan, not less: without an ORDER BY the planner could stop at 2,000 qualifying rows,
+  whereas the tier key is an unindexed expression over `data->>'name'`, so every matching row is
+  now evaluated and top-N sorted. The gap is worst for very common terms. An expression index on
+  `lower(data->>'name')` would remove it and has not been added. A very large graph can still miss
+  a globally best substring/stem-only match beyond the cap, and cloud vector search stays disabled
+  — do not claim CBM-like local semantic-search coverage or latency.
 - Gate-B submissions are bounded at ingress: `DiffSubmit.diff` rejects past
   `DIFF_INPUT_MAX_CHARS` (1 M chars, 422) and `run_pipeline` fail-closes its non-HTTP callers
   (break-glass rerun, MCP dev tools) with `DiffInputTooLarge` before any deterministic pass scans

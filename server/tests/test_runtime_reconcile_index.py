@@ -330,15 +330,24 @@ async def test_edge_scan_is_one_query_per_kind_not_per_observation(database):
         await session.commit()
 
         edge_selects = 0
-        unordered_edge_selects = 0
+        weakly_ordered_selects = 0
 
         def _count(conn, cursor, statement, parameters, context, executemany):
-            nonlocal edge_selects, unordered_edge_selects
+            nonlocal edge_selects, weakly_ordered_selects
             normalized = " ".join(statement.split()).lower()
             if normalized.startswith("select") and " from edges" in normalized:
                 edge_selects += 1
-                if "order by" not in normalized:
-                    unordered_edge_selects += 1
+                _, _, order_clause = normalized.partition(" order by ")
+                # A total order is required, not merely *some* ordering:
+                # current rows are unique per (source_id, target_id, kind),
+                # so ordering on e.g. valid_from alone leaves ties that
+                # storage order would break.
+                if not (
+                    order_clause
+                    and "source_id" in order_clause
+                    and "target_id" in order_clause
+                ):
+                    weakly_ordered_selects += 1
 
         bind = session.get_bind()
         target = getattr(bind, "sync_engine", bind)
@@ -353,12 +362,15 @@ async def test_edge_scan_is_one_query_per_kind_not_per_observation(database):
     assert edge_selects == 2, (
         f"expected one current-edge scan per observed kind, got {edge_selects}"
     )
-    # The candidate scan must be explicitly ordered so that, when several
-    # edges match one observation, the winner does not depend on storage
-    # order. SQLite happens to return these rows via the current-identity
-    # index (already sorted), so only the emitted clause is observable
-    # here; the effect itself shows up on PostgreSQL heap order.
-    assert unordered_edge_selects == 0, "current-edge scan lost its ORDER BY"
+    # The candidate scan must carry a *total* order so that, when several
+    # edges match one observation, the winner never depends on storage
+    # order. Reordering is partly observable on SQLite (see
+    # test_first_match_wins_...), but an ordering on a non-unique column
+    # is not — it looks fine here and still leaves PostgreSQL heap order
+    # deciding — so the emitted clause is checked directly.
+    assert weakly_ordered_selects == 0, (
+        "current-edge scan lost its total ORDER BY (source_id, target_id)"
+    )
 
 
 @pytest.mark.asyncio
@@ -369,8 +381,10 @@ async def test_first_match_wins_when_raw_and_templated_edges_both_match(database
     edge carries the templated route (matched after normalisation), the
     later one carries the literal route (matched raw). The pre-index loop
     broke on the first matching edge in order, so the templated edge wins.
-    Taking the last position instead — or dropping the ORDER BY, since the
-    literal edge is inserted first here — selects the other edge.
+    Taking the last position instead, or reordering the scan, selects the
+    other edge — both are caught here. What this test cannot see is an
+    ordering that is merely *incomplete* (a non-unique sort column), which
+    is why the companion query-profile test inspects the emitted clause.
     """
     async with database() as session:
         org_id, project_id, now = await _ready_project(session)

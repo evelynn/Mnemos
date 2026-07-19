@@ -376,8 +376,16 @@ def _score_symbol(
 # is spent on the best candidates first: rows are ordered by priority tier
 # (exact name → name prefix → anything else the filter matched) inside the
 # *same* single query, so arbitrary substring rows can no longer crowd out an
-# exact match. One query, one filter, same DB cost as the untiered scan —
-# only the ORDER BY changed. Application scoring still ranks the pool.
+# exact match. Application scoring still ranks the pool.
+#
+# Cost, stated honestly: this is NOT free. The earlier untiered query had no
+# ORDER BY, so the planner could stop as soon as 2,000 rows qualified. The
+# tier key is an unindexed expression over ``data->>'name'``, so the database
+# must now evaluate every row the filter matches and top-N sort them. That is
+# a real regression exactly when a term is very common — which is also
+# exactly when crowding-out was worst, so it buys the guarantee it costs. An
+# expression index on ``lower(data->>'name')`` would remove the trade-off;
+# that needs a migration and is deliberately not done here.
 _SEARCH_CANDIDATE_CAP = 2000
 _TIER_EXACT = 0
 _TIER_PREFIX = 1
