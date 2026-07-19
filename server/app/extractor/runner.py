@@ -1656,22 +1656,41 @@ async def summarise_l2(
     graph_generation = graph_stamp.generation
     overlay_generation = graph_stamp.overlay_generation
 
-    l1_rows = (
+    # Selection is pushed into SQL so pre-call DB/RAM work is bounded by
+    # ``limit`` instead of project size.  Grouping on the raw column is exact:
+    # human overlays only add the human payload key to ``data`` and never
+    # rewrite ``location.file`` (see graph_overlays.materialize_node_data).
+    loc_file = Node.data["location"]["file"].astext
+    l1_current = (
+        Summary.project_id == project_id,
+        Summary.level == 1,
+        Summary.superseded_by.is_(None),
+        Summary.validated_graph_generation == graph_generation,
+        Summary.validated_overlay_generation == overlay_generation,
+        Node.project_id == project_id,
+        Node.valid_to.is_(None),
+    )
+    selected_files = (
         await session.execute(
-            select(Summary, Node)
+            select(loc_file)
+            .select_from(Summary)
             .join(Node, Node.id == Summary.target_id)
-            .where(
-                Summary.project_id == project_id,
-                Summary.level == 1,
-                Summary.superseded_by.is_(None),
-                Summary.validated_graph_generation == graph_generation,
-                Summary.validated_overlay_generation == overlay_generation,
-                Node.project_id == project_id,
-                Node.valid_to.is_(None),
-            )
-            .order_by(Summary.target_id.asc(), Summary.id.asc(), Node.id.asc())
+            .where(*l1_current, loc_file.isnot(None), loc_file != "")
+            .distinct()
+            .order_by(loc_file.asc())
+            .limit(limit)
         )
-    ).all()
+    ).scalars().all()
+    l1_rows = []
+    if selected_files:
+        l1_rows = (
+            await session.execute(
+                select(Summary, Node)
+                .join(Node, Node.id == Summary.target_id)
+                .where(*l1_current, loc_file.in_(selected_files))
+                .order_by(Summary.target_id.asc(), Summary.id.asc(), Node.id.asc())
+            )
+        ).all()
     node_overlays = await load_node_human_overlays(
         session,
         project_id=project_id,
@@ -1836,6 +1855,16 @@ async def summarise_l2(
     return count
 
 
+# SQLite's default bound-parameter ceiling is far above this, but keeping IN
+# lists small also keeps per-statement work bounded on huge modules.
+_SUMMARY_TARGET_BATCH = 500
+
+
+def _batched(values: list[str], size: int):
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
+
+
 async def summarise_l3(
     session: AsyncSession,
     extractor: Extractor,
@@ -1861,40 +1890,79 @@ async def summarise_l3(
     graph_generation = graph_stamp.generation
     overlay_generation = graph_stamp.overlay_generation
 
-    l2_rows = (
+    # Bounded selection: one narrow key scan (a single ``target_id`` string
+    # per current L2 summary) picks the first ``limit`` modules; every
+    # full-row load below is restricted to the files of those modules.  Batch
+    # slices of the sorted file list keep global (target_id, id) order while
+    # staying under SQLite's bound-parameter ceiling on very large modules.
+    l2_current = (
+        Summary.project_id == project_id,
+        Summary.level == 2,
+        Summary.superseded_by.is_(None),
+        Summary.validated_graph_generation == graph_generation,
+        Summary.validated_overlay_generation == overlay_generation,
+    )
+    l2_targets = (
         await session.execute(
-            select(Summary)
-            .where(
-                Summary.project_id == project_id,
-                Summary.level == 2,
-                Summary.superseded_by.is_(None),
-                Summary.validated_graph_generation == graph_generation,
-                Summary.validated_overlay_generation == overlay_generation,
-            )
-            .order_by(Summary.target_id.asc(), Summary.id.asc())
+            select(Summary.target_id)
+            .where(*l2_current)
+            .distinct()
+            .order_by(Summary.target_id.asc())
         )
     ).scalars().all()
+    files_by_module: dict[str, list[str]] = {}
+    for target in l2_targets:
+        parts = target.strip("/").split("/", 1)
+        module_key = parts[0] if parts else "root"
+        files_by_module.setdefault(module_key, []).append(target)
+    selected_files = sorted(
+        {
+            target
+            for module_key in sorted(files_by_module)[:limit]
+            for target in files_by_module[module_key]
+        }
+    )
+
+    l2_rows: list[Summary] = []
+    for batch in _batched(selected_files, _SUMMARY_TARGET_BATCH):
+        l2_rows.extend(
+            (
+                await session.execute(
+                    select(Summary)
+                    .where(*l2_current, Summary.target_id.in_(batch))
+                    .order_by(Summary.target_id.asc(), Summary.id.asc())
+                )
+            ).scalars().all()
+        )
 
     # L2 targets are presentation keys (source paths), not graph node IDs.
     # Rebuild their grounding from the same current L1-summary/current-Node
     # relation used by L2.  This keeps both single- and multi-chunk L3 input
     # citable without teaching the validator to trust path-shaped pseudo IDs.
-    l1_node_rows = (
-        await session.execute(
-            select(Summary, Node)
-            .join(Node, Node.id == Summary.target_id)
-            .where(
-                Summary.project_id == project_id,
-                Summary.level == 1,
-                Summary.superseded_by.is_(None),
-                Summary.validated_graph_generation == graph_generation,
-                Summary.validated_overlay_generation == overlay_generation,
-                Node.project_id == project_id,
-                Node.valid_to.is_(None),
-            )
-            .order_by(Summary.target_id.asc(), Summary.id.asc(), Node.id.asc())
+    loc_file = Node.data["location"]["file"].astext
+    l1_node_rows: list[Any] = []
+    for batch in _batched(selected_files, _SUMMARY_TARGET_BATCH):
+        l1_node_rows.extend(
+            (
+                await session.execute(
+                    select(Summary, Node)
+                    .join(Node, Node.id == Summary.target_id)
+                    .where(
+                        Summary.project_id == project_id,
+                        Summary.level == 1,
+                        Summary.superseded_by.is_(None),
+                        Summary.validated_graph_generation == graph_generation,
+                        Summary.validated_overlay_generation == overlay_generation,
+                        Node.project_id == project_id,
+                        Node.valid_to.is_(None),
+                        loc_file.in_(batch),
+                    )
+                    .order_by(
+                        Summary.target_id.asc(), Summary.id.asc(), Node.id.asc()
+                    )
+                )
+            ).all()
         )
-    ).all()
     node_overlays = await load_node_human_overlays(
         session,
         project_id=project_id,
