@@ -125,10 +125,12 @@ usage, immutable price, and durable-attempt contract.
   path. C#, live-DB, and .NET-binary analyzers exist in the repository but are not wired into that
   worker image; their standalone profile images are contract-test artifacts, not an execution path.
 - Rapid webhook pushes are coalesced at enqueue: once a newer push has a committed run row and a
-  live job, older still-`queued` webhook runs for that project are superseded, so a burst no longer
-  leaves redundant work for the worker to pick up and cancel one by one. Runs already `running`,
-  and manual runs, are never touched. This does not merge in-flight analyses — a burst arriving
-  while a run executes still queues one follow-up, which is the intended behaviour.
+  live job, older still-`queued` webhook runs for that project are superseded, so the worker
+  short-circuits at its eligibility check instead of running an analysis. Runs already `running`,
+  and manual runs, are never touched. The queued ARQ job is **not** aborted — the worker still
+  dequeues it, opens a session, reads the row and publishes a terminal event per superseded push;
+  only the analysis is skipped. Two pushes whose transactions interleave can still both stay
+  queued, and a burst arriving while a run executes still queues one follow-up by design.
 - Project-lock contention preserves the queued run and retries it, but a hard-crashed owner cannot
   be safely pre-empted without a fencing token/DB advisory lock. The fail-safe Redis lease can delay
   the next run for up to its nine-hour TTL rather than risking two current-graph writers.
@@ -168,11 +170,12 @@ usage, immutable price, and durable-attempt contract.
   DISTINCT+LIMIT on `data.location.file`; L3: full-row loads restricted to the selected modules).
   The remaining pre-call scan is L3's narrow key scan of one `target_id` string per current L2
   summary — O(#summarized files), no longer O(#symbols) full-object materialization.
-- Lexical symbol search keeps its 2,000-row candidate cap but fills it by priority tier
-  (exact name → name prefix → unanchored substring, deterministic id order), so exact/prefix
-  matches can no longer be crowded out. A very large graph can still miss a globally best
-  substring/stem-only match beyond the cap, the scan itself remains O(graph) DB-side, and cloud
-  vector search stays disabled — do not claim CBM-like local semantic-search coverage or latency.
+- Lexical symbol search keeps its 2,000-row candidate cap and its single filtered scan, but orders
+  that scan by priority tier (exact name → name prefix → anything else matched, `id` breaking ties),
+  so exact/prefix matches can no longer be crowded out of the cap. A very large graph can still miss
+  a globally best substring/stem-only match beyond the cap, the scan remains O(graph) DB-side over
+  unindexed `data->>'name'`/`signature` expressions, and cloud vector search stays disabled — do not
+  claim CBM-like local semantic-search coverage or latency.
 - Gate-B submissions are bounded at ingress: `DiffSubmit.diff` rejects past
   `DIFF_INPUT_MAX_CHARS` (1 M chars, 422) and `run_pipeline` fail-closes its non-HTTP callers
   (break-glass rerun, MCP dev tools) with `DiffInputTooLarge` before any deterministic pass scans

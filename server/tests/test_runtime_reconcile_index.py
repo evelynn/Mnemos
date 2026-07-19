@@ -137,6 +137,48 @@ def _exposes(project_id: uuid.UUID, now: datetime, source: str, contract: str):
     ]
 
 
+def _edge_with_data(
+    project_id: uuid.UUID,
+    now: datetime,
+    *,
+    source: str,
+    target: str,
+    data: dict,
+):
+    """An EXPOSES edge whose route lives on ``edge.data`` rather than the
+    target contract node id."""
+    return [
+        Node(
+            id=source,
+            project_id=project_id,
+            valid_from=now,
+            kind="Component",
+            data={"name": source},
+            certainty="asserted",
+            created_by=["ggoss-py"],
+        ),
+        Node(
+            id=target,
+            project_id=project_id,
+            valid_from=now,
+            kind="Contract",
+            data={"name": target},
+            certainty="asserted",
+            created_by=["ggoss-py"],
+        ),
+        Edge(
+            source_id=source,
+            target_id=target,
+            project_id=project_id,
+            valid_from=now,
+            kind="EXPOSES",
+            data=data,
+            certainty="asserted",
+            created_by=["ggoss-py"],
+        ),
+    ]
+
+
 def _observation(org_id, project_id, now, *, operation: str, kind="EXPOSES"):
     return RuntimeObservation(
         id=uuid.uuid4(),
@@ -288,12 +330,15 @@ async def test_edge_scan_is_one_query_per_kind_not_per_observation(database):
         await session.commit()
 
         edge_selects = 0
+        unordered_edge_selects = 0
 
         def _count(conn, cursor, statement, parameters, context, executemany):
-            nonlocal edge_selects
+            nonlocal edge_selects, unordered_edge_selects
             normalized = " ".join(statement.split()).lower()
             if normalized.startswith("select") and " from edges" in normalized:
                 edge_selects += 1
+                if "order by" not in normalized:
+                    unordered_edge_selects += 1
 
         bind = session.get_bind()
         target = getattr(bind, "sync_engine", bind)
@@ -308,6 +353,54 @@ async def test_edge_scan_is_one_query_per_kind_not_per_observation(database):
     assert edge_selects == 2, (
         f"expected one current-edge scan per observed kind, got {edge_selects}"
     )
+    # The candidate scan must be explicitly ordered so that, when several
+    # edges match one observation, the winner does not depend on storage
+    # order. SQLite happens to return these rows via the current-identity
+    # index (already sorted), so only the emitted clause is observable
+    # here; the effect itself shows up on PostgreSQL heap order.
+    assert unordered_edge_selects == 0, "current-edge scan lost its ORDER BY"
+
+
+@pytest.mark.asyncio
+async def test_first_match_wins_when_raw_and_templated_edges_both_match(database):
+    """Pins ``min(positions)`` *and* the explicit edge ordering.
+
+    Two edges match one observation through different keys: the earlier
+    edge carries the templated route (matched after normalisation), the
+    later one carries the literal route (matched raw). The pre-index loop
+    broke on the first matching edge in order, so the templated edge wins.
+    Taking the last position instead — or dropping the ORDER BY, since the
+    literal edge is inserted first here — selects the other edge.
+    """
+    async with database() as session:
+        org_id, project_id, now = await _ready_project(session)
+        # Inserted first, sorts second: natural row order != sorted order.
+        session.add_all(
+            _edge_with_data(
+                project_id,
+                now,
+                source="comp:bbb",
+                target="contract:bbb",
+                data={"operation": "/api/orders/42"},
+            )
+        )
+        session.add_all(
+            _edge_with_data(
+                project_id,
+                now,
+                source="comp:aaa",
+                target="contract:aaa",
+                data={"operation": "/api/orders/{id}"},
+            )
+        )
+        session.add(
+            _observation(org_id, project_id, now, operation="/api/orders/42")
+        )
+        await session.commit()
+
+        result = await reconcile_observations(session, project_id, org_id)
+        assert result["matched"] == 1
+        assert await _exercised_targets(session, project_id) == {"contract:aaa"}
 
 
 @pytest.mark.asyncio

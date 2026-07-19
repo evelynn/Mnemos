@@ -1,10 +1,11 @@
 """Tiered candidate selection for lexical symbol search.
 
-The bounded candidate scan is filled by priority tier (exact name →
-name prefix → unanchored substring). Regression guard: under cap
-pressure an exact-name symbol must be guaranteed into the pool instead
-of being crowded out by arbitrary substring rows, and the pool must
-stay duplicate-free.
+The bounded candidate scan spends its cap on the best candidates first by
+ordering rows by priority tier (exact name → name prefix → anything else
+the filter matched) inside a single query. Regression guards: under cap
+pressure an exact-name symbol must survive instead of being crowded out
+by arbitrary substring rows; the pool must stay duplicate-free; and the
+tiering must not cost extra database round trips.
 """
 
 from __future__ import annotations
@@ -53,8 +54,6 @@ def _symbol(project_id: uuid.UUID, node_id: str, name: str) -> Node:
 @pytest.mark.asyncio
 async def test_exact_match_survives_cap_pressure(monkeypatch):
     monkeypatch.setattr(queries, "_SEARCH_CANDIDATE_CAP", 10)
-    monkeypatch.setattr(queries, "_SEARCH_EXACT_TIER_CAP", 5)
-    monkeypatch.setattr(queries, "_SEARCH_PREFIX_TIER_CAP", 5)
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     Session = await _make_session_factory(engine)
@@ -82,6 +81,53 @@ async def test_exact_match_survives_cap_pressure(monkeypatch):
     assert results, "search returned nothing"
     assert results[0]["symbol_id"] == "zzz:target", (
         "exact-name symbol was crowded out of the capped candidate pool"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tiering_costs_no_extra_queries():
+    """Priority tiering must be an ORDER BY, not extra round trips.
+
+    An earlier revision issued one query per tier; on PostgreSQL that
+    meant three scans (two on unindexable expressions over ``data->>'name'``)
+    where the untiered scan needed one.
+    """
+    import sqlalchemy as sa
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    Session = await _make_session_factory(engine)
+    project_id = uuid.uuid4()
+    async with Session() as session:
+        for index in range(10):
+            session.add(
+                _symbol(project_id, f"py:sym{index:02d}", f"target_{index:02d}")
+            )
+        session.add(_symbol(project_id, "py:exact", "target"))
+        await session.commit()
+
+        node_selects = 0
+
+        def _count(conn, cursor, statement, parameters, context, executemany):
+            nonlocal node_selects
+            normalized = " ".join(statement.split()).lower()
+            if normalized.startswith("select") and " from nodes" in normalized:
+                node_selects += 1
+
+        bind = session.get_bind()
+        target = getattr(bind, "sync_engine", bind)
+        sa.event.listen(target, "before_cursor_execute", _count)
+        try:
+            results = await search_symbols(
+                session, project_id=project_id, query="target", top_k=5
+            )
+        finally:
+            sa.event.remove(target, "before_cursor_execute", _count)
+
+    await engine.dispose()
+    assert results[0]["symbol_id"] == "py:exact"
+    # One candidate scan; project_root_prefix adds its own separate query.
+    assert node_selects == 2, (
+        f"expected a single candidate scan (plus root-prefix), got {node_selects}"
     )
 
 

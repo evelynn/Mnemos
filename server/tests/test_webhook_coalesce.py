@@ -145,6 +145,121 @@ async def test_burst_supersedes_only_older_queued_webhook_runs():
 
 
 @pytest.mark.asyncio
+async def test_never_touches_another_projects_queued_runs():
+    """The project guard is the highest-consequence predicate here.
+
+    This UPDATE terminalizes rows and carries no LIMIT, so losing the
+    project scope would silently cancel every other tenant's queued
+    webhook runs.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    mine, theirs = uuid.uuid4(), uuid.uuid4()
+    now = datetime.now(tz=timezone.utc)
+    earlier = now - timedelta(seconds=60)
+
+    async with Session() as session:
+        for index, project_id in enumerate((mine, theirs)):
+            session.add(
+                Project(
+                    id=project_id,
+                    name=f"tenant-{index}",
+                    gitlab_project_id=93100 + index,
+                    gitlab_url=f"https://example.invalid/tenant-{index}",
+                    default_branch="main",
+                    languages=["python"],
+                )
+            )
+        other_tenant_queued = _run(
+            theirs,
+            status="queued",
+            triggered_by="webhook:gitlab:other",
+            created_at=earlier,
+        )
+        mine_queued = _run(
+            mine,
+            status="queued",
+            triggered_by="webhook:gitlab:mine-old",
+            created_at=earlier,
+        )
+        new_run = _run(
+            mine,
+            status="queued",
+            triggered_by="webhook:gitlab:mine-new",
+            created_at=now,
+        )
+        session.add_all([other_tenant_queued, mine_queued, new_run])
+        await session.commit()
+
+        count = await _supersede_older_queued_webhook_runs(
+            session, project_id=mine, new_run=new_run
+        )
+
+    assert count == 1, "only this project's older queued run may be superseded"
+    async with Session() as session:
+        untouched = await session.get(AnalysisRun, other_tenant_queued.id)
+        assert untouched is not None
+        assert untouched.status == "queued"
+        assert untouched.error_log is None
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_never_cancels_a_newer_push():
+    """The ``created_at <`` guard, pinned on its own.
+
+    A run created *after* the one being processed represents a newer push
+    and must outlive it — otherwise a burst could cancel its own winner.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    project_id = uuid.uuid4()
+    now = datetime.now(tz=timezone.utc)
+
+    async with Session() as session:
+        session.add(
+            Project(
+                id=project_id,
+                name="newer-push",
+                gitlab_project_id=93200,
+                gitlab_url="https://example.invalid/newer-push",
+                default_branch="main",
+                languages=["python"],
+            )
+        )
+        middle_run = _run(
+            project_id,
+            status="queued",
+            triggered_by="webhook:gitlab:middle",
+            created_at=now,
+        )
+        newer_run = _run(
+            project_id,
+            status="queued",
+            triggered_by="webhook:gitlab:newer",
+            created_at=now + timedelta(seconds=30),
+        )
+        session.add_all([middle_run, newer_run])
+        await session.commit()
+
+        count = await _supersede_older_queued_webhook_runs(
+            session, project_id=project_id, new_run=middle_run
+        )
+
+    assert count == 0, "a newer push's run must never be superseded"
+    async with Session() as session:
+        survivor = await session.get(AnalysisRun, newer_run.id)
+        assert survivor is not None
+        assert survivor.status == "queued"
+        assert survivor.error_log is None
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_no_older_queued_runs_is_a_noop():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:

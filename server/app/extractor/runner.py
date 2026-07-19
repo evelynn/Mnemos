@@ -1661,6 +1661,12 @@ async def summarise_l2(
     # human overlays only add the human payload key to ``data`` and never
     # rewrite ``location.file`` (see graph_overlays.materialize_node_data).
     loc_file = Node.data["location"]["file"].astext
+    # Order by codepoint on every dialect.  Python's ``sorted`` and SQLite's
+    # BINARY collation agree; PostgreSQL would use the database's lc_collate
+    # (``en_US.UTF-8`` ignores punctuation at the primary level), which would
+    # otherwise summarize a *different* first-N set of files than SQLite and
+    # than L3, which still selects its modules with Python ``sorted``.
+    ordered_file = _codepoint_ordered(session, loc_file)
     l1_current = (
         Summary.project_id == project_id,
         Summary.level == 1,
@@ -1672,12 +1678,15 @@ async def summarise_l2(
     )
     selected_files = (
         await session.execute(
-            select(loc_file)
+            # The ordered expression is also the selected one: PostgreSQL
+            # rejects a SELECT DISTINCT whose ORDER BY expression is absent
+            # from the select list.
+            select(ordered_file)
             .select_from(Summary)
             .join(Node, Node.id == Summary.target_id)
             .where(*l1_current, loc_file.isnot(None), loc_file != "")
             .distinct()
-            .order_by(loc_file.asc())
+            .order_by(ordered_file.asc())
             .limit(limit)
         )
     ).scalars().all()
@@ -1858,6 +1867,21 @@ async def summarise_l2(
 # SQLite's default bound-parameter ceiling is far above this, but keeping IN
 # lists small also keeps per-statement work bounded on huge modules.
 _SUMMARY_TARGET_BATCH = 500
+
+
+def _codepoint_ordered(session: AsyncSession, expr):
+    """Return ``expr`` ordered by codepoint regardless of dialect.
+
+    SQLite's default BINARY collation already matches Python's ``sorted``;
+    PostgreSQL uses the database collation, so pin ``C`` there. Without
+    this the same project yields a different bounded selection on the two
+    dialects.
+    """
+    bind = session.get_bind()
+    dialect = getattr(bind, "dialect", None)
+    if dialect is not None and dialect.name == "postgresql":
+        return expr.collate("C")
+    return expr
 
 
 def _batched(values: list[str], size: int):

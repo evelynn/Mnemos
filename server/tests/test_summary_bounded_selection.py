@@ -178,6 +178,127 @@ async def test_l2_limit_selects_first_files_lexicographically(monkeypatch):
     assert l2_targets == ["a.py", "b.py"]
 
 
+async def _max_bind_params(session, coro_factory):
+    """Run a coroutine and report the widest bind-parameter list it sent.
+
+    The point of the bounded-selection rewrite is that pre-call database
+    work scales with ``limit``, not with project size. Outcome assertions
+    cannot see that — the Python-side slice clamps the *result* either way
+    — so this measures the actual statements instead. With the SQL limit
+    in place the follow-up ``IN`` list carries only the selected files;
+    without it, it carries every file in the project.
+    """
+    import sqlalchemy as sa
+
+    widest = 0
+
+    def _watch(conn, cursor, statement, parameters, context, executemany):
+        nonlocal widest
+        if executemany or parameters is None:
+            return
+        # Only reads matter here: writes legitimately carry one bind per
+        # column per inserted summary row.
+        if " ".join(statement.split()).lower().startswith("select"):
+            widest = max(widest, len(parameters))
+
+    bind = session.get_bind()
+    target = getattr(bind, "sync_engine", bind)
+    sa.event.listen(target, "before_cursor_execute", _watch)
+    try:
+        await coro_factory()
+    finally:
+        sa.event.remove(target, "before_cursor_execute", _watch)
+    return widest
+
+
+@pytest.mark.asyncio
+async def test_l2_database_work_is_bounded_by_limit(monkeypatch):
+    _pin_graph(monkeypatch)
+    monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    Session = await _make_session_factory(engine)
+    project_id = uuid.uuid4()
+    async with Session() as session:
+        for index in range(100):
+            node, summary = _l1_pair(
+                project_id, f"sym:{index:03d}", f"file{index:03d}.py"
+            )
+            session.add(node)
+            session.add(summary)
+        await session.commit()
+
+        widest = await _max_bind_params(
+            session,
+            lambda: summarise_l2(
+                session,
+                CountingExtractor(),  # type: ignore[arg-type]
+                project_id=project_id,
+                limit=2,
+                run_budget=LLMRunBudget(),
+            ),
+        )
+
+    await engine.dispose()
+    # 2 selected files + a handful of scalar predicates. Losing the SQL
+    # limit would put all 100 file paths in the follow-up IN list.
+    assert widest < 20, (
+        f"L2 sent a statement with {widest} bind params for limit=2 over 100 "
+        "files — selection is not bounded in SQL"
+    )
+
+
+@pytest.mark.asyncio
+async def test_l3_database_work_is_bounded_by_limit(monkeypatch):
+    _pin_graph(monkeypatch)
+    monkeypatch.delenv("MNEMOS_LLM_BUDGET_USD_PER_PROJECT", raising=False)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    Session = await _make_session_factory(engine)
+    project_id = uuid.uuid4()
+    now = datetime.now(tz=timezone.utc)
+    async with Session() as session:
+        for index in range(100):
+            file_path = f"mod{index:03d}/impl.py"
+            node, l1 = _l1_pair(project_id, f"sym:{index:03d}", file_path)
+            session.add(node)
+            session.add(l1)
+            session.add(
+                Summary(
+                    id=uuid.uuid4(),
+                    project_id=project_id,
+                    level=2,
+                    target_id=file_path,
+                    validated_graph_generation=1,
+                    validated_overlay_generation=0,
+                    validated_at=now,
+                    summary=f"file {file_path}",
+                    detailed=f"file {file_path}",
+                    claims=[],
+                    open_questions=[],
+                    model_used="fake",
+                    tokens_used=1,
+                    generated_at=now,
+                )
+            )
+        await session.commit()
+
+        widest = await _max_bind_params(
+            session,
+            lambda: summarise_l3(
+                session,
+                CountingExtractor(),  # type: ignore[arg-type]
+                project_id=project_id,
+                limit=2,
+                run_budget=LLMRunBudget(),
+            ),
+        )
+
+    await engine.dispose()
+    assert widest < 20, (
+        f"L3 sent a statement with {widest} bind params for limit=2 over 100 "
+        "modules — selection is not bounded before the full-row loads"
+    )
+
+
 @pytest.mark.asyncio
 async def test_l3_limit_selects_first_modules_lexicographically(monkeypatch):
     _pin_graph(monkeypatch)

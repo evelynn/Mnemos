@@ -372,13 +372,16 @@ def _score_symbol(
     return score * _path_score_multiplier(path)
 
 
-# The candidate scan stays capped so a huge graph stays bounded, but the cap
-# is filled by priority tier (exact name → name prefix → unanchored
-# substring), so arbitrary substring rows can no longer crowd out the
-# globally best candidates. Application scoring still ranks the pool.
+# The candidate scan stays capped so a huge graph stays bounded, and the cap
+# is spent on the best candidates first: rows are ordered by priority tier
+# (exact name → name prefix → anything else the filter matched) inside the
+# *same* single query, so arbitrary substring rows can no longer crowd out an
+# exact match. One query, one filter, same DB cost as the untiered scan —
+# only the ORDER BY changed. Application scoring still ranks the pool.
 _SEARCH_CANDIDATE_CAP = 2000
-_SEARCH_EXACT_TIER_CAP = 200
-_SEARCH_PREFIX_TIER_CAP = 800
+_TIER_EXACT = 0
+_TIER_PREFIX = 1
+_TIER_OTHER = 2
 
 
 async def search_symbols(
@@ -427,39 +430,23 @@ async def search_symbols(
                 conds.append(Node.data["name"].astext.ilike(stem))
             exact_conds.append(name_lower == t)
             prefix_conds.append(Node.data["name"].astext.ilike(f"{t}%"))
-        # Tiered fill of the bounded candidate pool. Each tier is
-        # deterministic (id order) and later tiers exclude ids already
-        # collected, so the pool keeps its full unique size.
-        rows = []
-        seen_ids: set[str] = set()
-        for tier_stmt, tier_cap in (
-            (stmt.where(or_(*exact_conds)), _SEARCH_EXACT_TIER_CAP),
-            (stmt.where(or_(*prefix_conds)), _SEARCH_PREFIX_TIER_CAP),
-            (stmt.where(or_(*conds)), _SEARCH_CANDIDATE_CAP),
-        ):
-            remaining = _SEARCH_CANDIDATE_CAP - len(rows)
-            if remaining <= 0:
-                break
-            if seen_ids:
-                tier_stmt = tier_stmt.where(Node.id.not_in(seen_ids))
-            tier_rows = (
-                await session.execute(
-                    tier_stmt.order_by(Node.id.asc())
-                    .limit(min(tier_cap, remaining))
-                )
-            ).scalars().all()
-            for r in tier_rows:
-                if r.id not in seen_ids:
-                    seen_ids.add(r.id)
-                    rows.append(r)
+        # Priority ordering inside the one filtered scan: an exact name
+        # match is kept before a name-prefix match, which is kept before
+        # anything else the filter matched. ``id`` breaks ties so the
+        # truncated pool is deterministic on every dialect.
+        tier = sa.case(
+            (or_(*exact_conds), _TIER_EXACT),
+            (or_(*prefix_conds), _TIER_PREFIX),
+            else_=_TIER_OTHER,
+        )
+        stmt = stmt.where(or_(*conds)).order_by(tier.asc(), Node.id.asc())
     else:
         # No terms — keep the plain bounded scan (kind/component filters
         # may still apply), deterministic by id.
-        rows = (
-            await session.execute(
-                stmt.order_by(Node.id.asc()).limit(_SEARCH_CANDIDATE_CAP)
-            )
-        ).scalars().all()
+        stmt = stmt.order_by(Node.id.asc())
+    rows = (
+        await session.execute(stmt.limit(_SEARCH_CANDIDATE_CAP))
+    ).scalars().all()
 
     scored: list[tuple[float, Node]] = []
     for r in rows:
