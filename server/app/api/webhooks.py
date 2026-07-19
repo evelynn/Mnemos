@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.logger import record as audit_record
@@ -147,6 +147,50 @@ def _default_branch_ref(default_branch: str) -> str:
     if branch.startswith("refs/heads/"):
         return branch
     return f"refs/heads/{branch}"
+
+
+async def _supersede_older_queued_webhook_runs(
+    db: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    new_run: AnalysisRun,
+) -> int:
+    """Coalesce a push burst at enqueue time.
+
+    Once the replacement run has a committed row AND a live ARQ job, any
+    older still-``queued`` webhook run for the project is redundant queue
+    work — the newer push's checkout subsumes it, and execution-time
+    supersession would cancel it anyway after the worker had already
+    picked it up. The ``status == "queued"`` guard makes this a CAS-style
+    transition: a run the worker already moved to ``running`` is left
+    alone. Mirrors the terminal shape of execution-time supersession
+    (``superseded_by_newer_webhook:{run_id}``).
+    """
+
+    result = await db.execute(
+        update(AnalysisRun)
+        .where(
+            AnalysisRun.project_id == project_id,
+            AnalysisRun.id != new_run.id,
+            AnalysisRun.status == "queued",
+            AnalysisRun.triggered_by.like("webhook:%"),
+            AnalysisRun.created_at < new_run.created_at,
+        )
+        .values(
+            status="cancelled",
+            completed_at=datetime.now(tz=timezone.utc),
+            error_log=f"superseded_by_newer_webhook:{new_run.id}",
+        )
+    )
+    await db.commit()
+    count = int(result.rowcount or 0)
+    if count:
+        log.info(
+            "webhook push burst coalesced: %d queued run(s) superseded by %s",
+            count,
+            new_run.id,
+        )
+    return count
 
 
 @router.post("/gitlab")
@@ -277,11 +321,15 @@ async def gitlab_webhook(
                     await db.commit()
                     skip_reason = "duplicate_push"
                 else:
+                    superseded_count = await _supersede_older_queued_webhook_runs(
+                        db, project_id=project.id, new_run=run
+                    )
                     enqueued = {
                         "run_id": str(run.id),
                         "ref": ref,
                         "after": after,
                         "before": before,
+                        "superseded_queued": superseded_count,
                     }
 
     # A push that should have enqueued but didn't gets a distinct
