@@ -124,8 +124,11 @@ usage, immutable price, and durable-attempt contract.
 - The default Compose worker bundles the in-repo Python/TS/JS/C/C++/Java/Kotlin/Web/tree-sitter
   path. C#, live-DB, and .NET-binary analyzers exist in the repository but are not wired into that
   worker image; their standalone profile images are contract-test artifacts, not an execution path.
-- Rapid webhook pushes are not coalesced before enqueue. Execution-time supersession and the
-  per-project mutation lock limit damage, but a burst can still create avoidable queue work.
+- Rapid webhook pushes are coalesced at enqueue: once a newer push has a committed run row and a
+  live job, older still-`queued` webhook runs for that project are superseded, so a burst no longer
+  leaves redundant work for the worker to pick up and cancel one by one. Runs already `running`,
+  and manual runs, are never touched. This does not merge in-flight analyses — a burst arriving
+  while a run executes still queues one follow-up, which is the intended behaviour.
 - Project-lock contention preserves the queued run and retries it, but a hard-crashed owner cannot
   be safely pre-empted without a fencing token/DB advisory lock. The fail-safe Redis lease can delay
   the next run for up to its nine-hour TTL rather than risking two current-graph writers.
