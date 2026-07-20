@@ -7,7 +7,7 @@
 //
 // Run against a *test-only* stack:
 //
-//   BASE_URL=http://localhost:8080 \
+//   BASE_URL=http://localhost:16401 \
 //   WEBHOOK_TOKEN=$(jq -r .secret < platform_settings.json) \
 //   k6 run scripts/loadtest/webhook_burst.js
 //
@@ -18,7 +18,7 @@ import http from "k6/http";
 import { check } from "k6";
 import { Counter, Trend } from "k6/metrics";
 
-const BASE = __ENV.BASE_URL || "http://localhost:8080";
+const BASE = __ENV.BASE_URL || "http://localhost:16401";
 const TOKEN = __ENV.WEBHOOK_TOKEN || "";
 const GITLAB_PROJECT_ID = parseInt(__ENV.GITLAB_PROJECT_ID || "1234567", 10);
 const PROJECT_PATH = __ENV.GITLAB_PROJECT_PATH || "team/repo";

@@ -94,7 +94,10 @@ def test_search_symbols_is_ranked():
         Path(__file__).resolve().parents[1] / "app" / "mcp" / "queries.py"
     ).read_text(encoding="utf-8")
     idx = body.find("async def search_symbols(")
-    slab = body[idx:idx + 8000]
+    # Slab reaches the next top-level def so added candidate-selection code
+    # cannot silently push the asserted markers out of a fixed window.
+    end = body.find("\nasync def ", idx + 1)
+    slab = body[idx:end]
     assert "_tokenize(query)" in slab
     assert "_score_symbol(" in slab
     assert "scored.sort(" in slab

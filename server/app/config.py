@@ -28,9 +28,9 @@ class Settings(BaseSettings):
     )
 
     database_url: str = Field(
-        default="postgresql+asyncpg://mnemos:mnemos@localhost:5432/mnemos"
+        default="postgresql+asyncpg://mnemos:mnemos@localhost:16404/mnemos"
     )
-    redis_url: str = Field(default="redis://localhost:6379/0")
+    redis_url: str = Field(default="redis://localhost:16405/0")
     # Optional operator-managed Git mirror root for webhook analysis.  A
     # webhook never falls back to the worker's current directory: the exact
     # pushed SHA must already exist in ``<root>/<project_id>[.git]`` and is

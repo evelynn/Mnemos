@@ -14,6 +14,8 @@ hardening — ``noise.ts`` decoys — is asserted by test_pr66.)
 
 from __future__ import annotations
 
+import pytest
+
 from app.merge.runtime import _operation_from_node_id, _operation_matches
 
 
@@ -48,8 +50,14 @@ def test_none_and_empty_are_safe():
 
 
 def test_reconcile_uses_the_matcher():
-    """The reconcile loop must route its candidate comparison through
-    the matcher, not raw equality."""
+    """The reconcile loop must route its candidate comparison through the
+    matcher contract, not raw equality.
+
+    The loop now resolves candidates through a prebuilt key index instead
+    of calling the pairwise matcher per edge, so the structural check
+    tracks ``_match_keys`` — and the equivalence test below is what
+    actually pins the semantics.
+    """
     from pathlib import Path
 
     body = (
@@ -57,8 +65,38 @@ def test_reconcile_uses_the_matcher():
         / "app" / "merge" / "runtime.py"
     ).read_text(encoding="utf-8")
     idx = body.find("async def reconcile_observations(")
-    slab = body[idx:idx + 2400]
-    assert "_operation_matches(" in slab
+    end = body.find("\nasync def ", idx + 1)
+    slab = body[idx:end if end != -1 else len(body)]
+    assert "_match_keys(" in slab
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        "/api/orders",
+        "/api/orders/42",
+        "/api/orders/{id}",
+        "SELECT orders",
+        "INSERT orders",
+        "",
+        None,
+        "/",
+    ],
+)
+@pytest.mark.parametrize(
+    "observed",
+    ["/api/orders", "/api/orders/42", "/api/orders/{id}", "SELECT orders", ""],
+)
+def test_match_keys_index_agrees_with_pairwise_matcher(candidate, observed):
+    """The key index must select exactly what the pairwise matcher does.
+
+    This is the invariant the reconcile refactor rests on: a shared key
+    between the two sides is equivalent to ``_operation_matches``.
+    """
+    from app.merge.runtime import _match_keys
+
+    index_hit = bool(set(_match_keys(candidate)) & set(_match_keys(observed)))
+    assert index_hit is _operation_matches(candidate, observed)
 
 
 # ---------------------------------------------------------------------------

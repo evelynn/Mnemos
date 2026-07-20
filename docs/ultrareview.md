@@ -145,10 +145,11 @@ a diff while the rerun verdict remains blocked.
 ## 6. Scope and extension
 
 - The pipeline reviews a submitted diff against an already published source-analysis
-  graph; it does not rerun the whole repository analysis. The deterministic passes
-  currently process the full submitted string and `DiffSubmit.diff` has no explicit
-  size limit. Only Second Opinion's evidence selection is bounded; bounding the
-  submission before all deterministic passes is a remaining input-hardening gap.
+  graph; it does not rerun the whole repository analysis. Submissions are bounded at
+  ingress: `DiffSubmit.diff` rejects past `DIFF_INPUT_MAX_CHARS` (422), and
+  `run_pipeline` fail-closes its non-HTTP callers (break-glass rerun, MCP dev tools)
+  with `DiffInputTooLarge` before any deterministic pass scans the string. Second
+  Opinion's evidence selection is additionally bounded on its own.
 - Deterministic passes must not access the network. Second Opinion is the only
   price-attested exception.
 - Model output remains inferred review guidance, not verified source truth.

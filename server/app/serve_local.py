@@ -60,7 +60,7 @@ def _bootstrap_env(db_path: str) -> None:
         os.environ["FERNET_KEY"] = Fernet.generate_key().decode()
     # fakeredis stands in for Redis; the URL is never dialed but keep
     # it well-formed for any code that parses it.
-    os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+    os.environ.setdefault("REDIS_URL", "redis://localhost:16405/0")
     # Local HTTP — cookies can't require Secure or the browser drops
     # them over plain http://localhost. The Settings field is
     # ``session_cookie_secure`` → env ``SESSION_COOKIE_SECURE``.
@@ -73,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Run Mnemos with no Docker: SQLite + fakeredis + inline jobs.",
     )
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=16401)
     parser.add_argument(
         "--db", default="./mnemos-local.db",
         help="SQLite file path (default ./mnemos-local.db).",

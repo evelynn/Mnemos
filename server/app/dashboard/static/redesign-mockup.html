@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="ko" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mnemos — 재디자인 미리보기 v3 (시각화)</title>
+<style>
+:root{
+  --bg:#fafafa; --surface:#fff; --surface-alt:#f4f4f5; --raise:#fff;
+  --border:#e8e8ec; --border-soft:#f1f1f3;
+  --text:#09090b; --muted:#71717a; --faint:#a1a1aa;
+  --accent:#4f46e5; --accent-2:#6366f1; --accent-soft:#eef2ff; --accent-ring:#c7d2fe; --accent-strong:#4338ca;
+  --amber:#f59e0b; --ok:#15803d; --ok-bg:#f0fdf4; --warn:#b45309;
+  --r-sm:7px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
+  --sb:248px; --topbar:58px; --col:1080px; --read:760px;
+  --shadow-1:0 1px 2px rgba(9,9,11,.05);
+  --shadow-2:0 4px 16px -4px rgba(9,9,11,.10);
+  --shadow-pop:0 16px 48px -12px rgba(9,9,11,.22);
+  --font:ui-sans-serif,system-ui,-apple-system,"Segoe UI","Malgun Gothic",Roboto,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"JetBrains Mono","Cascadia Code",monospace;
+}
+[data-theme="dark"]{
+  --bg:#0a0a0b; --surface:#141416; --surface-alt:#1c1c1f; --raise:#161618;
+  --border:#26262a; --border-soft:#1d1d20;
+  --text:#fafafa; --muted:#a1a1aa; --faint:#71717a;
+  --accent:#818cf8; --accent-2:#818cf8; --accent-soft:#1e1b34; --accent-ring:#3730a3; --accent-strong:#a5b4fc;
+  --amber:#fbbf24; --ok:#4ade80; --ok-bg:#062012; --warn:#fbbf24;
+  --shadow-2:0 4px 16px -4px rgba(0,0,0,.5); --shadow-pop:0 16px 48px -12px rgba(0,0,0,.65);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--text);font:14.5px/1.6 var(--font);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;cursor:pointer;border:none;background:none}
+input,textarea{font:inherit;color:inherit}
+::selection{background:var(--accent-soft)}
+svg{stroke-width:1.7}
+
+.previewbar{position:fixed;inset:0 0 auto 0;height:34px;z-index:80;display:flex;align-items:center;justify-content:center;gap:10px;font-size:12.5px;color:#fff;background:linear-gradient(90deg,#4f46e5,#7c3aed)}
+.previewbar b{font-weight:700}
+.app{display:grid;grid-template-columns:var(--sb) 1fr;height:100vh;padding-top:34px}
+
+/* sidebar */
+.sidebar{background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0}
+.sb-head{display:flex;align-items:center;gap:9px;padding:16px 16px 12px}
+.logo{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,#4f46e5,#7c3aed);display:grid;place-items:center;color:#fff;box-shadow:var(--shadow-1)}
+.brand{font-weight:680;font-size:15.5px;letter-spacing:-.2px}
+.sb-search{margin:2px 12px 8px;display:flex;align-items:center;gap:8px;height:34px;padding:0 10px;background:var(--surface-alt);border:1px solid transparent;border-radius:var(--r-md);color:var(--muted);font-size:13px}
+.sb-search:hover{border-color:var(--border)}
+.sb-search kbd{margin-left:auto;font:11px var(--mono);background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:1px 5px;color:var(--faint)}
+nav{flex:1;overflow:auto;padding:4px 10px}
+.nav-sec{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);padding:14px 10px 5px}
+.nav-i{display:flex;align-items:center;gap:10px;width:100%;height:36px;padding:0 10px;border-radius:var(--r-md);color:var(--muted);font-weight:500;position:relative;transition:.12s;text-align:left}
+.nav-i svg{width:17px;height:17px;flex:none}
+.nav-i:hover{background:var(--surface-alt);color:var(--text)}
+.nav-i.active{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.nav-i.active::before{content:"";position:absolute;left:-10px;top:8px;bottom:8px;width:3px;border-radius:3px;background:var(--accent)}
+.nav-i .count{margin-left:auto;font-size:11px;color:var(--faint);background:var(--surface-alt);border-radius:var(--r-pill);padding:0 7px;line-height:18px}
+.nav-i.active .count{background:var(--surface);color:var(--accent)}
+.sb-foot{border-top:1px solid var(--border);padding:10px 12px;display:flex;flex-direction:column;gap:9px}
+.foot-user{display:flex;align-items:center;gap:8px}
+.avatar{width:27px;height:27px;border-radius:50%;background:#ddd6fe;color:#4f46e5;display:grid;place-items:center;font-size:12px;font-weight:700}
+.foot-user .who{font-size:12.5px;font-weight:600}.foot-user .who small{display:block;color:var(--faint);font-weight:400;font-size:11px}
+.foot-toggles{display:flex;gap:8px}
+.seg{display:flex;background:var(--surface-alt);border-radius:var(--r-pill);padding:2px;font-size:11.5px}
+.seg button{padding:3px 10px;border-radius:var(--r-pill);color:var(--muted);font-weight:600;transition:.12s}
+.seg button.on{background:var(--surface);color:var(--text);box-shadow:var(--shadow-1)}
+.seg.icons button{width:26px;padding:3px 0;text-align:center}
+
+/* main */
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.topbar{height:var(--topbar);flex:none;display:flex;align-items:center;gap:12px;padding:0 22px;border-bottom:1px solid var(--border);background:color-mix(in srgb,var(--surface) 72%,transparent);backdrop-filter:blur(8px);position:relative;z-index:30}
+.topbar h1{font-size:15.5px;font-weight:650;letter-spacing:-.2px}
+.topbar .crumb{color:var(--faint);font-weight:400}
+.spacer{flex:1}
+.usage{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.usage .dotk{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+.proj-pick{display:flex;align-items:center;gap:9px;height:36px;padding:0 10px 0 12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-md);font-size:13px;font-weight:600;box-shadow:var(--shadow-1);min-width:210px}
+.proj-pick:hover{border-color:var(--accent-ring)}
+.proj-pick .pdot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+.proj-pick .pmeta{margin-left:auto;font-weight:400;font-size:11.5px;color:var(--faint);font-family:var(--mono)}
+.proj-pick .chev{width:15px;height:15px;color:var(--faint)}
+.proj-menu{position:absolute;top:50px;right:64px;width:340px;background:var(--raise);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow-pop);padding:8px;display:none;z-index:50}
+.proj-menu.open{display:block}
+.pm-search{display:flex;align-items:center;gap:8px;height:34px;padding:0 10px;background:var(--surface-alt);border-radius:var(--r-md);color:var(--muted);font-size:13px;margin-bottom:6px}
+.pm-search input{flex:1;background:none;border:none;outline:none}
+.pm-label{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);padding:6px 10px 4px}
+.pm-item{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border-radius:var(--r-md);text-align:left;transition:.1s}
+.pm-item:hover{background:var(--surface-alt)}
+.pm-item .pdot{width:8px;height:8px;border-radius:50%;flex:none}
+.pm-item .pn{font-weight:600;font-size:13.5px}
+.pm-item .ps{font-size:11.5px;color:var(--faint);font-family:var(--mono)}
+.pm-item .pcheck{margin-left:auto;color:var(--accent);opacity:0}
+.pm-item.sel .pcheck{opacity:1}.pm-item.sel{background:var(--accent-soft)}
+.pm-new{display:flex;align-items:center;gap:8px;width:100%;padding:9px 10px;border-radius:var(--r-md);color:var(--accent);font-weight:600;font-size:13px;border-top:1px solid var(--border-soft);margin-top:4px}
+.pm-new:hover{background:var(--accent-soft)}
+.icon-btn{width:36px;height:36px;border-radius:var(--r-md);display:grid;place-items:center;color:var(--muted);border:1px solid transparent}
+.icon-btn:hover{background:var(--surface-alt);color:var(--text)}
+.view{flex:1;min-height:0;display:none;flex-direction:column}
+.view.active{display:flex}
+
+/* Ask view — WIDER */
+.thread{flex:1;overflow:auto;padding:26px 24px 8px}
+.thread-inner{max-width:var(--col);margin:0 auto;display:flex;flex-direction:column;gap:22px}
+.turn-q{align-self:flex-end;max-width:72%;background:var(--accent);color:#fff;padding:11px 15px;border-radius:var(--r-lg) var(--r-lg) 4px var(--r-lg);font-size:14.5px;box-shadow:var(--shadow-1)}
+.turn-a{display:flex;flex-direction:column;gap:9px}
+.a-badges{display:flex;gap:7px;align-items:center}
+.badge{font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:var(--r-pill);border:1px solid var(--border)}
+.badge.ok{background:var(--ok-bg);color:var(--ok);border-color:transparent}
+.badge.info{background:var(--accent-soft);color:var(--accent);border-color:transparent}
+.badge.viz{background:#fdf2f8;color:#be185d;border-color:transparent}
+[data-theme=dark] .badge.viz{background:#2a0f1f;color:#f9a8d4}
+.a-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:16px 18px;box-shadow:var(--shadow-1)}
+.a-text{font-size:15px;line-height:1.7;max-width:var(--read)}
+.a-text code{font:12.5px var(--mono);background:var(--surface-alt);padding:1px 6px;border-radius:5px}
+.a-meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:11px;font-size:12.5px}
+.a-kind{font-weight:600;color:var(--accent);background:var(--accent-soft);padding:2px 8px;border-radius:var(--r-pill)}
+.a-loc{font-family:var(--mono);font-size:12px;color:var(--muted);background:var(--surface-alt);padding:2px 8px;border-radius:var(--r-sm)}
+.a-sig{font-family:var(--mono);font-size:12.5px;background:var(--surface-alt);border:1px solid var(--border-soft);border-radius:var(--r-md);padding:10px 12px;margin-top:11px;overflow:auto;max-width:var(--read)}
+.da{display:flex;align-items:center;gap:7px;margin-top:9px;flex-wrap:wrap}
+.da-label{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--faint);min-width:46px}
+.chip{font-family:var(--mono);font-size:12px;background:var(--surface-alt);border:1px solid var(--border);border-radius:var(--r-sm);padding:2px 8px}
+.chip.w{background:#fff7ed;border-color:#fed7aa;color:#9a3412}
+[data-theme="dark"] .chip.w{background:#2a1a0a;border-color:#7c2d12;color:#fdba74}
+
+/* ───── VISUALIZATION ───── */
+.viz{margin-top:13px;border:1px solid var(--border);border-radius:var(--r-md);background:var(--surface-alt);padding:14px 16px}
+.viz-cap{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);margin-bottom:11px;display:flex;align-items:center;gap:7px}
+.viz-cap svg{width:14px;height:14px;color:var(--accent)}
+.viz-row{display:flex;gap:24px;align-items:center;flex-wrap:wrap}
+/* bar chart */
+.bars{display:flex;flex-direction:column;gap:8px;flex:1;min-width:280px}
+.barrow{display:grid;grid-template-columns:160px 1fr 46px;align-items:center;gap:12px;font-size:12.5px}
+.barrow .bl{font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.barrow .bt{height:10px;border-radius:5px;background:var(--accent-soft);overflow:hidden}
+.barrow .bt i{display:block;height:100%;background:linear-gradient(90deg,var(--accent-2),var(--accent));border-radius:5px}
+.barrow .bv{text-align:right;font-family:var(--mono);color:var(--muted)}
+/* donut */
+.donut{width:108px;height:108px;border-radius:50%;position:relative;flex:none}
+.donut::after{content:"";position:absolute;inset:15px;border-radius:50%;background:var(--surface-alt)}
+.donut-c{position:absolute;inset:0;display:grid;place-items:center;text-align:center}
+.donut-c b{font-size:18px;font-weight:750;line-height:1}.donut-c span{font-size:10px;color:var(--muted)}
+.legend{display:flex;flex-direction:column;gap:6px;font-size:12.5px}
+.legend i{width:10px;height:10px;border-radius:3px;display:inline-block;margin-right:7px;vertical-align:-1px}
+/* call graph */
+.viz-graph svg{width:100%;height:auto;display:block;max-width:660px;margin:0 auto}
+.gnode rect{fill:var(--surface);stroke:var(--border);stroke-width:1.2}
+.gnode.center rect{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.6}
+.gnode text{font:11px var(--mono);fill:var(--text)}
+.gnode.center text{font-weight:700;fill:var(--accent)}
+.gedge{stroke:var(--faint);stroke-width:1.4;fill:none}
+.glabel{font:10px var(--font);fill:var(--faint)}
+/* process flow */
+.flow{display:flex;align-items:stretch;overflow:auto;padding-bottom:4px}
+.flow-step{flex:1;min-width:158px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-md);padding:11px 13px;position:relative}
+.flow-step+.flow-step{margin-left:30px}
+.flow-step+.flow-step::before{content:"→";position:absolute;left:-23px;top:50%;transform:translateY(-50%);color:var(--faint);font-size:16px}
+.flow-tier{font-size:10px;font-weight:800;letter-spacing:.05em;padding:1px 8px;border-radius:var(--r-pill);display:inline-block}
+.tier-fe{background:#eef2ff;color:#4f46e5}.tier-be{background:#ecfdf5;color:#15803d}.tier-db{background:#fff7ed;color:#9a3412}
+[data-theme=dark] .tier-fe{background:#1e1b34;color:#a5b4fc}[data-theme=dark] .tier-be{background:#062012;color:#4ade80}[data-theme=dark] .tier-db{background:#2a1a0a;color:#fdba74}
+.flow-comp{font-weight:650;font-size:13px;margin:7px 0 3px;font-family:var(--mono)}
+.flow-act{font-size:11.5px;color:var(--muted)}
+
+/* composer — wider */
+.composer{flex:none;padding:10px 24px 16px;background:linear-gradient(0deg,var(--bg) 72%,transparent)}
+.composer-inner{max-width:var(--col);margin:0 auto;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-xl);box-shadow:var(--shadow-2);transition:.15s}
+.composer-inner:focus-within{border-color:var(--accent-ring);box-shadow:var(--shadow-2),0 0 0 4px var(--accent-soft)}
+.composer textarea{width:100%;border:none;background:none;resize:none;outline:none;font:15px/1.65 var(--font);padding:16px 18px 4px;min-height:88px;max-height:42vh}
+.composer textarea::placeholder{color:var(--faint)}
+.composer-bar{display:flex;align-items:center;gap:8px;padding:8px 12px 12px;flex-wrap:wrap}
+.tool{display:flex;align-items:center;gap:7px;height:32px;padding:0 11px;border-radius:var(--r-md);color:var(--muted);font-size:12.5px;font-weight:500;border:1px solid var(--border)}
+.tool:hover{background:var(--surface-alt);color:var(--text)}
+.tool svg{width:15px;height:15px}.tool.on{background:var(--accent-soft);color:var(--accent);border-color:transparent}
+.send{margin-left:auto;display:flex;align-items:center;gap:8px;height:36px;padding:0 16px;border-radius:var(--r-md);background:var(--accent);color:#fff;font-weight:600;font-size:13.5px;box-shadow:var(--shadow-1)}
+.send:hover{background:var(--accent-strong)}
+.send kbd{font:11px var(--mono);background:rgba(255,255,255,.2);border-radius:4px;padding:1px 5px}
+.hint{max-width:var(--col);margin:8px auto 0;font-size:12px;color:var(--faint);text-align:center}
+.hint kbd{font:11px var(--mono);background:var(--surface-alt);border:1px solid var(--border);border-radius:4px;padding:0 5px}
+
+/* settings */
+.settings{flex:1;overflow:auto;padding:28px 24px}
+.settings-inner{max-width:860px;margin:0 auto}
+.s-title{font-size:20px;font-weight:680;letter-spacing:-.3px}
+.s-sub{color:var(--muted);margin:4px 0 22px;font-size:13.5px}
+.prov-grid{display:flex;flex-direction:column;gap:12px}
+.prov{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:16px 18px;box-shadow:var(--shadow-1);transition:.15s}
+.prov.active{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft),var(--shadow-1)}
+.prov-head{display:flex;align-items:center;gap:11px}
+.prov-ic{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;color:#fff;font-weight:800;font-size:13px;flex:none}
+.prov-name{font-weight:680;font-size:15px}.prov-name small{display:block;font-weight:400;font-size:12px;color:var(--faint)}
+.status{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--muted)}
+.status .sd{width:7px;height:7px;border-radius:50%}.status .sd.on{background:var(--ok)}.status .sd.off{background:var(--faint)}
+.prov-act{margin-left:auto;display:flex;align-items:center;gap:10px}
+.use-tag{font-size:11.5px;font-weight:700;color:var(--accent);background:var(--accent-soft);padding:3px 10px;border-radius:var(--r-pill)}
+.btn{height:32px;padding:0 14px;border-radius:var(--r-md);font-size:12.5px;font-weight:600;border:1px solid var(--border);color:var(--text);background:var(--surface)}
+.btn:hover{background:var(--surface-alt)}
+.prov-body{margin-top:14px;padding-top:14px;border-top:1px solid var(--border-soft);display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.prov-body.solo{grid-template-columns:1fr}
+.field{display:flex;flex-direction:column;gap:5px}
+.field label{font-size:11.5px;font-weight:600;color:var(--muted)}
+.field input{height:36px;padding:0 11px;background:var(--surface-alt);border:1px solid var(--border);border-radius:var(--r-md);outline:none}
+.field input:focus{border-color:var(--accent-ring);background:var(--surface)}
+.method-seg{display:flex;background:var(--surface-alt);border-radius:var(--r-md);padding:3px;width:fit-content}
+.method-seg button{padding:5px 14px;border-radius:var(--r-sm);font-size:12.5px;font-weight:600;color:var(--muted)}
+.method-seg button.on{background:var(--surface);color:var(--accent);box-shadow:var(--shadow-1)}
+.collapsed .prov-body{display:none}
+@media(max-width:780px){.app{grid-template-columns:1fr}.sidebar{display:none}.prov-body{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="previewbar"><b>재디자인 미리보기 v3</b> · 넓은 채팅 + 시각화(그래프·차트·플로우) · KO·EN · 분석 선택기 · AI 제공자</div>
+<div class="app">
+  <aside class="sidebar">
+    <div class="sb-head"><span class="logo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V6l4 6 4-6 4 6 4-6v13"/></svg></span><span class="brand">Mnemos</span></div>
+    <div class="sb-search"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><span data-ko="검색 / 이동" data-en="Search / jump">검색 / 이동</span><kbd>⌘K</kbd></div>
+    <nav>
+      <button class="nav-i active" data-view="ask"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8 10h8M8 14h5M21 12a9 9 0 1 1-3.6-7.2L21 4v5h-5"/></svg><span data-ko="질의(Ask)" data-en="Ask">질의(Ask)</span></button>
+      <button class="nav-i" data-view="ask"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h8M8 8h8M8 16h4M4 4h16v12H7l-3 3V4z"/></svg><span data-ko="채팅" data-en="Chat">채팅</span></button>
+      <button class="nav-i" data-view="ask"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7l9-4 9 4-9 4-9-4zM3 7v10l9 4 9-4V7"/></svg><span data-ko="프로젝트" data-en="Projects">프로젝트</span><span class="count">6</span></button>
+      <div class="nav-sec" data-ko="분석" data-en="Analysis">분석</div>
+      <button class="nav-i" data-view="ask"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M4 12h16M4 17h10"/></svg><span data-ko="실행" data-en="Runs">실행</span></button>
+      <button class="nav-i" data-view="ask"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16"/></svg><span data-ko="데이터" data-en="Data">데이터</span><span class="count">54</span></button>
+      <button class="nav-i" data-view="ask"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="9" r="2.4"/><circle cx="9" cy="18" r="2.4"/><path stroke-linecap="round" d="M8 7l8 1.4M8 16l1-6"/></svg><span data-ko="그래프" data-en="Graph">그래프</span></button>
+      <button class="nav-i" data-view="ask"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.3 3.9 2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg><span data-ko="발견" data-en="Findings">발견</span><span class="count">14</span></button>
+      <div class="nav-sec" data-ko="더보기" data-en="More">더보기</div>
+      <button class="nav-i" data-view="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"/><path stroke-linecap="round" d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.3 1a7 7 0 0 0-1.7-1l-.4-2.5h-4l-.4 2.5a7 7 0 0 0-1.7 1l-2.3-1-2 3.4L4.1 11a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7 7 0 0 0 1.7-1l2.3 1 2-3.4-2-1.5a7 7 0 0 0 .1-1z"/></svg><span data-ko="설정" data-en="Settings">설정</span></button>
+      <button class="nav-i" data-view="ask"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span data-ko="상태" data-en="Health">상태</span></button>
+    </nav>
+    <div class="sb-foot">
+      <div class="foot-user"><span class="avatar">P</span><span class="who">probe<small>admin</small></span></div>
+      <div class="foot-toggles">
+        <span class="seg" id="langSeg"><button data-lang="ko" class="on">한국어</button><button data-lang="en">EN</button></span>
+        <span class="seg icons" id="themeSeg"><button data-th="light" class="on" title="라이트">☀</button><button data-th="dark" title="다크">☾</button></span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <h1 id="pageTitle" data-ko="질의" data-en="Ask">질의 <span class="crumb" data-ko="· 코드 질의" data-en="· code Q&amp;A">· 코드 질의</span></h1>
+      <span class="spacer"></span>
+      <span class="usage" title="이번 세션 토큰"><span class="dotk"></span><span data-ko="Claude 구독" data-en="Claude sub">Claude 구독</span> · 12.4k tok</span>
+      <button class="proj-pick" id="projBtn"><span class="pdot"></span><span id="projName">openclaw</span><span class="pmeta">119k·184k</span><svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6"/></svg></button>
+      <button class="icon-btn" data-view="settings" title="설정"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"/><path stroke-linecap="round" d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.3 1a7 7 0 0 0-1.7-1l-.4-2.5h-4l-.4 2.5a7 7 0 0 0-1.7 1l-2.3-1-2 3.4L4.1 11a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7 7 0 0 0 1.7-1l2.3 1 2-3.4-2-1.5a7 7 0 0 0 .1-1z"/></svg></button>
+      <div class="proj-menu" id="projMenu">
+        <div class="pm-search"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><input placeholder="분석 검색…" data-ko-ph="분석 검색…" data-en-ph="Search analyses…"></div>
+        <div class="pm-label" data-ko="분석 완료" data-en="Analyzed">분석 완료</div>
+        <button class="pm-item sel" data-name="openclaw" data-meta="119k·184k"><span class="pdot" style="background:var(--ok)"></span><span><span class="pn">openclaw</span><span class="ps"> · 119,576 심볼 · 184,751 calls</span></span><svg class="pcheck" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg></button>
+        <button class="pm-item" data-name="hermes-agent" data-meta="63k·44k"><span class="pdot" style="background:var(--ok)"></span><span><span class="pn">hermes-agent</span><span class="ps"> · 63,323 심볼 · 43,553 calls</span></span><svg class="pcheck" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg></button>
+        <button class="pm-item" data-name="openclaw gateway" data-meta="48k"><span class="pdot" style="background:var(--ok)"></span><span><span class="pn">openclaw gateway</span><span class="ps"> · 48,134 심볼</span></span><svg class="pcheck" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg></button>
+        <button class="pm-item" data-name="Smart-AI-Report-V4" data-meta="1.9k"><span class="pdot" style="background:var(--ok)"></span><span><span class="pn">Smart-AI-Report-V4</span><span class="ps"> · 1,938 심볼</span></span><svg class="pcheck" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg></button>
+        <button class="pm-new"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" d="M12 5v14M5 12h14"/></svg><span data-ko="새 분석 시작" data-en="New analysis">새 분석 시작</span></button>
+      </div>
+    </div>
+
+    <section class="view active" id="view-ask">
+      <div class="thread" id="thread"><div class="thread-inner" id="threadInner">
+
+        <!-- text answer -->
+        <div class="turn-q">크래시 후에도 전송이 재시도되는 로직은 어디에 있나요?</div>
+        <div class="turn-a">
+          <div class="a-badges"><span class="badge ok" data-ko="답변" data-en="Answer">답변</span></div>
+          <div class="a-card">
+            <div class="a-text"><code>isEntryEligibleForRecoveryRetry</code>가 재시도 적격성을 판정합니다. <strong>크래시 빠른복구</strong> 분기로 재시작 직후 1회 즉시 재생, 그 외에는 <code>computeBackoffMs</code>(테이블 5s·25s·2m)로 페이싱합니다.</div>
+            <div class="a-meta"><span class="a-kind">function</span><span class="a-loc">delivery-queue-recovery.ts:337</span></div>
+            <div class="da"><span class="da-label">Reads</span><span class="chip">delivery_queue_entries</span></div>
+          </div>
+        </div>
+
+        <!-- CALL GRAPH viz -->
+        <div class="turn-q">runCodexAppServerAttempt는 무엇을 호출하나요? 그래프로 보여줘</div>
+        <div class="turn-a">
+          <div class="a-badges"><span class="badge ok" data-ko="답변" data-en="Answer">답변</span><span class="badge viz" data-ko="호출 그래프" data-en="Call graph">호출 그래프</span></div>
+          <div class="a-card">
+            <div class="a-text"><code>runCodexAppServerAttempt</code>는 172개 함수를 호출하는 핵심 오케스트레이터입니다. 유휴 워치독·컨텍스트엔진 projection·타임아웃 진단을 호출합니다.</div>
+            <div class="viz viz-graph">
+              <div class="viz-cap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="9" r="2.4"/><circle cx="9" cy="18" r="2.4"/><path stroke-linecap="round" d="M8 7l8 1.4M8 16l1-6"/></svg><span data-ko="호출 관계 (callers → 중심 → callees)" data-en="Call relations (callers → center → callees)">호출 관계 (callers → 중심 → callees)</span></div>
+              <svg viewBox="0 0 660 250" role="img" aria-label="call graph">
+                <defs><marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0 0L7 3L0 6Z" fill="var(--faint)"/></marker></defs>
+                <path class="gedge" marker-end="url(#arr)" d="M172 125 H236"/>
+                <path class="gedge" marker-end="url(#arr)" d="M430 118 C455 70 470 55 484 46"/>
+                <path class="gedge" marker-end="url(#arr)" d="M430 125 H484"/>
+                <path class="gedge" marker-end="url(#arr)" d="M430 132 C455 180 470 195 484 204"/>
+                <g class="gnode"><rect x="14" y="108" width="158" height="36" rx="9"/><text x="93" y="130" text-anchor="middle">agentCommandInternal</text></g>
+                <g class="gnode center"><rect x="236" y="100" width="194" height="50" rx="11"/><text x="333" y="121" text-anchor="middle">runCodexAppServer</text><text x="333" y="137" text-anchor="middle">Attempt · 172</text></g>
+                <g class="gnode"><rect x="484" y="28" width="166" height="36" rx="9"/><text x="567" y="50" text-anchor="middle">armAttemptIdleWatch</text></g>
+                <g class="gnode"><rect x="484" y="107" width="166" height="36" rx="9"/><text x="567" y="129" text-anchor="middle">applyContextEngine…</text></g>
+                <g class="gnode"><rect x="484" y="186" width="166" height="36" rx="9"/><text x="567" y="208" text-anchor="middle">buildTimeoutDiag…</text></g>
+                <text class="glabel" x="190" y="118">calls</text>
+              </svg>
+            </div>
+            <div class="a-meta"><span class="a-kind">function</span><span class="a-loc">run-attempt.ts:384</span></div>
+          </div>
+        </div>
+
+        <!-- BAR CHART + DONUT viz -->
+        <div class="turn-q">호출을 가장 많이 하는 함수와, 해소/외부 비율은?</div>
+        <div class="turn-a">
+          <div class="a-badges"><span class="badge ok" data-ko="답변" data-en="Answer">답변</span><span class="badge viz" data-ko="차트" data-en="Chart">차트</span></div>
+          <div class="a-card">
+            <div class="a-text">호출 out-degree 상위 함수와, 전체 CALLS의 <strong>해소(resolved) 48% / 외부(extern) 51%</strong> 비율입니다.</div>
+            <div class="viz">
+              <div class="viz-cap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg><span data-ko="아키텍처 허브 Top + CALLS 해소율" data-en="Top hubs + CALLS resolution">아키텍처 허브 Top + CALLS 해소율</span></div>
+              <div class="viz-row">
+                <div class="bars">
+                  <div class="barrow"><span class="bl">visit</span><span class="bt"><i style="width:100%"></i></span><span class="bv">216</span></div>
+                  <div class="barrow"><span class="bl">registerQaLabCli</span><span class="bt"><i style="width:89%"></i></span><span class="bv">193</span></div>
+                  <div class="barrow"><span class="bl">runCodexAppServer…</span><span class="bt"><i style="width:80%"></i></span><span class="bv">172</span></div>
+                  <div class="barrow"><span class="bl">buildResponsesPayload</span><span class="bt"><i style="width:71%"></i></span><span class="bv">153</span></div>
+                  <div class="barrow"><span class="bl">agentCommandInternal</span><span class="bt"><i style="width:55%"></i></span><span class="bv">119</span></div>
+                </div>
+                <div class="viz-row" style="gap:14px">
+                  <div class="donut" style="background:conic-gradient(var(--accent) 0 48%, var(--amber) 48% 100%)"><div class="donut-c"><div><b>184k</b><span>CALLS</span></div></div></div>
+                  <div class="legend"><span><i style="background:var(--accent)"></i>해소 48%</span><span><i style="background:var(--amber)"></i>외부 51%</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- PROCESS FLOW viz -->
+        <div class="turn-q">감사 로그 기록 흐름을 FE→BE→DB로 추적해줘</div>
+        <div class="turn-a">
+          <div class="a-badges"><span class="badge ok" data-ko="추적됨" data-en="Traced">추적됨</span><span class="badge viz" data-ko="프로세스 플로우" data-en="Process flow">프로세스 플로우</span></div>
+          <div class="a-card">
+            <div class="a-text">감사 로그는 프론트의 액션 → 인증 가드를 거친 핸들러 → DB write로 흐릅니다.</div>
+            <div class="viz">
+              <div class="viz-cap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4 7h6v6H4zM14 11h6v6h-6zM10 10h4"/></svg><span data-ko="런타임 경로 (티어 횡단)" data-en="Runtime path (cross-tier)">런타임 경로 (티어 횡단)</span></div>
+              <div class="flow">
+                <div class="flow-step"><span class="flow-tier tier-fe">FE</span><div class="flow-comp">AuditLogsPage</div><div class="flow-act">page.tsx:45 · fetch POST</div></div>
+                <div class="flow-step"><span class="flow-tier tier-be">BE</span><div class="flow-comp">recordAuditEvent</div><div class="flow-act">requireAuth · validate</div></div>
+                <div class="flow-step"><span class="flow-tier tier-db">DB</span><div class="flow-comp">audit_log</div><div class="flow-act">INSERT</div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div></div>
+
+      <div class="composer">
+        <div class="composer-inner">
+          <textarea id="composer" placeholder="코드베이스에 무엇이든 — '호출 그래프 보여줘', '흐름 추적해줘'처럼 시각화도 요청하세요…"
+            data-ko-ph="코드베이스에 무엇이든 — '호출 그래프 보여줘', '흐름 추적해줘'처럼 시각화도 요청하세요…"
+            data-en-ph="Ask anything — request visuals too: 'show the call graph', 'trace the flow'…"></textarea>
+          <div class="composer-bar">
+            <button class="tool on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4 18 9 9l5 4 6-9"/></svg><span data-ko="추적(FE→BE→DB)" data-en="Trace (FE→BE→DB)">추적(FE→BE→DB)</span></button>
+            <button class="tool"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="6" cy="6" r="2.4"/><circle cx="18" cy="9" r="2.4"/><circle cx="9" cy="18" r="2.4"/><path stroke-linecap="round" d="M8 7l8 1.4M8 16l1-6"/></svg><span data-ko="그래프" data-en="Graph">그래프</span></button>
+            <button class="tool"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18M3 12h18"/></svg><span data-ko="온디맨드" data-en="On-demand">온디맨드</span></button>
+            <button class="send"><span data-ko="보내기" data-en="Send">보내기</span> <kbd>↵</kbd></button>
+          </div>
+        </div>
+        <div class="hint"><kbd>Enter</kbd> <span data-ko="전송" data-en="send">전송</span> · <kbd>Shift</kbd>+<kbd>Enter</kbd> <span data-ko="줄바꿈" data-en="newline">줄바꿈</span> · <span data-ko="그래프·차트·플로우로 답변" data-en="answers with graphs, charts, flows">그래프·차트·플로우로 답변</span></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-settings">
+      <div class="settings"><div class="settings-inner">
+        <div class="s-title" data-ko="AI 제공자" data-en="AI providers">AI 제공자</div>
+        <div class="s-sub" data-ko="어떤 AI로 질문에 답할지 고르세요. 답변은 항상 Mnemos 그래프 사실에 근거합니다." data-en="Choose which AI answers. Answers stay grounded in the Mnemos graph.">어떤 AI로 질문에 답할지 고르세요. 답변은 항상 Mnemos 그래프 사실에 근거합니다.</div>
+        <div class="prov-grid">
+          <div class="prov active" data-prov="claude"><div class="prov-head"><span class="prov-ic" style="background:#d97757">C</span><span class="prov-name">Claude <small data-ko="구독형 (Claude Code) · 키 불필요" data-en="Subscription (Claude Code) · no key">구독형 (Claude Code) · 키 불필요</small></span><span class="prov-act"><span class="status"><span class="sd on"></span><span data-ko="연결됨" data-en="Connected">연결됨</span></span><span class="use-tag" data-ko="사용 중" data-en="In use">사용 중</span></span></div>
+            <div class="prov-body solo"><div class="field"><label data-ko="방식" data-en="Method">방식</label><span class="method-seg"><button class="on" data-ko="구독" data-en="Subscription">구독</button><button data-ko="API 키" data-en="API key">API 키</button></span></div></div></div>
+          <div class="prov collapsed" data-prov="openai"><div class="prov-head"><span class="prov-ic" style="background:#10a37f">AI</span><span class="prov-name">OpenAI <small data-ko="GPT 계열 · API 키 필요" data-en="GPT family · API key">GPT 계열 · API 키 필요</small></span><span class="prov-act"><span class="status"><span class="sd off"></span><span data-ko="키 필요" data-en="Needs key">키 필요</span></span><button class="btn" data-ko="선택" data-en="Use">선택</button></span></div>
+            <div class="prov-body"><div class="field"><label data-ko="모델" data-en="Model">모델</label><input placeholder="gpt-5.1 / o4-mini …"></div><div class="field"><label>API Key</label><input type="password" placeholder="sk-…"></div></div></div>
+          <div class="prov collapsed" data-prov="gemini"><div class="prov-head"><span class="prov-ic" style="background:#1a73e8">G</span><span class="prov-name">Gemini <small data-ko="Google · API 키 필요" data-en="Google · API key">Google · API 키 필요</small></span><span class="prov-act"><span class="status"><span class="sd off"></span><span data-ko="키 필요" data-en="Needs key">키 필요</span></span><button class="btn" data-ko="선택" data-en="Use">선택</button></span></div>
+            <div class="prov-body"><div class="field"><label data-ko="모델" data-en="Model">모델</label><input placeholder="gemini-3-pro …"></div><div class="field"><label>API Key</label><input type="password" placeholder="AIza…"></div></div></div>
+          <div class="prov collapsed" data-prov="atlas"><div class="prov-head"><span class="prov-ic" style="background:#0ea5e9">A</span><span class="prov-name">Atlas <small data-ko="hansol AI-ATLAS · 에이전트 세션" data-en="hansol AI-ATLAS · agent session">hansol AI-ATLAS · 에이전트 세션</small></span><span class="prov-act"><span class="status"><span class="sd on"></span><span data-ko="연결됨" data-en="Connected">연결됨</span></span><button class="btn" data-ko="선택" data-en="Use">선택</button></span></div>
+            <div class="prov-body"><div class="field"><label>Agent ID</label><input placeholder="6d157c65-7b48-…"></div><div class="field"><label>API Key (x-api-key)</label><input type="password" placeholder="sk_live_…"></div></div></div>
+        </div>
+      </div></div>
+    </section>
+  </main>
+</div>
+
+<script>
+function applyLang(lang){
+  document.documentElement.lang=lang;
+  document.querySelectorAll('[data-ko][data-en]').forEach(el=>el.textContent=el.dataset[lang]);
+  document.querySelectorAll('[data-ko-ph][data-en-ph]').forEach(el=>el.placeholder=lang==='ko'?el.dataset.koPh:el.dataset.enPh);
+  document.querySelectorAll('#langSeg button').forEach(b=>b.classList.toggle('on',b.dataset.lang===lang));
+  syncTitle();
+}
+document.querySelectorAll('#langSeg button').forEach(b=>b.addEventListener('click',()=>applyLang(b.dataset.lang)));
+document.querySelectorAll('#themeSeg button').forEach(b=>b.addEventListener('click',()=>{document.documentElement.setAttribute('data-theme',b.dataset.th);document.querySelectorAll('#themeSeg button').forEach(x=>x.classList.toggle('on',x===b));}));
+let curView='ask';
+function syncTitle(){const t=document.getElementById('pageTitle'),ko=document.documentElement.lang==='ko';
+  t.innerHTML=curView==='settings'?(ko?'설정 <span class="crumb">· AI 제공자</span>':'Settings <span class="crumb">· AI providers</span>'):(ko?'질의 <span class="crumb">· 코드 질의</span>':'Ask <span class="crumb">· code Q&A</span>');}
+function showView(v){curView=v;document.querySelectorAll('.view').forEach(s=>s.classList.toggle('active',s.id==='view-'+v));
+  document.querySelectorAll('.nav-i[data-view]').forEach(n=>n.classList.toggle('active',n.dataset.view===v&&n.querySelector('span').dataset.ko!=='채팅'));syncTitle();}
+document.querySelectorAll('[data-view]').forEach(el=>el.addEventListener('click',()=>showView(el.dataset.view)));
+const projBtn=document.getElementById('projBtn'),projMenu=document.getElementById('projMenu');
+projBtn.addEventListener('click',e=>{e.stopPropagation();projMenu.classList.toggle('open');});
+document.addEventListener('click',e=>{if(!projMenu.contains(e.target))projMenu.classList.remove('open');});
+document.querySelectorAll('.pm-item').forEach(it=>it.addEventListener('click',()=>{document.querySelectorAll('.pm-item').forEach(x=>x.classList.remove('sel'));it.classList.add('sel');document.getElementById('projName').textContent=it.dataset.name;projBtn.querySelector('.pmeta').textContent=it.dataset.meta;projMenu.classList.remove('open');}));
+document.querySelectorAll('.prov').forEach(p=>p.querySelector('.prov-head').addEventListener('click',ev=>{
+  if(ev.target.closest('.btn')){document.querySelectorAll('.prov').forEach(x=>{x.classList.remove('active');x.classList.add('collapsed');const u=x.querySelector('.use-tag');if(u)u.remove();});p.classList.add('active');p.classList.remove('collapsed');return;}
+  p.classList.toggle('collapsed');}));
+const ta=document.getElementById('composer');
+function grow(){ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,window.innerHeight*0.42)+'px';}
+ta.addEventListener('input',grow);grow();
+function send(){const v=ta.value.trim();if(!v)return;const inner=document.getElementById('threadInner');
+  const q=document.createElement('div');q.className='turn-q';q.textContent=v;inner.appendChild(q);
+  const a=document.createElement('div');a.className='turn-a';const ko=document.documentElement.lang==='ko';
+  a.innerHTML='<div class="a-badges"><span class="badge ok">'+(ko?'답변':'Answer')+'</span></div><div class="a-card"><div class="a-text">'+(ko?'(미리보기) 실제 구현에서는 그래프 사실에 근거해 답하고, 호출 그래프·차트·플로우로 시각화합니다.':'(preview) The real build answers from graph facts and visualizes with call graphs, charts and flows.')+'</div></div>';
+  inner.appendChild(a);ta.value='';grow();const t=document.getElementById('thread');t.scrollTop=t.scrollHeight;}
+document.querySelector('.send').addEventListener('click',send);
+ta.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}});
+document.querySelectorAll('.tool').forEach(b=>b.addEventListener('click',()=>b.classList.toggle('on')));
+applyLang('ko');ta.focus();
+</script>
+</body>
+</html>

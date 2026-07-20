@@ -372,6 +372,26 @@ def _score_symbol(
     return score * _path_score_multiplier(path)
 
 
+# The candidate scan stays capped so a huge graph stays bounded, and the cap
+# is spent on the best candidates first: rows are ordered by priority tier
+# (exact name → name prefix → anything else the filter matched) inside the
+# *same* single query, so arbitrary substring rows can no longer crowd out an
+# exact match. Application scoring still ranks the pool.
+#
+# Cost, stated honestly: this is NOT free. The earlier untiered query had no
+# ORDER BY, so the planner could stop as soon as 2,000 rows qualified. The
+# tier key is an unindexed expression over ``data->>'name'``, so the database
+# must now evaluate every row the filter matches and top-N sort them. That is
+# a real regression exactly when a term is very common — which is also
+# exactly when crowding-out was worst, so it buys the guarantee it costs. An
+# expression index on ``lower(data->>'name')`` would remove the trade-off;
+# that needs a migration and is deliberately not done here.
+_SEARCH_CANDIDATE_CAP = 2000
+_TIER_EXACT = 0
+_TIER_PREFIX = 1
+_TIER_OTHER = 2
+
+
 async def search_symbols(
     session: AsyncSession,
     *,
@@ -404,6 +424,9 @@ async def search_symbols(
         # reaches the ``auth`` in ``AuthError`` / ``api-auth.ts`` that a
         # full substring match misses. The ranking below (not SQL) orders.
         conds = []
+        exact_conds = []
+        prefix_conds = []
+        name_lower = sa.func.lower(Node.data["name"].astext)
         for t in terms:
             like = f"%{t}%"
             conds.append(Node.id.ilike(like))
@@ -413,9 +436,25 @@ async def search_symbols(
                 stem = f"%{t[:4]}%"
                 conds.append(Node.id.ilike(stem))
                 conds.append(Node.data["name"].astext.ilike(stem))
-        stmt = stmt.where(or_(*conds))
-    # Cap the candidate scan so a huge graph stays bounded.
-    rows = (await session.execute(stmt.limit(2000))).scalars().all()
+            exact_conds.append(name_lower == t)
+            prefix_conds.append(Node.data["name"].astext.ilike(f"{t}%"))
+        # Priority ordering inside the one filtered scan: an exact name
+        # match is kept before a name-prefix match, which is kept before
+        # anything else the filter matched. ``id`` breaks ties so the
+        # truncated pool is deterministic on every dialect.
+        tier = sa.case(
+            (or_(*exact_conds), _TIER_EXACT),
+            (or_(*prefix_conds), _TIER_PREFIX),
+            else_=_TIER_OTHER,
+        )
+        stmt = stmt.where(or_(*conds)).order_by(tier.asc(), Node.id.asc())
+    else:
+        # No terms — keep the plain bounded scan (kind/component filters
+        # may still apply), deterministic by id.
+        stmt = stmt.order_by(Node.id.asc())
+    rows = (
+        await session.execute(stmt.limit(_SEARCH_CANDIDATE_CAP))
+    ).scalars().all()
 
     scored: list[tuple[float, Node]] = []
     for r in rows:

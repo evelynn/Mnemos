@@ -256,7 +256,7 @@ def main() -> None:
         ),
     )
     serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", default="8080")
+    serve.add_argument("--port", default="16401")
     serve.add_argument("--db", default="./mnemos-local.db")
     serve.add_argument("--seed-demo", action="store_true")
     serve.add_argument("--reset", action="store_true")

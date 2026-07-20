@@ -6,9 +6,17 @@ report on the DiffSubmission row and gates approval on its ``verdict``.
 """
 
 from app.safety.review.pipeline import (
+    DIFF_INPUT_MAX_CHARS,
+    DiffInputTooLarge,
     Finding,
     ReviewReport,
     run_pipeline,
 )
 
-__all__ = ["Finding", "ReviewReport", "run_pipeline"]
+__all__ = [
+    "DIFF_INPUT_MAX_CHARS",
+    "DiffInputTooLarge",
+    "Finding",
+    "ReviewReport",
+    "run_pipeline",
+]

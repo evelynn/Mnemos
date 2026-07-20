@@ -100,8 +100,12 @@ usage, immutable price, and durable-attempt contract.
   stages close the run as `completed` or explicitly `partial`; they do not roll the head back.
   Current HTTP/MCP/source readers pin and revalidate both source and durable-overlay generations.
   This contract has SQLite/unit/mock evidence plus a PostgreSQL 17.10 migration/ledger suite and a
-  50 K-file/50 K-node component soak. Hard process-kill fault injection and a representative
-  end-to-end repository workload are still required before a production-atomicity claim.
+  50 K-file/50 K-node component soak. Hard process-kill fault injection now covers the SQLite WAL
+  path (a real subprocess dies via `os._exit` after staging, after seal, inside the open promotion
+  transaction after the head CAS was issued, and right after publication commit; recovery and retry
+  promotion are asserted — `tests/test_publication_hard_kill.py`). A PostgreSQL process-kill run and
+  a representative end-to-end repository workload are still required before a production-atomicity
+  claim.
 - `created_by` materializes the canonical union of identical current producer contributions, but
   there is not yet a durable per-producer contribution history. Deletion authority therefore stays
   conservative and is granted only to producers whose complete coverage was sealed for the run.
@@ -120,8 +124,13 @@ usage, immutable price, and durable-attempt contract.
 - The default Compose worker bundles the in-repo Python/TS/JS/C/C++/Java/Kotlin/Web/tree-sitter
   path. C#, live-DB, and .NET-binary analyzers exist in the repository but are not wired into that
   worker image; their standalone profile images are contract-test artifacts, not an execution path.
-- Rapid webhook pushes are not coalesced before enqueue. Execution-time supersession and the
-  per-project mutation lock limit damage, but a burst can still create avoidable queue work.
+- Rapid webhook pushes are coalesced at enqueue: once a newer push has a committed run row and a
+  live job, older still-`queued` webhook runs for that project are superseded, so the worker
+  short-circuits at its eligibility check instead of running an analysis. Runs already `running`,
+  and manual runs, are never touched. The queued ARQ job is **not** aborted — the worker still
+  dequeues it, opens a session, reads the row and publishes a terminal event per superseded push;
+  only the analysis is skipped. Two pushes whose transactions interleave can still both stay
+  queued, and a burst arriving while a run executes still queues one follow-up by design.
 - Project-lock contention preserves the queued run and retries it, but a hard-crashed owner cannot
   be safely pre-empted without a fencing token/DB advisory lock. The fail-safe Redis lease can delay
   the next run for up to its nine-hour TTL rather than risking two current-graph writers.
@@ -157,15 +166,23 @@ usage, immutable price, and durable-attempt contract.
   transport is production-fail-disabled by the missing immutable route/price contract. If a
   price-attested transport is added, its step/flag prose still lacks graph node/edge or line-range
   grounding and must remain a hypothesis-bearing explanation, never a verified graph fact.
-- L2/L3 narration currently materializes all current lower-level summaries/nodes before applying
-  its target limit. Calls and prompt size remain bounded, but pre-call DB/RAM work is O(project);
-  a deterministic bounded SQL selection is Phase-2 work.
-- Lexical symbol search uses an unanchored `ILIKE` candidate scan capped at 2,000 rows before
-  application scoring. On a very large graph this can miss the globally best result; cloud vector
-  search stays disabled, so do not claim CBM-like local semantic-search coverage or latency.
-- Gate-B Second Opinion selects bounded diff-line evidence, but `DiffSubmit.diff` has no explicit
-  size limit and the deterministic review passes process the full submitted string. A request/body
-  and deterministic-pass input ceiling is still Phase-2 hardening.
+- L2/L3 narration selection is pushed into SQL and bounded by its target limit (L2: file
+  DISTINCT+LIMIT on `data.location.file`; L3: full-row loads restricted to the selected modules).
+  The remaining pre-call scan is L3's narrow key scan of one `target_id` string per current L2
+  summary — O(#summarized files), no longer O(#symbols) full-object materialization.
+- Lexical symbol search keeps its 2,000-row candidate cap and its single filtered scan, but orders
+  that scan by priority tier (exact name → name prefix → anything else matched, `id` breaking ties),
+  so exact/prefix matches can no longer be crowded out of the cap. This costs more than the old
+  unordered scan, not less: without an ORDER BY the planner could stop at 2,000 qualifying rows,
+  whereas the tier key is an unindexed expression over `data->>'name'`, so every matching row is
+  now evaluated and top-N sorted. The gap is worst for very common terms. An expression index on
+  `lower(data->>'name')` would remove it and has not been added. A very large graph can still miss
+  a globally best substring/stem-only match beyond the cap, and cloud vector search stays disabled
+  — do not claim CBM-like local semantic-search coverage or latency.
+- Gate-B submissions are bounded at ingress: `DiffSubmit.diff` rejects past
+  `DIFF_INPUT_MAX_CHARS` (1 M chars, 422) and `run_pipeline` fail-closes its non-HTTP callers
+  (break-glass rerun, MCP dev tools) with `DiffInputTooLarge` before any deterministic pass scans
+  the string. Second Opinion additionally selects bounded diff-line evidence on its own.
 - AI extraction for uncovered languages is `certainty="inferred"` only and lower trust than
   deterministic analyzers. Its current Agent SDK transport is fail-disabled by the immutable
   price/route requirement; explicit opt-in alone does not enable network dispatch. Go/Rust/Ruby

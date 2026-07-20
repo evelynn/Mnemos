@@ -28,6 +28,21 @@ from app.safety.review.types import Finding, Verdict, compute_verdict
 
 Coverage = Literal["complete", "incomplete"]
 
+# Ingress ceiling for a submitted diff. HTTP submission enforces the same
+# limit on the request model (422 before any work); this guard fail-closes
+# the remaining callers (break-glass rerun, MCP dev tools) so the
+# deterministic passes never scan an unbounded string.
+DIFF_INPUT_MAX_CHARS = 1_000_000
+
+
+class DiffInputTooLarge(ValueError):
+    def __init__(self, length: int) -> None:
+        super().__init__(
+            f"diff of {length} chars exceeds the {DIFF_INPUT_MAX_CHARS}-char "
+            "review input ceiling"
+        )
+        self.length = length
+
 
 @dataclass
 class PassResult:
@@ -94,6 +109,8 @@ async def run_pipeline(
     progress_cb: Callable[[PassResult], Awaitable[None]] | None = None,
     review_revision: CanonicalReviewRevision | None = None,
 ) -> ReviewReport:
+    if len(diff) > DIFF_INPUT_MAX_CHARS:
+        raise DiffInputTooLarge(len(diff))
     pass_results: list[PassResult] = []
     deterministic_findings: list[Finding] = []
 

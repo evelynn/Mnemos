@@ -2023,7 +2023,7 @@ Claude Code 에게 직접 넘길 수 있는 수준의 티켓:
 ### TKT-001: 저장소 및 Docker Compose 초기 설정
 - **목표**: 로컬에서 `docker compose up` 으로 postgres + redis + platform 컨테이너가 모두 뜨고 헬스체크 통과
 - **산출물**: 루트 `docker-compose.yml`, `server/Dockerfile`, `.env.example`, README 기본
-- **DoD**: `curl http://localhost:8080/api/v1/health` → 200 OK
+- **DoD**: `curl http://localhost:16401/api/v1/health` → 200 OK
 
 ### TKT-002: Alembic 초기화 + 섹션 12.1 테이블
 - **목표**: `users`, `api_keys`, `platform_settings`, `secrets` 테이블 생성

@@ -1,7 +1,7 @@
 // k6 baseline load scenario.
 //
 // Run against a test-only stack (never production):
-//   BASE_URL=http://localhost:8080 \
+//   BASE_URL=http://localhost:16401 \
 //   MNEMOS_SESSION=<cookie value from /api/v1/auth/login> \
 //   k6 run scripts/loadtest/baseline.js
 //
@@ -17,7 +17,7 @@ import { check, sleep } from "k6";
 import { Trend, Counter } from "k6/metrics";
 import { loginOnce, authCookie } from "./login.js";
 
-const BASE = __ENV.BASE_URL || "http://localhost:8080";
+const BASE = __ENV.BASE_URL || "http://localhost:16401";
 // Legacy fallback: a raw session cookie can still be supplied via
 // MNEMOS_SESSION. Newer runs should set MNEMOS_USERNAME/MNEMOS_PASSWORD
 // so setup() handles the login flow itself.

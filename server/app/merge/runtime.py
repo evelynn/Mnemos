@@ -165,6 +165,47 @@ def _operation_matches(candidate: Any, observed: str) -> bool:
     return False
 
 
+def _match_keys(value: Any) -> list[tuple[str, str]]:
+    """Canonical lookup keys for one operation string.
+
+    Mirrors :func:`_operation_matches` exactly — a raw-equality key plus a
+    path-normalised key when the value is a path — so indexing both sides
+    with these keys selects the same candidates the pairwise comparison
+    did, without a per-observation scan.
+    """
+    if value is None:
+        return []
+    text = str(value)
+    if not text:
+        return []
+    keys = [("raw", text)]
+    if text.startswith("/"):
+        from app.merge.contract_id import normalize_http_path
+
+        keys.append(("norm", normalize_http_path(text)))
+    return keys
+
+
+def _build_edge_match_index(edges: list[Edge]) -> dict[tuple[str, str], int]:
+    """Map every match key of every edge to that edge's position.
+
+    Positions are kept minimal so a lookup resolves to the *first*
+    matching edge in the supplied order — the same edge the old
+    break-on-first-hit scan returned.
+    """
+    index: dict[tuple[str, str], int] = {}
+    for pos, edge in enumerate(edges):
+        edge_data = edge.data or {}
+        candidates = [edge_data.get(k) for k in ("operation", "path", "route")]
+        # …plus the path carried by the target contract node id, which is
+        # where analyzers usually key the route.
+        candidates.append(_operation_from_node_id(edge.target_id))
+        for candidate in candidates:
+            for key in _match_keys(candidate):
+                index.setdefault(key, pos)
+    return index
+
+
 def assemble_trace_tree(
     resource_spans: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -265,8 +306,9 @@ async def reconcile_observations(
     documented kind, advance a durable logical-edge overlay.  A graph-head
     lock linearizes the whole reconciliation with source promotion, while an
     observation cursor makes cumulative ``seen_count`` replay idempotent.
-    Candidate route comparisons always go through ``_operation_matches(...)``
-    so templated and literal HTTP paths use the same normalization contract.
+    Candidate route comparisons go through ``_match_keys(...)``, which mirrors
+    ``_operation_matches(...)`` exactly, so templated and literal HTTP paths
+    still use the same normalization contract.
 
     Returns ``{"matched": N, "unmatched": M, "new_hits": D}``, where
     ``new_hits`` excludes counts already consumed by a prior replay.
@@ -299,43 +341,53 @@ async def reconcile_observations(
     unmatched = 0
     new_hits = 0
     overlay_changed = False
+    # Current edges are loaded and indexed once per observed edge kind and
+    # reused, replacing the old per-observation full-edge scan
+    # (O(observations x edges)) with O(edges) index work plus one dict
+    # lookup per observation.  Observations are still visited in their
+    # original order, and the index resolves to the same first matching
+    # edge.  Trade-off to keep in mind: resident memory is now the current
+    # edges of every *observed* kind at once, where the old loop held one
+    # kind at a time (but re-fetched it per observation).  Observed kinds
+    # are few in practice; a per-kind streaming pass is the next step if a
+    # project ever makes that untrue.  Matching still means: the operation
+    # stored on the edge's own
+    # data (``operation``/``path``/``route``), or the path carried by the
+    # target contract node id (the common case — analyzers key the route
+    # on the contract node, not on edge.data).  Both sides go through the
+    # same path-template normalisation, so a runtime ``/api/orders/{id}``
+    # still matches a stored ``/api/orders/42``.
+    index_by_kind: dict[str, tuple[list[Edge], dict[tuple[str, str], int]]] = {}
     for obs in obs_rows:
-        edge_q = (
-            select(Edge)
-            .where(
-                Edge.project_id == project_id,
-                Edge.kind == obs.kind,
-                Edge.valid_to.is_(None),
-            )
-        )
-        candidates = (await db.execute(edge_q)).scalars().all()
-        hit = None
         obs_op = obs.operation
-        for edge in candidates:
-            edge_data = edge.data or {}
-            # Heuristic match: edge.data may carry ``operation`` /
-            # ``path`` / ``route`` set by the static analyzers. An
-            # OTel ``http.route`` is the *templated* path, but a
-            # static analyzer may have stored a literal one (or vice
-            # versa), so compare both raw and after the same
-            # path-template normalisation contract ids use —
-            # otherwise a runtime ``/api/orders/{id}`` never matches a
-            # stored ``/api/orders/42``.
-            # Match against the operation stored on the edge's own data…
-            if any(
-                _operation_matches(edge_data.get(k), obs_op)
-                for k in ("operation", "path", "route")
-            ):
-                hit = edge
-                break
-            # …or against the path carried by the target *contract node*
-            # (the common case — analyzers key the route on the contract
-            # node id, e.g. ``contract:POST /orders``, not on edge.data,
-            # so without this the standard EXPOSES/CALLS edge never
-            # reconciles and the observation is stuck unmatched).
-            if _operation_matches(_operation_from_node_id(edge.target_id), obs_op):
-                hit = edge
-                break
+        if not obs_op:
+            # An empty observed operation never matched any candidate.
+            unmatched += 1
+            continue
+        cached = index_by_kind.get(obs.kind)
+        if cached is None:
+            # Explicit order makes the chosen edge deterministic; current
+            # rows are unique per (source, target, kind).
+            candidates = list(
+                (
+                    await db.execute(
+                        select(Edge)
+                        .where(
+                            Edge.project_id == project_id,
+                            Edge.kind == obs.kind,
+                            Edge.valid_to.is_(None),
+                        )
+                        .order_by(Edge.source_id.asc(), Edge.target_id.asc())
+                    )
+                ).scalars().all()
+            )
+            cached = (candidates, _build_edge_match_index(candidates))
+            index_by_kind[obs.kind] = cached
+        edges, match_index = cached
+        positions = [
+            match_index[key] for key in _match_keys(obs_op) if key in match_index
+        ]
+        hit = edges[min(positions)] if positions else None
         if hit is None:
             unmatched += 1
             continue

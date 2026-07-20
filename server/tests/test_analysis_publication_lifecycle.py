@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
+os.environ.setdefault("REDIS_URL", "redis://localhost:16405/15")
 os.environ.setdefault("SECRET_KEY", "analysis-publication-lifecycle-test-key")
 os.environ.setdefault("MNEMOS_SKIP_STARTUP_VERIFY", "1")
 
@@ -101,10 +101,12 @@ async def _seed_published(
     *,
     receipt_generation: int = 1,
     head_generation: int = 1,
+    published_at: datetime | None = None,
 ) -> tuple[uuid.UUID, uuid.UUID, datetime]:
     project_id = uuid.uuid4()
     run_id = uuid.uuid4()
-    published_at = datetime(2026, 7, 15, 5, 0, tzinfo=timezone.utc)
+    if published_at is None:
+        published_at = datetime(2026, 7, 15, 5, 0, tzinfo=timezone.utc)
     async with session_factory() as session:
         session.add(
             Project(
@@ -788,12 +790,14 @@ async def test_stale_recovery_partializes_orphan_published_without_moving_head(
     database,
 ):
     _, session_factory = database
-    project_id, run_id, _ = await _seed_published(session_factory)
-    async with session_factory() as session:
-        run = await session.get(AnalysisRun, run_id)
-        assert run is not None
-        run.started_at = datetime.now(tz=timezone.utc) - timedelta(days=2)
-        await session.commit()
+    # Backdate the WHOLE publication (started == sealed == published), not
+    # just started_at: a fixed seed date with a relative started_at rewrite
+    # tripped the "coverage seal precedes the run start" receipt invariant
+    # once the calendar passed the seed date (time-bomb fixture).
+    project_id, run_id, _ = await _seed_published(
+        session_factory,
+        published_at=datetime.now(tz=timezone.utc) - timedelta(days=2),
+    )
 
     from app.orchestrator.cron_jobs import _partialize_stale_published_runs
 

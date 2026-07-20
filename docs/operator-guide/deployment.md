@@ -13,7 +13,7 @@ qualification.
 - Disk for Postgres, source mirrors, detached worktrees, and backups; size from
   the actual repository and graph rather than a fixed unverified allowance.
 - A TLS-terminating reverse proxy (nginx / caddy / traefik) — required
-  because the platform serves plain HTTP on port 8080
+  because the platform is published as plain HTTP on host port 16401
 - Outbound access to required Git/package registries during build, unless all
   dependencies and source mirrors are pre-staged
 
@@ -36,7 +36,7 @@ SECRET_KEY=<openssl rand -hex 32>
 POSTGRES_USER=mnemos
 POSTGRES_PASSWORD=<strong password — do not leave default>
 POSTGRES_DB=mnemos
-PLATFORM_PORT=8080
+PLATFORM_PORT=16401
 LOG_LEVEL=INFO
 # Absolute host repository for a manual run; mounted read-only as /work
 MNEMOS_SOURCE_ROOT=/absolute/path/to/source-repo
@@ -58,8 +58,8 @@ Wait for `docker compose ps` to show all four services healthy.
 Smoke-test:
 
 ```bash
-curl -fsS http://localhost:8080/api/v1/health          # liveness
-curl -fsS http://localhost:8080/api/v1/health/ready    # deep check (DB, Redis, worker)
+curl -fsS http://localhost:16401/api/v1/health          # liveness
+curl -fsS http://localhost:16401/api/v1/health/ready    # deep check (DB, Redis, worker)
 ```
 
 `/health/ready` returns 503 until the worker has written its first
@@ -103,7 +103,7 @@ server {
     proxy_read_timeout   120s;
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:16401;
     }
 }
 ```
@@ -113,7 +113,7 @@ Caddy equivalent:
 ```caddy
 mnemos.example.com {
     encode zstd gzip
-    reverse_proxy 127.0.0.1:8080 {
+    reverse_proxy 127.0.0.1:16401 {
         header_up X-Request-Id {http.request.uuid}
     }
 }
@@ -184,7 +184,7 @@ with the supplied old key — **do not** flip `.env` until you investigate
     --profile monitoring up -d
   ```
 
-  Grafana at `http://<host>:3000` (admin/admin by default — change via
+  Grafana at `http://<host>:16402` (admin/admin by default — change via
   `GRAFANA_ADMIN_PASSWORD`), dashboard *Mnemos Overview* pre-provisioned.
 - Baseline metrics to alert on:
 
