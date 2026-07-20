@@ -35,7 +35,7 @@ python -m app.serve_local --seed-demo
 #   ============================================================
 #     Login: demo-admin / Demo-xxxxxxxxxxxx1234
 #   ============================================================
-#   → http://127.0.0.1:8080
+#   → http://127.0.0.1:16401
 ```
 
 옵션: `--port 9000`, `--db /path/to.db`, `--reset` (깨끗한 슬레이트).
@@ -70,7 +70,7 @@ docker compose exec platform python -m app.cli seed-demo
 용량, 분석기 정확도, 처리량, 또는 운영 준비도를 나타내지 않으며 fixture 변경에
 따라 달라질 수 있습니다.
 
-그 다음 `http://localhost:8080` 접속 → 위 자격증명으로 로그인.
+그 다음 `http://localhost:16401` 접속 → 위 자격증명으로 로그인.
 
 대시보드 첫 화면에 보일 것:
 - **Triage now** 카드에 P1 findings 1개 (`duplicate_endpoint`)

@@ -337,7 +337,7 @@ def _client(app):
 def test_speak_route_registered():
     from app.main import app
 
-    paths = {getattr(r, "path", "") for r in app.routes}
+    paths = set(app.openapi()["paths"])
     assert "/api/v1/voice/speak" in paths
 
 

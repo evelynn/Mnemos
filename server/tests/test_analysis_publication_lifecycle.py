@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/15")
+os.environ.setdefault("REDIS_URL", "redis://localhost:16405/15")
 os.environ.setdefault("SECRET_KEY", "analysis-publication-lifecycle-test-key")
 os.environ.setdefault("MNEMOS_SKIP_STARTUP_VERIFY", "1")
 

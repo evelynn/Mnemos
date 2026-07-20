@@ -431,8 +431,9 @@ belong to the deployment, not the code:
 1. **Optional analyzer binaries** — languages outside the standard bundled
    set require a contract-compatible command on the worker `PATH`; see §10b
    of the operator guide.
-2. **TLS termination** — the uvicorn server listens plain HTTP on 8080;
-   nginx/caddy/traefik must front it.
+2. **TLS termination** — Compose keeps uvicorn on container port 8080 and
+   publishes it as plain HTTP on host port 16401; nginx/caddy/traefik must
+   front the host port.
 3. **Vault token renewal** — when `KMS_BACKEND=vault`, a sidecar must
    refresh `VAULT_TOKEN` before it expires; the backend only reads the
    DEK at process start.

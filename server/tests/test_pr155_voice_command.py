@@ -243,7 +243,7 @@ def test_coerce_project_id():
 def test_voice_routes_registered():
     from app.main import app
 
-    paths = {getattr(r, "path", "") for r in app.routes}
+    paths = set(app.openapi()["paths"])
     assert "/api/v1/voice/transcribe" in paths
     assert "/api/v1/voice/status" in paths
 

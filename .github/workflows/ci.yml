@@ -28,7 +28,7 @@ jobs:
           POSTGRES_USER: mnemos
           POSTGRES_PASSWORD: mnemos
           POSTGRES_DB: mnemos
-        ports: ["5432:5432"]
+        ports: ["16404:5432"]
         options: >-
           --health-cmd "pg_isready -U mnemos -d mnemos"
           --health-interval 5s
@@ -36,15 +36,15 @@ jobs:
           --health-retries 15
       redis:
         image: redis:7-alpine
-        ports: ["6379:6379"]
+        ports: ["16405:6379"]
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 15
     env:
-      DATABASE_URL: postgresql+asyncpg://mnemos:mnemos@localhost:5432/mnemos
-      REDIS_URL: redis://localhost:6379/0
+      DATABASE_URL: postgresql+asyncpg://mnemos:mnemos@localhost:16404/mnemos
+      REDIS_URL: redis://localhost:16405/0
       FERNET_KEY: 4oEY9MJGAjGCbrScyvvi4CZgm8KxFuQuklXSQwUYpys=
       SECRET_KEY: ci-test-secret
     steps:

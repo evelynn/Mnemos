@@ -167,6 +167,23 @@ product into a generic workflow platform.
   rotation CLI, `pg_dump` backup / restore scripts, pluggable KMS (local
   env or self-hosted HashiCorp Vault), startup self-verification.
 
+## 워크스페이스 연계
+
+워크스페이스 포트의 정본은 로컬 워크스페이스 루트 `workspace.ports.json`이다.
+Mnemos는 소스·런타임 증거를 색인하고 MCP/HTTP로 코드 지식을 제공하는 **독립 서비스**이며,
+다른 제품의 DB나 권한 저장소를 공유하지 않는다.
+
+| 연결 | 호출·데이터 방향 | 현재 경계 |
+|---|---|---|
+| [Mochi-cat V2](https://github.com/evelynn/Mochi-cat-V2) → Mnemos | Mochi의 주 경로는 프로젝트 범위 MCP 도구이고 HTTP `/api/v1/projects/{id}/ask`는 fallback이다. 독립 플랫폼은 `16401`, Mochi가 선택적으로 기동하는 로컬 sidecar는 `16451`을 쓴다. | `MOCHI_SIDECARS=1`, 유효한 project UUID와 token이 있을 때만 활성화된다. Mnemos 불가 시 Mochi의 코드지식 기능만 닫히며 다른 기능은 계속 동작한다. |
+| 분석 대상 저장소 → Mnemos | Compose 분석 입력은 `/work:ro`로 마운트되고, 색인·감사·승인된 plan/diff 작업은 Mnemos 소유 DB와 격리 worktree에 기록된다. | 원본 working tree에 대한 암묵적 쓰기 권한이나 다른 서비스의 인증 권한을 만들지 않는다. |
+| [Smart AI Report](https://github.com/evelynn/Smart-AI-Report-V4) · [Appsmiths](https://github.com/evelynn/Appsmiths) · [Bridge-X V2](https://github.com/evelynn/Bridge-X-V2) · [GitLab MCP Platform](https://github.com/evelynn/gitlab-mcp-platform) · [Hansol MCP Framework](https://gitlab.hansol.net/140420/htech-mes-mcp) | 현재 Mnemos 코드에는 이 서비스들을 직접 호출하는 런타임 어댑터가 없다. 필요하면 각 저장소를 분석 대상으로 등록할 수 있을 뿐이다. | 서비스 장애·자격증명·영속 데이터가 Mnemos를 통해 전이되지 않는다. |
+
+할당 포트는 Mnemos `16401`(platform), `16402`(Grafana), `16403`(Prometheus),
+`16404`(Postgres), `16405`(Redis), `16406`(OTLP HTTP), `16451`(Mochi sidecar)이며,
+인접 서비스는 Bridge-X `16321`, Appsmiths `16501/16502`, GitLab MCP Platform
+`16600`(예약), Mochi `16701/16702`, Smart AI Report `16901`이다.
+
 ## Quick start (docker-free local mode)
 
 The fastest way to try the platform — a single Python 3.12+ process with
@@ -176,7 +193,7 @@ available in-repo analyzers):
 ```bash
 cd server
 pip install -e ".[local]"               # adds aiosqlite + fakeredis
-python -m app.serve_local --seed-demo   # boots on :8080 with a demo dataset
+python -m app.serve_local --seed-demo   # boots on :16401 with a demo dataset
 ```
 
 ## Quick start (Docker Compose)
@@ -208,11 +225,11 @@ docker compose exec platform alembic upgrade head
 # create the first admin
 docker compose exec platform python -m app.cli create-user --username admin --role admin
 
-curl -sf http://localhost:8080/api/v1/health        # liveness
-curl -sf http://localhost:8080/api/v1/health/ready  # deep check
+curl -sf http://localhost:16401/api/v1/health        # liveness
+curl -sf http://localhost:16401/api/v1/health/ready  # deep check
 ```
 
-Visit `http://localhost:8080/login`. For TLS, reverse-proxy configuration,
+Visit `http://localhost:16401/login`. For TLS, reverse-proxy configuration,
 backups, and upgrades, see
 [`docs/operator-guide/deployment.md`](docs/operator-guide/deployment.md);
 for a guided first session, see
@@ -230,7 +247,8 @@ docker compose -f docker-compose.yml -f docker-compose.monitoring.yml \
   --profile monitoring up -d
 ```
 
-Grafana lands at `:3000` with the **Mnemos Overview** dashboard pre-provisioned.
+Grafana lands at `:16402` with the **Mnemos Overview** dashboard
+pre-provisioned; Prometheus is published at `:16403`.
 
 ## Repository layout
 

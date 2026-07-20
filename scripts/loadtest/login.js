@@ -14,7 +14,7 @@
 
 import http from "k6/http";
 
-const BASE = __ENV.BASE_URL || "http://localhost:8080";
+const BASE = __ENV.BASE_URL || "http://localhost:16401";
 const USERNAME = __ENV.MNEMOS_USERNAME || "admin";
 const PASSWORD = __ENV.MNEMOS_PASSWORD || "";
 const COOKIE_NAME = __ENV.MNEMOS_COOKIE_NAME || "mnemos_session";
