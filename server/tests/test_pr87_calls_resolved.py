@@ -95,6 +95,52 @@ def test_external_call_falls_back_to_extern(tmp_path):
     assert all(e["certainty"] == "inferred" for e in extern)
 
 
+def test_non_emitted_variable_is_not_claimed_as_resolved_callee(tmp_path):
+    """TypeChecker declarations are broader than the symbol inventory.
+
+    A value returned from a factory is a VariableDeclaration, but cmdSymbols
+    emits variables only when their initializer is a function/class literal.
+    CALLS must not claim a join to a node that was never emitted.
+    """
+    node = _node()
+    if node is None:
+        pytest.skip("node + typescript unavailable")
+    (tmp_path / "main.ts").write_text(
+        textwrap.dedent(
+            """
+            declare function makeCallable(): () => number;
+            const callable = makeCallable();
+            export function f() { return callable(); }
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    edges = _calls(node, tmp_path)
+    callable = next(e for e in edges if e["target_id"].endswith("callable"))
+    assert callable["target_id"] == "ts:extern:callable"
+    assert callable["metadata"]["callee_resolved"] is False
+    assert callable["certainty"] == "inferred"
+
+
+def test_oversized_inline_expression_is_not_an_external_symbol_id(tmp_path):
+    """Minified bundles can put a whole function body in callee text.
+
+    Such text is not a useful symbol identity and must not make analyzer
+    output violate the graph's 4,096-character identifier contract.
+    """
+    node = _node()
+    if node is None:
+        pytest.skip("node + typescript unavailable")
+    body = "x" * 5000
+    (tmp_path / "bundle.js").write_text(
+        f'export function f() {{ return (function() {{ return "{body}"; }})(); }}\n',
+        encoding="utf-8",
+    )
+    edges = _calls(node, tmp_path)
+    assert all(len(edge["target_id"]) <= 4096 for edge in edges)
+    assert not any(body in edge["target_id"] for edge in edges)
+
+
 # ---------------------------------------------------------------------------
 # Source — TypeChecker + alias follow + Bundler resolution wired in
 # ---------------------------------------------------------------------------

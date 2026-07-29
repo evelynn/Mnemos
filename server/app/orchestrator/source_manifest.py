@@ -29,7 +29,7 @@ from app.analyzers.registry import SOURCE_ANALYZER_LANGUAGES, binary_for
 from app.analyzers.runner import inrepo_script
 
 
-INDEX_CONTRACT_VERSION = "mnemos.source-index.v4"
+INDEX_CONTRACT_VERSION = "mnemos.source-index.v5"
 _GIT_OBJECT_ID = re.compile(r"^[0-9a-fA-F]{40,64}$")
 _GIT_TIMEOUT_SEC = 60.0
 _MAX_TSCONFIG_BYTES = 1024 * 1024
@@ -45,8 +45,12 @@ _MAX_TSCONFIG_PROBES = 512
 # suffixes would make incremental refresh unsafe and must be visible in review.
 LANGUAGE_EXTENSIONS: dict[str, frozenset[str]] = {
     "csharp": frozenset({".cs", ".csproj", ".sln", ".props", ".targets"}),
-    "typescript": frozenset({".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}),
-    "javascript": frozenset({".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}),
+    "typescript": frozenset(
+        {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue"}
+    ),
+    "javascript": frozenset(
+        {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue"}
+    ),
     "python": frozenset({".py"}),
     "cpp": frozenset({".c", ".cc", ".cpp", ".cxx", ".c++", ".h", ".hh", ".hpp", ".hxx"}),
     "java": frozenset({".java"}),
@@ -119,7 +123,11 @@ _EXTRA_FILENAMES: dict[str, frozenset[str]] = {
         "packages.lock.json",
     }),
 }
-_TS_GENERATED_FILE = re.compile(r"\.(?:min|bundle)\.[cm]?[jt]sx?$", re.IGNORECASE)
+_TS_GENERATED_FILE = re.compile(
+    r"(?:\.(?:min|bundle|iife|umd)|^(?:bundle|iife|umd))"
+    r"\.(?:[cm]?js)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -241,6 +249,18 @@ def _path_allowed(analyzer: str, relative_parts: tuple[str, ...]) -> bool:
         else _EXCLUDED_BY_ANALYZER.get(analyzer, frozenset())
     )
     if any(part in excluded for part in directories):
+        return False
+    if (
+        analyzer == "ggoss-web"
+        and len(relative_parts) >= 3
+        and tuple(part.lower() for part in relative_parts[:2])
+        == ("docs", "mockup")
+    ):
+        return False
+    if (
+        analyzer == "ggoss-ts"
+        and relative_parts[-1].startswith(".")
+    ):
         return False
     if analyzer == "ggoss-ts" and _TS_GENERATED_FILE.search(relative_parts[-1]):
         return False

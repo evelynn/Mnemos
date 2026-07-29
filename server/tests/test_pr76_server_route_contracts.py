@@ -134,6 +134,33 @@ def test_client_fetch_still_calls_not_exposes(tmp_path):
     assert all(e["kind"] == "CALLS" for e in edges)
 
 
+def test_http_client_method_is_calls_and_not_exposes(tmp_path):
+    node = _node()
+    if node is None:
+        pytest.skip("node + typescript unavailable")
+    (tmp_path / "ClientPanel.vue").write_text(
+        textwrap.dedent(
+            """
+            <script setup lang="ts">
+            const load = () => ctx.httpClient.post("/api/orders", {})
+            const saveModel = () => model.post("/not-http")
+            </script>
+            """
+        ),
+        encoding="utf-8",
+    )
+    contracts, edges = _contracts(node, tmp_path)
+    assert contracts["http.POST./api/orders"] == "ts_http_client_literal"
+    order_edges = [
+        edge
+        for edge in edges
+        if edge["target_id"] == "http.POST./api/orders"
+    ]
+    assert order_edges
+    assert all(edge["kind"] == "CALLS" for edge in order_edges)
+    assert "http.POST./not-http" not in contracts
+
+
 def test_schema_declares_exposes_edge():
     body = _ANALYZER.read_text(encoding="utf-8")
     idx = body.find("function cmdSchema(")

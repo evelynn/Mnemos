@@ -30,6 +30,7 @@ import functools
 import hashlib
 import logging
 import os
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -511,7 +512,7 @@ AGENT_LANGUAGE_EXTENSIONS: dict[str, tuple[str, ...]] = {
     # analyzer binary isn't installed (docker-free, PR-144).
     "python": (".py",),
     "csharp": (".cs",),
-    "typescript": (".ts", ".tsx"),
+    "typescript": (".ts", ".tsx", ".vue"),
     "javascript": (".js", ".jsx", ".mjs", ".cjs"),
     "go": (".go",),
     "rust": (".rs",),
@@ -643,6 +644,11 @@ _SKIP_DIRS = {
     "third_party", "thirdparty", "external", "vendor", "deps",
     "__pycache__", ".vs", ".vscode", "cmake-build-debug",
 }
+_GENERATED_JS_FILE = re.compile(
+    r"(?:\.(?:min|bundle|iife|umd)|^(?:bundle|iife|umd))"
+    r"\.(?:[cm]?js)$",
+    re.IGNORECASE,
+)
 
 
 def _is_link_or_junction(path: Path) -> bool:
@@ -673,6 +679,8 @@ def _iter_safe_source_files(root: Path):
             and not _is_link_or_junction(parent / name)
         )
         for name in sorted(filenames):
+            if _GENERATED_JS_FILE.search(name):
+                continue
             path = parent / name
             if _is_link_or_junction(path):
                 continue

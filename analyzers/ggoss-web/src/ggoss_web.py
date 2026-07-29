@@ -90,9 +90,14 @@ def _iter_files(root: Path, exts: set[str]) -> Iterator[Path]:
             yield root
         return
     for dirpath, dirnames, filenames in os.walk(root):
+        relative_dir = Path(dirpath).relative_to(root)
         dirnames[:] = sorted(
             d for d in dirnames
             if d not in _SKIP_DIRS and not d.startswith(".")
+            and not (
+                tuple(part.lower() for part in relative_dir.parts) == ("docs",)
+                and d.lower() == "mockup"
+            )
             and not _is_link_or_junction(Path(dirpath) / d)
         )
         for name in sorted(filenames):

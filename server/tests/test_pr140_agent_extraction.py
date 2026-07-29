@@ -63,6 +63,44 @@ def test_discover_source_files_finds_cpp_respects_limit_and_skipdirs(tmp_path):
     assert discover_source_files(str(tmp_path), "haskell", limit=10) == []
 
 
+def test_agent_discovery_and_deepen_exclude_generated_js_and_include_vue(
+    tmp_path,
+):
+    from app.extractor.agent_extract import (
+        discover_source_files,
+        find_candidate_files,
+    )
+
+    component = tmp_path / "OrderPanel.vue"
+    app = tmp_path / "public" / "static" / "app.js"
+    generated = [
+        tmp_path / "atlas.iife.js",
+        tmp_path / "vendor.bundle.mjs",
+        tmp_path / "vendor.umd.cjs",
+    ]
+    component.write_text(
+        "<script setup>const orderSearch = true</script>\n",
+        encoding="utf-8",
+    )
+    app.parent.mkdir(parents=True)
+    app.write_text("const orderSearch = true\n", encoding="utf-8")
+    for path in generated:
+        path.write_text("const orderSearch = true\n", encoding="utf-8")
+
+    assert discover_source_files(
+        str(tmp_path), "typescript", limit=10
+    ) == [component]
+    assert discover_source_files(
+        str(tmp_path), "javascript", limit=10
+    ) == [app]
+
+    ranked = find_candidate_files(
+        str(tmp_path), ["ordersearch"], limit=10
+    )
+    assert {path for path, _language in ranked} == {component, app}
+    assert dict(ranked)[component] == "typescript"
+
+
 def test_to_envelopes_shape_certainty_and_dangling_edge_drop():
     from app.extractor.agent_extract import to_envelopes
 
