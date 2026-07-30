@@ -59,6 +59,7 @@ def test_runtime_image_pins_a_node20_capable_distribution_and_asserts_it():
     assert "process.versions.node" in dockerfile
     assert "major < 20" in dockerfile
     assert "COPY docs/ /docs/" in dockerfile
+    assert "python -m pip uninstall --yes pip" in dockerfile
     assert "docs" not in dockerignore
 
 

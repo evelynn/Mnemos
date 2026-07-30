@@ -20,7 +20,8 @@ WORKDIR /app
 COPY server/ /app
 COPY docs/ /docs/
 RUN pip install --upgrade pip "setuptools>=78.1.1" \
- && pip install ".[analyzers-treesitter]"
+ && pip install ".[analyzers-treesitter]" \
+ && python -m pip uninstall --yes pip
 
 # The worker invokes trusted analyzers as bounded local subprocesses.  The
 # former Compose profile only built disconnected images, leaving every binary
