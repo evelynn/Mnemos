@@ -1,418 +1,221 @@
-# Mnemos — AI Source Analysis Guide
+# Mnemos
 
-Mnemos deterministically indexes large, multi-language source trees into a
-grounded, bitemporal graph that an AI can re-query through MCP. It is a source
-reference and analysis guide: it supplies source-located symbols, relationships,
-certainty, coverage gaps, and bounded task context. Analyzer coverage and
-certainty determine which references are exact; unsupported language features
-remain explicit gaps. It is not a generic SaaS, chatbot, or administrator
-product, and it does not ask an LLM to form an
-expensive opinion about the whole repository up front.
+Mnemos는 **AI가 대규모 소스 코드를 더 빠르고 정확하게 이해하도록 돕는 분석 솔루션**입니다.
 
-**Status**: beta, not production-qualified. The core source-index/MCP workflow
-has unit, mock-integration, one external-repository evaluation, real PostgreSQL
-ledger/concurrency validation, and a narrow 50 K-file/50 K-node publication
-soak. Run-scoped staging, atomic graph-head publication, durable evidence
-overlays, and source/overlay generation-pinned readers are connected to ingest.
-Live-provider validation, hard process-kill fault injection, and representative
-unseen-repository quality/token comparisons remain.
-See the [Phase-B contract and evidence report](docs/04-eval/atomic-graph-publication-phase-b-2026-07-15.md)
-and [`docs/architecture.md`](docs/architecture.md) for the delivered architecture.
-The current hard-budget/PostgreSQL evidence is in the
-[speed/token root report](docs/04-eval/speed-token-root-design-2026-07-16.md), and the honest
-[comparison with codebase-memory-mcp](docs/04-eval/codebase-memory-comparison-2026-07-16.md)
-records where Mnemos still does not lead.
-The [token/refresh research](docs/04-eval/token-refresh-architecture-research-2026-07-15.md)
-and [July 14 remediation assessment](docs/04-eval/source-analysis-purpose-and-remediation-2026-07-14.md)
-are historical checkpoints that explain the original failure modes;
-operator workflows are in
-[`docs/operator-guide/deployment.md`](docs/operator-guide/deployment.md). For a
-zero-external-service test drive, see
-[Quick start (docker-free)](#quick-start-docker-free-local-mode) below.
+저장소 전체를 매번 AI에게 전달하는 대신, 소스 코드를 결정적으로 분석해 심볼과 관계를
+색인하고 필요한 근거만 다시 조회할 수 있게 만듭니다. 개발자는 자연어 질문과 검색,
+영향도 분석을 통해 복잡한 코드베이스를 탐색할 수 있고, AI 도구는 MCP를 통해 같은 분석
+결과를 반복해서 활용할 수 있습니다.
 
-## 목적 (Purpose)
+Mnemos의 목적은 일반적인 챗봇이나 관리 시스템을 만드는 것이 아닙니다. 큰 소스
+코드에서 필요한 사실을 찾고, 그 사실의 근거와 불확실성을 함께 제공하는 데 집중합니다.
 
-> **AI가 거대한 소스를 정확히 분석하도록, 소스를 결정적으로 인덱싱하고 근거·경로·영향
-> 범위·불확실성을 작게 재조회할 수 있게 제공하는 보조 도구.**
+> 현재 상태는 베타입니다. 핵심 색인과 조회 흐름은 테스트되었지만, 모든 언어 기능과
+> 운영 환경에서의 완전한 분석을 보장하지는 않습니다.
 
-Mnemos exists to solve three failures of direct repo prompting:
+## 왜 Mnemos가 필요한가
 
-1. **Knowledge decay** — docs go stale, expertise lives in people's heads,
-   and one-shot analyses are obsolete the moment they finish.
-2. **Context cost** — repeatedly sending a whole repository consumes tokens
-   before the AI has identified the small evidence slice it needs.
-3. **Unsupported conclusions** — without file/line/edge evidence and explicit
-   coverage gaps, an AI confuses guesses with source facts.
+대규모 저장소를 AI가 직접 읽게 하면 다음과 같은 문제가 생깁니다.
 
-### How the index is consumed
+- 저장소 전체가 AI의 컨텍스트 한도를 초과할 수 있습니다.
+- 같은 질문을 할 때마다 많은 소스를 다시 읽어 토큰과 시간이 반복해서 소모됩니다.
+- 답변이 실제 코드에 근거한 사실인지 AI의 추론인지 구분하기 어렵습니다.
+- 서비스, API, 데이터 접근처럼 여러 파일에 걸친 변경 영향을 한 번에 파악하기 어렵습니다.
+- 한 번 분석한 결과가 다음 작업에 재사용되지 않아 코드 이해 비용이 계속 발생합니다.
 
-All consumers are downstream of the source-analysis graph; none broadens the
-product into a generic workflow platform.
+Mnemos는 소스를 먼저 색인하고, 질문에 필요한 범위만 작게 꺼내 주는 방식으로 이 문제를
+해결합니다. 분석 결과에는 출처와 확실성 정보가 포함되며, 결정적 분석 결과와 AI가
+추론한 내용을 구분합니다.
 
-| Type | Example | Tooling |
-|------|---------|---------|
-| **Q&A** | "Where is the retry logic for failed payments?" | Ask tab (`POST /projects/{id}/ask`) + MCP `search_symbols`, `get_symbol`, graph traversal, then a narrow immutable-snapshot `read_file` check |
-| **Data impact** | "Which code reads `Orders`?" | MCP `get_data_access`, `get_data_entity`; optional safe DB evidence remains subordinate to source analysis |
-| **Development analysis** | "What is the blast radius of changing this endpoint?" | MCP task pack + callers/callees/contracts/data access + narrow source verification |
+## 주요 기능
 
-### Non-negotiable design principles (spec §2)
+### 대규모 소스 색인
 
-1. Language-neutral knowledge graph is a first-class citizen.
-2. Boundaries are joined by **contracts**, not source-to-source links.
-3. Information contributes only what it can prove — every node/edge carries a
-   `certainty` flag (`verified` / `asserted` / `inferred`).
-4. The AI performs the reasoning; Mnemos supplies bounded, grounded guidance
-   and never promotes optional narration above deterministic facts.
-5. **The production system is sacred** — no direct writes to `main`,
-   no writes to operational DBs, no production deploys. Bypass switches
-   are **not** built.
-6. Deterministic index first: a normal first pass uses zero LLM tokens.
-   Optional AI work has hard call/input/output/wall bounds. Every production
-   paid generation also requires a positive project cap and an atomic
-   worst-case dollar reservation before dispatch; no LLM call sees the whole
-   codebase. Opaque/unpriced transports are fail-disabled.
-7. The platform is designed as an always-on service. Analyzer output is isolated
-   by run and becomes current through one atomic publication receipt; optional
-   post-publication products may finish as explicitly `partial` without corrupting
-   or rolling back the readable source generation.
-8. Data access is least-privilege, masked, and audited.
-9. Required source-analysis operator workflows should be reachable from the GUI;
-   a missing surface is a product gap, not a reason to broaden scope.
-10. Single-operator-friendly — Docker Compose, single Python server,
-    minimal external dependencies (or fully docker-free local mode).
+Python, TypeScript/JavaScript, C/C++, Java, Kotlin, Web 소스 등을 분석해 함수, 클래스,
+호출, API, 데이터 접근과 같은 정보를 검색 가능한 형태로 저장합니다. 기본 색인은 LLM을
+호출하지 않으므로 토큰 비용 없이 수행할 수 있습니다.
 
-### Core success criteria
+### 근거 중심의 코드 탐색
 
-- A full source index consumes zero LLM tokens unless AI work was explicitly
-  requested.
-- MCP starts with a top-10 project index; project indexes and task packs omit
-  raw source and enforce a 50 KiB serialized hard cap instead of dumping the
-  repository into context.
-- A same-content refresh runs no analyzer and creates no false temporal diff.
-- Changed analyzer families refresh; deleted/renamed source facts close only
-  after a successful authoritative-root scan. Shared facts are deleted only
-  during a safe all-producer reconciliation until contribution rows exist.
-- Analyzer output, memory queue, wall time, cancellation, and retry behavior
-  are bounded so one bad process cannot stop the service.
-- Structured AI claims are schema-valid, project-scoped, and evidence-backed;
-  inferred relationships remain visibly inferred.
+심볼 검색, 호출자·피호출자 조회, 변경 영향 분석, API 계약 및 데이터 접근 조회를
+제공합니다. 결과는 가능한 경우 파일과 소스 위치, 관계, 확실성 정보를 함께 보여 줍니다.
 
-## What's in the box
+### AI 질문과 재조회
 
-- **Analysis pipeline** — the default worker bundles deterministic Python,
-  TypeScript/JavaScript, C/C++, Java, Kotlin, Web, and tree-sitter source
-  analyzers. C#, MSSQL/Oracle, and .NET-binary analyzers are present in the
-  repository but are not wired into the standard Compose worker. Analyzer
-  facts feed a bitemporal knowledge graph
-  (nodes + edges with `valid_from`/`valid_to`), reconciled into six Finding
-  types (duplicate endpoints, unverified claims, dynamic calls, dead paths,
-  schema mismatches, opaque components failing). The Python analyzer
-  (`ggoss-py`) is pure-stdlib and also runs in-repo without Docker.
-- **Optional LLM narration** — explicit L1 (function) → L2 (file) → L3
-  (module) pass over bounded graph evidence. Semantic evidence hashes skip
-  unchanged targets; this layer is not required for source lookup or MCP.
-  The price-attested direct Anthropic route is crash-accounted. The opaque
-  Claude Agent SDK route is intentionally disabled until it has an immutable
-  route/price/output contract.
-- **Ask (Q&A)** — `POST /projects/{id}/ask` answers from graph evidence.
-  Arbitrary host-path deepening is disabled; agents can verify a selected range
-  through the bounded MCP reader tied to the latest completed Git snapshot.
-- **Search** — `search_symbols` is deterministic lexical/BM25. Legacy
-  Voyage/OpenAI vector scaffolding is deliberately non-executable even when
-  `MNEMOS_EMBEDDING_PROVIDER` is set because it lacks project-scoped durable
-  accounting and an immutable worst-price contract.
-- **Data path safety** — per-project DB bindings with `sensitive_tables`,
-  regex-based `masking_rules`, Korean PII validators (RRN / foreigner ID /
-  Luhn / driver's licence), Oracle `allow_awr` consent, and cron-expression
-  `maintenance_windows`. Every query is masked, audited, and rate-limited.
-- **MCP server** — tools exposing the graph (symbols, callers/callees,
-  impact analysis, contracts, flows, runtime paths), data samples, column
-  stats, file reads, plan submission, sandboxed worktree editing, and diff
-  submission to IDE agents.
-- **Plan / diff / MR flow** — AI-driven changes land as plans, run through a
-  multi-pass ultrareview (Gate A + Gate B), and open GitLab MRs when
-  approved. Worktrees are real `git worktree`s with read-only bind mounts;
-  the current build has no OS containment backend, so `run_in_sandbox` is
-  fail-disabled by default and always disabled in production. Its allowlisted
-  local argv fallback is available only for explicitly opted-in development
-  against repositories the developer trusts; it is never treated as a
-  filesystem or network sandbox.
-- **Runtime observation** — OTLP trace receiver assembles trace trees into
-  `runtime_observations`, reconciles `EXPOSES`/`CALLS` evidence into durable
-  logical-edge overlays, and materializes it onto the current graph version
-  (14-day observation-retention sweep built in).
-- **Voice on the Ask tab** — a full **local** voice loop: *speak* a
-  question (mic → STT) and *hear* the answer (🔊 → TTS). STT defaults to
-  **Moonshine tiny-ko** (optional `[voice]` extra — ~26M params, ONNX,
-  no torch, beats Whisper-tiny on Korean), with multilingual faster-whisper
-  as a one-env-var alternative (`[voice-whisper]`). TTS is **Kokoro-82M**
-  (optional `[tts]` extra — Apache-2.0, multilingual incl. Korean). No audio
-  or text leaves the deployment; buttons auto-hide when an extra isn't
-  installed. See [`docs/voice-commands.md`](docs/voice-commands.md).
-- **RBAC & team workflow** — local login with `admin` / `operator` /
-  `viewer` roles, organisation-scoped multi-tenancy, optional OIDC SSO with
-  JWKS signature verification, user CRUD + invite tokens + password reset,
-  comment threads + assignees on plans and diffs, notification centre,
-  brute-force lockout, CSRF middleware, sliding session TTL, per-session
-  rate limiting.
-- **Dashboard** — Jinja + HTMX UI with light/dark/auto theme, responsive
-  mobile drawer, Korean/English i18n, command palette (`cmd/ctrl+K`),
-  CSV/Excel export. Operator tabs: Dashboard, Projects, Analysis, Ask,
-  Graph, Data, Plans, Diffs, Findings, Report, Docs, Health, Audit,
-  Settings, Profile. Admin-only tabs: Users, Organizations, SSO/OIDC,
-  GDPR tools.
-- **Operability** — JSON logs with `x-request-id` correlation, Prometheus
-  `/metrics` (optional bearer-token auth), deep `/health/ready` covering
-  DB + Redis + worker heartbeat + analyzer availability, Fernet key
-  rotation CLI, `pg_dump` backup / restore scripts, pluggable KMS (local
-  env or self-hosted HashiCorp Vault), startup self-verification.
+대시보드의 Ask 기능 또는 MCP 도구를 이용해 다음과 같은 질문을 할 수 있습니다.
 
-## 워크스페이스 연계
+- 결제 실패 재시도 로직은 어디에 있는가?
+- 이 함수를 변경하면 어떤 코드가 영향을 받는가?
+- 특정 API를 호출하는 클라이언트는 무엇인가?
+- 이 테이블을 읽거나 수정하는 코드는 어디에 있는가?
+- 특정 기능이 실행되는 주요 호출 흐름은 무엇인가?
 
-워크스페이스 포트의 정본은 로컬 워크스페이스 루트 `workspace.ports.json`이다.
-Mnemos는 소스·런타임 증거를 색인하고 MCP/HTTP로 코드 지식을 제공하는 **독립 서비스**이며,
-다른 제품의 DB나 권한 저장소를 공유하지 않는다.
+AI는 저장소 전체를 다시 읽는 대신 Mnemos가 제공하는 제한된 근거를 조회해 답변을
+구성할 수 있습니다.
 
-| 연결 | 호출·데이터 방향 | 현재 경계 |
-|---|---|---|
-| [Mochi-cat V2](https://github.com/evelynn/Mochi-cat-V2) → Mnemos | Mochi의 주 경로는 프로젝트 범위 MCP 도구이고 HTTP `/api/v1/projects/{id}/ask`는 fallback이다. 독립 플랫폼은 `16401`, Mochi가 선택적으로 기동하는 로컬 sidecar는 `16451`을 쓴다. | `MOCHI_SIDECARS=1`, 유효한 project UUID와 token이 있을 때만 활성화된다. Mnemos 불가 시 Mochi의 코드지식 기능만 닫히며 다른 기능은 계속 동작한다. |
-| 분석 대상 저장소 → Mnemos | Compose 분석 입력은 `/work:ro`로 마운트되고, 색인·감사·승인된 plan/diff 작업은 Mnemos 소유 DB와 격리 worktree에 기록된다. | 원본 working tree에 대한 암묵적 쓰기 권한이나 다른 서비스의 인증 권한을 만들지 않는다. |
-| [Smart AI Report](https://github.com/evelynn/Smart-AI-Report-V4) · [Appsmiths](https://github.com/evelynn/Appsmiths) · [Bridge-X V2](https://github.com/evelynn/Bridge-X-V2) · [GitLab MCP Platform](https://github.com/evelynn/gitlab-mcp-platform) · [Hansol MCP Framework](https://gitlab.hansol.net/140420/htech-mes-mcp) | 현재 Mnemos 코드에는 이 서비스들을 직접 호출하는 런타임 어댑터가 없다. 필요하면 각 저장소를 분석 대상으로 등록할 수 있을 뿐이다. | 서비스 장애·자격증명·영속 데이터가 Mnemos를 통해 전이되지 않는다. |
+### 변경 이력과 분석 결과 재사용
 
-할당 포트는 Mnemos `16401`(platform), `16402`(Grafana), `16403`(Prometheus),
-`16404`(Postgres), `16405`(Redis), `16406`(OTLP HTTP), `16451`(Mochi sidecar)이며,
-인접 서비스는 Bridge-X `16321`, Appsmiths `16501/16502`, GitLab MCP Platform
-`16600`(예약), Mochi `16701/16702`, Smart AI Report `16901`이다.
+분석 결과는 시점 정보를 가진 지식 그래프로 유지됩니다. 같은 내용의 저장소를 다시
+분석할 때 불필요한 작업을 줄이고, 변경된 코드에 맞춰 현재 결과를 갱신할 수 있습니다.
 
-## Quick start (docker-free local mode)
+### 선택적 AI 설명
 
-The fastest way to try the platform — a single Python 3.12+ process with
-**zero external services** (SQLite + in-process fakeredis, jobs inline,
-available in-repo analyzers):
+필요한 경우 함수, 파일, 모듈 단위 설명을 선택적으로 생성할 수 있습니다. 이 기능은
+결정적 색인과 분리되어 있으며, 명시적으로 활성화할 때만 제한된 예산 안에서 동작합니다.
+AI 설명은 소스의 확정 사실을 덮어쓰지 않습니다.
+
+## 장점
+
+### 1. 컨텍스트와 토큰 사용 절감
+
+전체 저장소를 질문마다 프롬프트에 넣지 않고, 관련 심볼과 관계만 선별해 제공합니다.
+일반적인 전체 색인은 LLM 없이 수행되며, 선택적 AI 기능에도 입력·출력·호출 횟수와
+실행 시간 제한이 적용됩니다.
+
+### 2. 반복 분석 시간 단축
+
+한 번 만든 색인을 여러 질문과 여러 AI 작업에서 재사용합니다. 변경되지 않은 분석
+대상은 다시 처리하지 않아 대규모 저장소의 반복 탐색 비용을 줄입니다.
+
+### 3. 답변 신뢰도 향상
+
+분석 결과가 실제 그래프에 존재하는 소스 근거와 연결되는지 검증합니다. 확인된 사실과
+추론된 내용을 구분하므로, 사용자는 답변을 어디까지 신뢰하고 어디를 직접 확인해야
+하는지 판단하기 쉽습니다.
+
+### 4. 변경 영향 파악
+
+호출 관계, API 계약, 데이터 접근, 런타임 관측 정보를 함께 조회해 한 파일만 읽어서는
+놓치기 쉬운 변경 범위를 찾을 수 있습니다.
+
+### 5. 팀과 AI 도구 간 지식 재사용
+
+분석 결과를 대시보드와 MCP에서 공통으로 사용할 수 있습니다. 특정 개발자나 한 번의
+AI 세션에만 남던 코드 이해를 지속적으로 다시 조회할 수 있는 자산으로 전환합니다.
+
+## 빠르게 시작하기
+
+### 요구 사항
+
+- Python 3.12 이상
+- Git
+- Docker Compose 방식 사용 시 Docker
+
+### 로컬 모드
+
+외부 데이터베이스나 Redis 없이 Mnemos를 체험할 수 있는 가장 간단한 방법입니다.
+SQLite, 인프로세스 작업 큐, 저장소에 포함된 분석기를 사용합니다.
 
 ```bash
-cd server
-pip install -e ".[local]"               # adds aiosqlite + fakeredis
-python -m app.serve_local --seed-demo   # boots on :16401 with a demo dataset
+git clone <Mnemos 저장소 URL>
+cd Mnemos/server
+pip install -e ".[local]"
+python -m app.serve_local --seed-demo
 ```
 
-## Quick start (Docker Compose)
+실행 로그에 표시되는 데모 계정 정보를 확인한 뒤
+`http://localhost:16401/login`에 접속합니다.
 
-The service topology is Postgres + Redis + platform + one ARQ worker. The
-platform and worker images contain the runnable in-repo source analyzers listed
-above; standalone analyzer-profile images are optional contract-test artifacts.
+### Docker Compose
+
+지속적인 분석과 운영에 가까운 환경은 Docker Compose로 실행할 수 있습니다.
 
 ```bash
+git clone <Mnemos 저장소 URL>
+cd Mnemos
 cp .env.example .env
+```
 
-# Host repository mounted read-only as /work for a manual analysis.
-# Use an absolute path. If omitted, the Mnemos checkout itself is mounted.
-echo "MNEMOS_SOURCE_ROOT=/absolute/path/to/source-repo" >> .env
+분석할 저장소의 절대 경로를 `.env`에 설정합니다.
 
-# Generate FERNET_KEY (encrypts the secrets table).
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" \
-  | xargs -I{} sh -c 'echo "FERNET_KEY={}" >> .env'
+```env
+MNEMOS_SOURCE_ROOT=/absolute/path/to/source-repo
+```
 
-# Generate SECRET_KEY (signs the session cookie). The default placeholder
-# in .env.example is forgeable — the platform refuses to start in
-# production until you replace it with a random string.
-python -c "import secrets; print(f'SECRET_KEY={secrets.token_urlsafe(48)}')" \
-  >> .env
+세션과 비밀 정보 보호에 사용할 값을 생성해 `.env`에 추가합니다.
 
+```bash
+python -c "from cryptography.fernet import Fernet; print('FERNET_KEY=' + Fernet.generate_key().decode())"
+python -c "import secrets; print('SECRET_KEY=' + secrets.token_urlsafe(48))"
+```
+
+출력된 두 값을 `.env`에 저장한 다음 서비스를 시작합니다.
+
+```bash
 docker compose up -d --build
 docker compose exec platform alembic upgrade head
-
-# create the first admin
 docker compose exec platform python -m app.cli create-user --username admin --role admin
-
-curl -sf http://localhost:16401/api/v1/health        # liveness
-curl -sf http://localhost:16401/api/v1/health/ready  # deep check
 ```
 
-Visit `http://localhost:16401/login`. For TLS, reverse-proxy configuration,
-backups, and upgrades, see
-[`docs/operator-guide/deployment.md`](docs/operator-guide/deployment.md);
-for a guided first session, see
-[`docs/operator-guide/getting-started.md`](docs/operator-guide/getting-started.md).
-On the Analysis tab use source path `/work`, keep `summarize` unchecked for the
-zero-token index, and use a revision that exists in that Git checkout.
-The standard Compose worker enforces `SOURCE_ALLOWED_ROOT=/work`, so a manual
-request cannot select arbitrary container files. Completed Git runs keep only
-a root-relative repository locator and MCP reads reopen the exact commit.
-
-## Optional: monitoring stack
+준비 상태를 확인하고 로그인합니다.
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.monitoring.yml \
-  --profile monitoring up -d
+curl -f http://localhost:16401/api/v1/health
+curl -f http://localhost:16401/api/v1/health/ready
 ```
 
-Grafana lands at `:16402` with the **Mnemos Overview** dashboard
-pre-provisioned; Prometheus is published at `:16403`.
+접속 주소는 `http://localhost:16401/login`입니다.
 
-## Repository layout
+## 기본 사용 방법
 
-```
-Mnemos/
-├── Mnemos_spec.md                  # the platform specification (§ references)
-├── docker-compose.yml              # core: postgres, redis, platform, worker
-│                                   # + optional standalone analyzer profiles
-├── docker-compose.monitoring.yml   # optional: prometheus + grafana
-├── server/                         # FastAPI platform (Python 3.12)
-│   ├── app/
-│   │   ├── api/                    # REST endpoints (auth, projects, analysis,
-│   │   │                           #   ask, data, plans, diffs, findings,
-│   │   │                           #   users, comments, organizations, gdpr,
-│   │   │                           #   webhooks, voice, health, …)
-│   │   ├── auth/                   # RBAC, sessions, OIDC, org-scope ACL,
-│   │   │                           #   passwords, brute-force lockout
-│   │   ├── security/               # CSRF, security headers, rate-limit
-│   │   │                           #   middlewares
-│   │   ├── safety/                 # crypto, KMS, ratelimit, DB probe,
-│   │   │                           #   SQL row-cap, Korean PII validators,
-│   │   │                           #   ultrareview pipeline (review/)
-│   │   ├── analyzers/              # subprocess runner + language registry
-│   │   ├── orchestrator/           # ARQ jobs, stages, cron, worker
-│   │   │                           #   heartbeat, progress bus
-│   │   ├── merge/                  # runtime reconciliation + finding detectors
-│   │   ├── extractor/              # L1-L3 LLM summarisation
-│   │   ├── data_sampler/           # masking, project_db policy, maintenance
-│   │   ├── mcp/                    # bounded MCP tool registry + embeddings
-│   │   │                           #   adapter (vector/BM25 hybrid scaffold)
-│   │   ├── sandbox/                # git worktree, command allowlist, runner
-│   │   ├── runtime_receiver/       # OTLP trace ingest + scrubbing
-│   │   ├── gitlab_client/          # MR creation
-│   │   ├── voice/                  # local STT (Moonshine/faster-whisper)
-│   │   │                           #   + TTS (Kokoro-82M) engines
-│   │   ├── notify/                 # outbound notifications
-│   │   ├── artifacts/              # AGENTS.md / mcp.json generators
-│   │   ├── audit/                  # audit logger + middleware
-│   │   ├── obs/                    # request-id, JSON logs, metrics, errors
-│   │   ├── models/                 # SQLAlchemy models
-│   │   ├── dashboard/              # Jinja templates + HTMX UI
-│   │   │                           #   15 operator tabs (Dashboard, Projects,
-│   │   │                           #   Analysis, Ask, Graph, Data, Plans,
-│   │   │                           #   Diffs, Findings, Report, Docs, Health,
-│   │   │                           #   Audit, Settings, Profile)
-│   │   │                           #   + 4 admin-only (Users, Organizations,
-│   │   │                           #   SSO/OIDC, GDPR tools)
-│   │   ├── testing/                # SQLite polyglot shims for the test env
-│   │   ├── local_mode.py           # docker-free mode (SQLite + fakeredis)
-│   │   ├── serve_local.py          # `python -m app.serve_local` launcher
-│   │   ├── seed_demo.py            # demo dataset seeder (--seed-demo)
-│   │   ├── startup_verify.py       # boot-time self-verification
-│   │   ├── cli.py                  # create-user, key rotation, verify, …
-│   │   ├── main.py                 # FastAPI app factory
-│   │   └── worker.py               # ARQ worker entrypoint
-│   ├── alembic/versions/           # single-head chain; use current Alembic head
-│   └── tests/                      # pytest unit/integration suites;
-│                                   # service requirements are declared per case
-├── analyzers/                      # language/DB analyzer source (11)
-│   ├── ggoss-binary-dotnet/
-│   ├── ggoss-cpp/
-│   ├── ggoss-csharp/
-│   ├── ggoss-java/
-│   ├── ggoss-kotlin/
-│   ├── ggoss-py/                   # pure-stdlib; also runs in-repo
-│   │                               #   without Docker (local mode)
-│   ├── ggoss-sql-mssql/
-│   ├── ggoss-sql-oracle/
-│   ├── ggoss-treesitter/
-│   ├── ggoss-ts/
-│   └── ggoss-web/
-├── monitoring/                     # Prometheus config + Grafana dashboards
-├── scripts/                        # backup.sh, restore.sh, loadtest/,
-│   │                               # accuracy/ (extraction + Korean STT WER),
-│   │                               # sequential_smoke_test.py
-├── .github/workflows/              # CI: lint + test + build + SBOM + trivy
-└── docs/
-    ├── architecture.md             # delivered architecture & subsystems
-    ├── analysis-strategy.md
-    ├── analyzer-contract.md
-    ├── ultrareview.md
-    ├── voice-commands.md           # local STT/TTS voice loop
-    ├── 04-eval/                    # dogfooding & self-audit round notes
-    │                               #   (per-PR evaluation records)
-    └── operator-guide/
-        ├── getting-started.md      # guided first session
-        ├── deployment.md           # end-to-end operator runbook
-        ├── performance-review.md   # load-test gates + rate-limit tuning
-        ├── large_system_readiness.md
-        ├── score-evidence.md
-        ├── phase1_checklist.md
-        └── phase2_backlog.md       # deferred items
-```
+1. **프로젝트 등록**
+   대시보드에서 분석할 프로젝트를 만들고 저장소 정보를 입력합니다.
 
-## Delivery history (summary)
+2. **소스 분석 실행**
+   Analysis 화면에서 분석할 Git 리비전과 소스 경로를 선택합니다. Docker Compose의
+   기본 마운트 경로는 `/work`입니다. 처음에는 AI 요약을 끄고 기본 색인부터 실행하는
+   것을 권장합니다.
 
-The platform was built through self-review cycles — each round pairs a
-design pass with an adversarial audit pass, and a phase only closes after
-consecutive zero-defect rounds. Condensed phase log:
+3. **분석 결과 확인**
+   심볼, 호출 관계, API, 데이터 접근, 발견 항목을 검색해 코드베이스의 주요 동작을
+   확인합니다. 결과의 근거 위치와 확실성도 함께 살펴봅니다.
 
-| Phase | PRs | Outcome |
-|-------|-----|---------|
-| Phase 1 — core platform + audit cycle | PR-1 → PR-19 | 7 rounds; closed at zero Critical. Break-glass TTL grants, read-only DB probes, SQLGlot row-cap, real git worktrees, Korean PII validators. |
-| Phase 2 — UX backlog sprint + convergence | PR-20 → PR-31 | 9/10 P2 items shipped (i18n, SSE cross-tab, pagination, drill-down, OTLP Tier 2, runtime observations + retention). |
-| Large-system readiness | PR-32 → PR-37 | Analyzer subprocess contract pins, 5 operator scenarios (E1–E5), crashed-worker recovery cron, scale stress tests, D1–D5 invariants. |
-| Team product (RBAC/UX/design) | PR-38 → PR-48 | Users CRUD + invites + resets, CSRF/lockout/rate-limit/sliding TTL, design tokens + dark mode + responsive drawer, comments + assignees, notification centre, command palette. |
-| Productisation & dogfooding | PR-49 → PR-154+ | Docker-free local mode (`serve_local`), in-repo analyzers, graph-backed Ask, agent context artifacts, graph/report/docs/health GUI tabs, and safety/contract hardening. Historical round notes live in [`docs/04-eval/`](docs/04-eval/) and do not supersede the current limitations. |
+4. **질문하기**
+   Ask 화면에서 기능 위치, 호출 흐름, 변경 영향 등을 자연어로 질문합니다. 더 정확한
+   답이 필요하면 범위를 함수, 파일 또는 모듈 단위로 좁혀 질문합니다.
 
-For per-PR detail, see the round notes in [`docs/04-eval/`](docs/04-eval/),
-[`docs/operator-guide/phase2_backlog.md`](docs/operator-guide/phase2_backlog.md),
-[`docs/operator-guide/score-evidence.md`](docs/operator-guide/score-evidence.md),
-and `git log`.
+5. **AI 도구에서 재사용**
+   MCP를 지원하는 AI 개발 도구에 Mnemos MCP 서버를 등록하면 동일한 색인을 심볼 검색,
+   호출 관계 조회, 영향도 분석 등에 사용할 수 있습니다.
 
-**Current state**: the repository includes unit/integration suites, migrations,
-MCP tools, analyzers, and the dashboard. Do not infer production readiness from
-their counts; the current evidence and unverified workflows are recorded in the
-Phase-B evidence report linked above.
+자세한 첫 실행 절차는
+[시작 가이드](docs/operator-guide/getting-started.md), 배포와 운영 설정은
+[운영 가이드](docs/operator-guide/deployment.md)를 참고하세요.
 
-## Tests
+## 효과적으로 사용하는 방법
+
+- 먼저 LLM 없는 기본 색인을 완료한 뒤 필요한 영역에만 AI 설명을 사용하세요.
+- 넓은 질문보다 기능명, 심볼명, API 경로, 테이블명을 포함한 질문이 더 정확합니다.
+- `verified`, `asserted`, `inferred`와 같은 확실성 표시를 확인하세요.
+- 변경 전에는 영향도 분석으로 호출자, 피호출자, 계약, 데이터 접근 범위를 함께
+  확인하세요.
+- 분석기가 지원하지 않는 언어 기능이나 동적 호출은 결과에서 누락될 수 있으므로,
+  중요한 변경은 표시된 소스 근거를 직접 검토하세요.
+
+## 지원 범위와 한계
+
+- 기본 분석기는 Python, TypeScript/JavaScript, C/C++, Java, Kotlin, Web 및 선택적
+  tree-sitter 언어 분석을 제공합니다.
+- C#, MSSQL/Oracle, .NET 바이너리 분석기는 저장소에 포함되어 있지만 기본 Compose
+  worker 실행 경로에는 포함되지 않습니다.
+- 동적 호출, 전처리기 조건, 일부 언어의 완전한 이름 해석은 제한적일 수 있습니다.
+- 선택적 AI 설명은 추론 결과이며 결정적 분석 사실과 동일하게 취급되지 않습니다.
+- 라이브 LLM 제공자와 일부 운영 시나리오는 환경별 추가 검증이 필요합니다.
+
+Mnemos는 분석 결과를 무조건 완전하다고 주장하지 않습니다. 지원되지 않거나 확인되지
+않은 영역을 드러내고, 사용자가 근거를 따라가며 판단할 수 있도록 돕는 것을 우선합니다.
+
+## 개발 및 테스트
 
 ```bash
 cd server
-pytest -m "not integration"    # no external services
-pytest                         # integration cases require their declared services
+pytest -m "not integration"
 ruff check .
 ```
 
-CI runs lint + migrations up/down/up + full pytest + docker build + trivy
-vulnerability scan + CycloneDX SBOM upload.
+전체 통합 테스트는 각 테스트가 요구하는 PostgreSQL, Redis 등의 외부 서비스를
+준비해야 합니다.
 
-## Security posture
+## 라이선스
 
-- Cookies — `SESSION_COOKIE_SECURE=true` by default (flip to `false` only for
-  local HTTP dev).
-- Secrets — Fernet DEK sourced from env or Vault KV-v2; `MNEMOS_ENV=production`
-  refuses to boot without an explicit `FERNET_KEY`.
-- Session cookies — HttpOnly, SameSite=Lax, signed opaque tokens stored in
-  Redis, sliding idle-timeout TTL, admin force-logout.
-- Login — brute-force lockout (Redis-backed, 15-min window), 12-char minimum
-  password policy with weak-list check.
-- CSRF — double-submit cookie + `X-CSRF-Token` header on every mutation.
-- Headers — HSTS, CSP (`script-src 'self'`), X-Frame-Options,
-  Referrer-Policy.
-- OIDC — id_token signature verified against the IdP JWKS (RS256/ES256)
-  before any claim is trusted. Audience, issuer, and clock skew are all
-  validated.
-- Org boundary — cross-tenant access returns `404 not_found` (not 403) so
-  project existence does not leak.
-- `/metrics` — optional `METRICS_BEARER_TOKEN` for scrape auth.
-- Rate limits — Redis sliding-window per-user on `/data/query` (30/min) and
-  `/refresh_sample` (20/min), plus a global per-session mutation limiter
-  (60/min). Rejections audit-logged.
-- Write path — analyzers never execute DDL/DML directly; the platform is the
-  only commit point. Sandbox commands run under an allowlist against
-  read-only bind mounts.
-
-## License
-
-See [`LICENSE`](LICENSE).
-
-### Third-party (bundled)
-
-- **[ExcelJS](https://github.com/exceljs/exceljs)** (MIT) — self-hosted
-  at `server/app/dashboard/static/exceljs.min.js`, lazy-loaded on first
-  use to back the dashboard's **Export Excel** buttons (findings + audit
-  tabs). Bundled rather than CDN-loaded so the platform works air-gapped
-  and stays within its `script-src 'self'` CSP. See PR-134.
+[LICENSE](LICENSE)를 참고하세요.
