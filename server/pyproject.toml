@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=78.1.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -38,6 +38,10 @@ dependencies = [
     "prometheus-client>=0.20",
     "pyjwt[crypto]>=2.9",
     "sqlglot>=25",
+    # Keep the transitive serializer above the patched floor for
+    # GHSA-6v7p-g79w-8964. It is present in the production image even though
+    # Mnemos does not import it directly.
+    "msgpack>=1.2.1",
     # The isolated one-shot contract is verified against 0.2.118's explicit
     # tools/settings/skills, terminal stop_reason, and AssistantMessage
     # metadata.  Keep the production resolver on that exact wire contract;

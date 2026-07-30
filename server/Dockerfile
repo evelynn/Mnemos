@@ -19,7 +19,7 @@ WORKDIR /app
 
 COPY server/ /app
 COPY docs/ /docs/
-RUN pip install --upgrade pip \
+RUN pip install --upgrade pip "setuptools>=78.1.1" \
  && pip install ".[analyzers-treesitter]"
 
 # The worker invokes trusted analyzers as bounded local subprocesses.  The
