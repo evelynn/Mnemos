@@ -61,7 +61,7 @@ from app.models.graph import (  # noqa: E402
     Node,
 )
 from app.testing.sqlite_polyglot import install_polyglot  # noqa: E402
-from tests.publication_kill_child import (  # noqa: E402
+from publication_kill_child import (  # noqa: E402
     EXIT_AFTER_PUBLISH,
     EXIT_AFTER_SEAL,
     EXIT_AFTER_STAGE,
