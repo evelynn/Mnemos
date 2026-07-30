@@ -88,27 +88,22 @@ def test_revoke_documents_race_window():
 
 
 # ---------------------------------------------------------------------------
-# README — delivery history stays documented. The README condenses the
-# per-PR tables into a phase summary; the team-product sprint this file
-# closed must keep its row, and the current-state block must keep a live
-# (format-checked, not number-pinned) test count so it can't silently rot.
+# README — keep the current solution description and its honest status
+# boundaries visible without restoring the removed delivery-history section.
 # ---------------------------------------------------------------------------
 
 
-def test_readme_records_team_product_phase():
+def test_readme_describes_team_and_ai_reuse():
     body = _read(_README)
-    assert "## Delivery history" in body
-    assert "PR-38 → PR-48" in body
+    assert "### 5. Reusable knowledge for teams and AI tools" in body
+    assert "durable, re-queryable resource" in body
 
 
-def test_readme_records_current_state():
+def test_readme_records_current_status_and_limits():
     body = _read(_README)
-    assert "**Current state**" in body
-    # The remediation charter deliberately avoids presenting a moving test
-    # count as production-readiness evidence.
-    assert "Do not infer production readiness from" in body
-    # Spec §2 still fully preserved.
-    assert "10. Single-operator-friendly" in body
+    assert "Mnemos is currently in beta" in body
+    assert "## Supported Scope and Limitations" in body
+    assert "not a production capacity claim" in body
 
 
 # ---------------------------------------------------------------------------

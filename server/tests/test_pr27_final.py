@@ -78,16 +78,16 @@ def test_findings_page_head_is_translatable():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 record stays documented. The README condenses delivery history
-# into a phase summary; the per-item P2 record lives in the backlog doc.
+# The product README stays focused on current use. Historical Phase 2 details
+# remain in the backlog document instead of being duplicated in the README.
 # ---------------------------------------------------------------------------
 
 
-def test_readme_summarises_phase2_and_links_backlog():
+def test_readme_links_current_guides_and_korean_translation():
     body = _read(_README)
-    assert "## Delivery history" in body
-    assert "PR-20 → PR-31" in body
-    assert "phase2_backlog.md" in body
+    assert "[한국어](README.ko.md)" in body
+    assert "docs/operator-guide/getting-started.md" in body
+    assert "docs/operator-guide/deployment.md" in body
 
 
 def test_phase2_backlog_lists_all_items():
