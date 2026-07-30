@@ -1,145 +1,164 @@
 # Mnemos
 
-Mnemos는 **AI가 대규모 소스 코드를 더 빠르고 정확하게 이해하도록 돕는 분석 솔루션**입니다.
+English | [한국어](README.ko.md)
 
-저장소 전체를 매번 AI에게 전달하는 대신, 소스 코드를 결정적으로 분석해 심볼과 관계를
-색인하고 필요한 근거만 다시 조회할 수 있게 만듭니다. 개발자는 자연어 질문과 검색,
-영향도 분석을 통해 복잡한 코드베이스를 탐색할 수 있고, AI 도구는 MCP를 통해 같은 분석
-결과를 반복해서 활용할 수 있습니다.
+Mnemos is a **source analysis solution that helps AI understand large codebases
+faster and more accurately**.
 
-Mnemos의 목적은 일반적인 챗봇이나 관리 시스템을 만드는 것이 아닙니다. 큰 소스
-코드에서 필요한 사실을 찾고, 그 사실의 근거와 불확실성을 함께 제공하는 데 집중합니다.
+Instead of sending an entire repository to an AI for every task, Mnemos
+deterministically analyzes the source, indexes symbols and relationships, and
+makes the relevant evidence available for targeted re-query. Developers can
+explore complex codebases through natural-language questions, search, and
+impact analysis, while AI tools can reuse the same analysis through MCP.
 
-> 현재 상태는 베타입니다. 핵심 색인과 조회 흐름은 테스트되었지만, 모든 언어 기능과
-> 운영 환경에서의 완전한 분석을 보장하지는 않습니다.
+Mnemos is not a general-purpose chatbot or administration platform. It focuses
+on finding facts in large codebases and presenting those facts together with
+their evidence and uncertainty.
 
-## 왜 Mnemos가 필요한가
+> Mnemos is currently in beta. Its core indexing and query workflows are
+> tested, but complete analysis is not guaranteed for every language feature
+> or operating environment.
 
-대규모 저장소를 AI가 직접 읽게 하면 다음과 같은 문제가 생깁니다.
+## Why Mnemos?
 
-- 저장소 전체가 AI의 컨텍스트 한도를 초과할 수 있습니다.
-- 같은 질문을 할 때마다 많은 소스를 다시 읽어 토큰과 시간이 반복해서 소모됩니다.
-- 답변이 실제 코드에 근거한 사실인지 AI의 추론인지 구분하기 어렵습니다.
-- 서비스, API, 데이터 접근처럼 여러 파일에 걸친 변경 영향을 한 번에 파악하기 어렵습니다.
-- 한 번 분석한 결과가 다음 작업에 재사용되지 않아 코드 이해 비용이 계속 발생합니다.
+Asking an AI to read a large repository directly creates several problems:
 
-Mnemos는 소스를 먼저 색인하고, 질문에 필요한 범위만 작게 꺼내 주는 방식으로 이 문제를
-해결합니다. 분석 결과에는 출처와 확실성 정보가 포함되며, 결정적 분석 결과와 AI가
-추론한 내용을 구분합니다.
+- The repository may exceed the AI model's context window.
+- Re-reading the same source for every question repeatedly consumes time and
+  tokens.
+- It is difficult to distinguish source-backed facts from AI inference.
+- Changes that span files, services, APIs, and data access paths are difficult
+  to assess at once.
+- Knowledge from one analysis session is not automatically reusable in the
+  next.
 
-## 주요 기능
+Mnemos addresses these problems by indexing source code first and retrieving
+only the small evidence set needed for each question. Results include source
+provenance and certainty information, keeping deterministic findings separate
+from AI-generated inference.
 
-### 대규모 소스 색인
+## Key Features
 
-Python, TypeScript/JavaScript, C/C++, Java, Kotlin, Web 소스 등을 분석해 함수, 클래스,
-호출, API, 데이터 접근과 같은 정보를 검색 가능한 형태로 저장합니다. 기본 색인은 LLM을
-호출하지 않으므로 토큰 비용 없이 수행할 수 있습니다.
+### Large-scale source indexing
 
-### 근거 중심의 코드 탐색
+Mnemos analyzes Python, TypeScript/JavaScript, C/C++, Java, Kotlin, Web, and
+other supported source files. It stores functions, classes, calls, APIs, and
+data access information in a searchable form. The default indexing pass does
+not call an LLM, so it uses no LLM tokens.
 
-심볼 검색, 호출자·피호출자 조회, 변경 영향 분석, API 계약 및 데이터 접근 조회를
-제공합니다. 결과는 가능한 경우 파일과 소스 위치, 관계, 확실성 정보를 함께 보여 줍니다.
+### Evidence-grounded code exploration
 
-### AI 질문과 재조회
+Search symbols, inspect callers and callees, analyze change impact, and query
+API contracts or data access. Where available, results include file locations,
+source positions, relationships, and certainty.
 
-대시보드의 Ask 기능 또는 MCP 도구를 이용해 다음과 같은 질문을 할 수 있습니다.
+### AI-assisted questions and re-query
 
-- 결제 실패 재시도 로직은 어디에 있는가?
-- 이 함수를 변경하면 어떤 코드가 영향을 받는가?
-- 특정 API를 호출하는 클라이언트는 무엇인가?
-- 이 테이블을 읽거나 수정하는 코드는 어디에 있는가?
-- 특정 기능이 실행되는 주요 호출 흐름은 무엇인가?
+Use the Ask view or MCP tools to investigate questions such as:
 
-AI는 저장소 전체를 다시 읽는 대신 Mnemos가 제공하는 제한된 근거를 조회해 답변을
-구성할 수 있습니다.
+- Where is the retry logic for failed payments?
+- What code is affected if this function changes?
+- Which clients call this API?
+- Where is this table read or modified?
+- What is the primary execution path for this feature?
 
-### 변경 이력과 분석 결과 재사용
+Instead of re-reading the whole repository, an AI can build its answer from the
+bounded evidence supplied by Mnemos.
 
-분석 결과는 시점 정보를 가진 지식 그래프로 유지됩니다. 같은 내용의 저장소를 다시
-분석할 때 불필요한 작업을 줄이고, 변경된 코드에 맞춰 현재 결과를 갱신할 수 있습니다.
+### Reusable analysis with change history
 
-### 선택적 AI 설명
+Analysis results are stored in a time-aware knowledge graph. Mnemos can avoid
+unnecessary work when the same repository content is analyzed again and update
+the current view as the code changes.
 
-필요한 경우 함수, 파일, 모듈 단위 설명을 선택적으로 생성할 수 있습니다. 이 기능은
-결정적 색인과 분리되어 있으며, 명시적으로 활성화할 때만 제한된 예산 안에서 동작합니다.
-AI 설명은 소스의 확정 사실을 덮어쓰지 않습니다.
+### Optional AI explanations
 
-## 장점
+Mnemos can optionally generate function-, file-, and module-level explanations.
+This step is separate from deterministic indexing, runs only when explicitly
+enabled, and operates within bounded budgets. AI explanations never override
+source facts.
 
-### 1. 컨텍스트와 토큰 사용 절감
+## Benefits
 
-전체 저장소를 질문마다 프롬프트에 넣지 않고, 관련 심볼과 관계만 선별해 제공합니다.
-일반적인 전체 색인은 LLM 없이 수행되며, 선택적 AI 기능에도 입력·출력·호출 횟수와
-실행 시간 제한이 적용됩니다.
+### 1. Lower context and token usage
 
-### 2. 반복 분석 시간 단축
+Mnemos selects relevant symbols and relationships instead of placing the whole
+repository in every prompt. Normal indexing runs without an LLM, and optional
+AI features enforce input, output, call-count, and wall-time limits.
 
-한 번 만든 색인을 여러 질문과 여러 AI 작업에서 재사용합니다. 변경되지 않은 분석
-대상은 다시 처리하지 않아 대규모 저장소의 반복 탐색 비용을 줄입니다.
+### 2. Faster repeated analysis
 
-### 3. 답변 신뢰도 향상
+A single index can support many questions and AI tasks. Unchanged analysis
+targets are skipped, reducing repeated work in large repositories.
 
-분석 결과가 실제 그래프에 존재하는 소스 근거와 연결되는지 검증합니다. 확인된 사실과
-추론된 내용을 구분하므로, 사용자는 답변을 어디까지 신뢰하고 어디를 직접 확인해야
-하는지 판단하기 쉽습니다.
+### 3. More trustworthy answers
 
-### 4. 변경 영향 파악
+Mnemos validates whether structured results are backed by evidence in the
+current project graph. By separating verified or asserted findings from
+inference, it makes clear what can be trusted and what should be checked
+manually.
 
-호출 관계, API 계약, 데이터 접근, 런타임 관측 정보를 함께 조회해 한 파일만 읽어서는
-놓치기 쉬운 변경 범위를 찾을 수 있습니다.
+### 4. Better change-impact visibility
 
-### 5. 팀과 AI 도구 간 지식 재사용
+Call relationships, API contracts, data access, and runtime observations can be
+queried together, revealing impact that may be missed when reviewing one file
+at a time.
 
-분석 결과를 대시보드와 MCP에서 공통으로 사용할 수 있습니다. 특정 개발자나 한 번의
-AI 세션에만 남던 코드 이해를 지속적으로 다시 조회할 수 있는 자산으로 전환합니다.
+### 5. Reusable knowledge for teams and AI tools
 
-## 빠르게 시작하기
+The dashboard and MCP clients use the same analysis results. Code understanding
+that would otherwise remain with one developer or one AI session becomes a
+durable, re-queryable resource.
 
-### 요구 사항
+## Quick Start
 
-- Python 3.12 이상
+### Requirements
+
+- Python 3.12 or later
 - Git
-- Docker Compose 방식 사용 시 Docker
+- Docker, when using the Docker Compose setup
 
-### 로컬 모드
+### Local mode
 
-외부 데이터베이스나 Redis 없이 Mnemos를 체험할 수 있는 가장 간단한 방법입니다.
-SQLite, 인프로세스 작업 큐, 저장소에 포함된 분석기를 사용합니다.
+Local mode is the simplest way to try Mnemos without an external database or
+Redis. It uses SQLite, an in-process job queue, and the analyzers included in
+the repository.
 
 ```bash
-git clone <Mnemos 저장소 URL>
+git clone <Mnemos repository URL>
 cd Mnemos/server
 pip install -e ".[local]"
 python -m app.serve_local --seed-demo
 ```
 
-실행 로그에 표시되는 데모 계정 정보를 확인한 뒤
-`http://localhost:16401/login`에 접속합니다.
+Use the demo credentials shown in the startup log, then open
+`http://localhost:16401/login`.
 
 ### Docker Compose
 
-지속적인 분석과 운영에 가까운 환경은 Docker Compose로 실행할 수 있습니다.
+Use Docker Compose for persistent analysis and an environment closer to an
+operational deployment.
 
 ```bash
-git clone <Mnemos 저장소 URL>
+git clone <Mnemos repository URL>
 cd Mnemos
 cp .env.example .env
 ```
 
-분석할 저장소의 절대 경로를 `.env`에 설정합니다.
+Set the absolute path of the repository to analyze in `.env`:
 
 ```env
 MNEMOS_SOURCE_ROOT=/absolute/path/to/source-repo
 ```
 
-세션과 비밀 정보 보호에 사용할 값을 생성해 `.env`에 추가합니다.
+Generate values used to protect sessions and stored secrets:
 
 ```bash
 python -c "from cryptography.fernet import Fernet; print('FERNET_KEY=' + Fernet.generate_key().decode())"
 python -c "import secrets; print('SECRET_KEY=' + secrets.token_urlsafe(48))"
 ```
 
-출력된 두 값을 `.env`에 저장한 다음 서비스를 시작합니다.
+Add both generated values to `.env`, then start the services:
 
 ```bash
 docker compose up -d --build
@@ -147,65 +166,75 @@ docker compose exec platform alembic upgrade head
 docker compose exec platform python -m app.cli create-user --username admin --role admin
 ```
 
-준비 상태를 확인하고 로그인합니다.
+Check service readiness:
 
 ```bash
 curl -f http://localhost:16401/api/v1/health
 curl -f http://localhost:16401/api/v1/health/ready
 ```
 
-접속 주소는 `http://localhost:16401/login`입니다.
+Open `http://localhost:16401/login` to sign in.
 
-## 기본 사용 방법
+## Basic Usage
 
-1. **프로젝트 등록**
-   대시보드에서 분석할 프로젝트를 만들고 저장소 정보를 입력합니다.
+1. **Register a project**
+   Create a project from the dashboard and enter its repository information.
 
-2. **소스 분석 실행**
-   Analysis 화면에서 분석할 Git 리비전과 소스 경로를 선택합니다. Docker Compose의
-   기본 마운트 경로는 `/work`입니다. 처음에는 AI 요약을 끄고 기본 색인부터 실행하는
-   것을 권장합니다.
+2. **Run source analysis**
+   In the Analysis view, select the Git revision and source path. The default
+   Docker Compose mount path is `/work`. Start with AI summaries disabled and
+   run deterministic indexing first.
 
-3. **분석 결과 확인**
-   심볼, 호출 관계, API, 데이터 접근, 발견 항목을 검색해 코드베이스의 주요 동작을
-   확인합니다. 결과의 근거 위치와 확실성도 함께 살펴봅니다.
+3. **Review the results**
+   Search symbols, call relationships, APIs, data access, and findings to
+   understand the codebase. Review the evidence location and certainty shown
+   with each result.
 
-4. **질문하기**
-   Ask 화면에서 기능 위치, 호출 흐름, 변경 영향 등을 자연어로 질문합니다. 더 정확한
-   답이 필요하면 범위를 함수, 파일 또는 모듈 단위로 좁혀 질문합니다.
+4. **Ask questions**
+   Use the Ask view to investigate feature locations, execution paths, and
+   change impact. Narrowing the question to a function, file, or module usually
+   produces a more precise result.
 
-5. **AI 도구에서 재사용**
-   MCP를 지원하는 AI 개발 도구에 Mnemos MCP 서버를 등록하면 동일한 색인을 심볼 검색,
-   호출 관계 조회, 영향도 분석 등에 사용할 수 있습니다.
+5. **Reuse the index from AI tools**
+   Connect the Mnemos MCP server to an MCP-compatible AI development tool to
+   reuse the index for symbol search, call traversal, and impact analysis.
 
-자세한 첫 실행 절차는
-[시작 가이드](docs/operator-guide/getting-started.md), 배포와 운영 설정은
-[운영 가이드](docs/operator-guide/deployment.md)를 참고하세요.
+For a guided first session, see the
+[getting started guide](docs/operator-guide/getting-started.md). For deployment
+and operations, see the
+[deployment guide](docs/operator-guide/deployment.md).
 
-## 효과적으로 사용하는 방법
+## Usage Tips
 
-- 먼저 LLM 없는 기본 색인을 완료한 뒤 필요한 영역에만 AI 설명을 사용하세요.
-- 넓은 질문보다 기능명, 심볼명, API 경로, 테이블명을 포함한 질문이 더 정확합니다.
-- `verified`, `asserted`, `inferred`와 같은 확실성 표시를 확인하세요.
-- 변경 전에는 영향도 분석으로 호출자, 피호출자, 계약, 데이터 접근 범위를 함께
-  확인하세요.
-- 분석기가 지원하지 않는 언어 기능이나 동적 호출은 결과에서 누락될 수 있으므로,
-  중요한 변경은 표시된 소스 근거를 직접 검토하세요.
+- Complete deterministic indexing before enabling AI explanations for selected
+  areas.
+- Include a feature name, symbol, API path, or table name instead of asking an
+  overly broad question.
+- Check certainty labels such as `verified`, `asserted`, and `inferred`.
+- Before changing code, inspect callers, callees, contracts, and data access
+  together.
+- Dynamic behavior and unsupported language features may be absent from the
+  results. Review the referenced source directly before making a critical
+  change.
 
-## 지원 범위와 한계
+## Supported Scope and Limitations
 
-- 기본 분석기는 Python, TypeScript/JavaScript, C/C++, Java, Kotlin, Web 및 선택적
-  tree-sitter 언어 분석을 제공합니다.
-- C#, MSSQL/Oracle, .NET 바이너리 분석기는 저장소에 포함되어 있지만 기본 Compose
-  worker 실행 경로에는 포함되지 않습니다.
-- 동적 호출, 전처리기 조건, 일부 언어의 완전한 이름 해석은 제한적일 수 있습니다.
-- 선택적 AI 설명은 추론 결과이며 결정적 분석 사실과 동일하게 취급되지 않습니다.
-- 라이브 LLM 제공자와 일부 운영 시나리오는 환경별 추가 검증이 필요합니다.
+- The default analyzers cover Python, TypeScript/JavaScript, C/C++, Java,
+  Kotlin, Web, and optional tree-sitter languages.
+- C#, MSSQL/Oracle, and .NET binary analyzers are included in the repository
+  but are not wired into the default Compose worker path.
+- Dynamic calls, preprocessor conditions, and complete name resolution in some
+  languages remain limited.
+- Optional AI explanations are inferred results and are not equivalent to
+  deterministic source facts.
+- Live LLM providers and some operational scenarios require additional
+  environment-specific validation.
 
-Mnemos는 분석 결과를 무조건 완전하다고 주장하지 않습니다. 지원되지 않거나 확인되지
-않은 영역을 드러내고, 사용자가 근거를 따라가며 판단할 수 있도록 돕는 것을 우선합니다.
+Mnemos does not claim that every analysis result is complete. Its priority is
+to expose unsupported or unverified areas and help users follow the evidence to
+make informed decisions.
 
-## 개발 및 테스트
+## Development and Testing
 
 ```bash
 cd server
@@ -213,9 +242,9 @@ pytest -m "not integration"
 ruff check .
 ```
 
-전체 통합 테스트는 각 테스트가 요구하는 PostgreSQL, Redis 등의 외부 서비스를
-준비해야 합니다.
+The full integration suite requires the external services declared by each
+test, such as PostgreSQL and Redis.
 
-## 라이선스
+## License
 
-[LICENSE](LICENSE)를 참고하세요.
+See [LICENSE](LICENSE).
