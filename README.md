@@ -110,6 +110,40 @@ The dashboard and MCP clients use the same analysis results. Code understanding
 that would otherwise remain with one developer or one AI session becomes a
 durable, re-queryable resource.
 
+## Measured Performance
+
+The following results come from the reproducible PostgreSQL component soak
+performed on July 16, 2026. The test machine ran Windows 11 Pro on an Intel
+i5-1340P with 16 logical processors and approximately 31.7 GiB of RAM, using
+Python 3.12.12 and PostgreSQL 17.10.
+
+The synthetic corpus contained 50,000 Python files across 100 directories, with
+one function per file: approximately 100,000 lines of code and 1.89 MB of source.
+The analyzer used a queue limit of 64 records and database batches of 50.
+
+| Measurement | Observed result |
+|---|---:|
+| Initial analyzer and staging | 152.836 s; 327.147 records/s |
+| Initial atomic publication | 65.945 s; 50,000 nodes inserted |
+| Same-content analyzer and staging | 125.987 s; 396.865 records/s |
+| Same-content atomic publication | 11.355 s; 50,000 nodes unchanged |
+| Complete same-content refresh | 137.387 s; semantic no-op |
+| Maximum buffered candidates | 50 |
+| Sampled peak RSS | approximately 106.0 MiB |
+| LLM usage | 0 calls; 0 input and output tokens |
+
+The peak RSS measurement covers the benchmark controller and its direct
+analyzer child; it does not include the PostgreSQL server. This is a component
+measurement, not a production capacity claim. The corpus had no graph edges and
+did not exercise mixed languages, Git checkout, Redis, HTTP/MCP queries,
+calls/contracts/data-access extraction, or optional LLM workflows.
+
+See the
+[full performance report](docs/04-eval/speed-token-root-design-2026-07-16.md#4-실제-postgresql-50k-component-soak)
+and the
+[raw benchmark artifact](docs/04-eval/evidence/postgres-50k-soak-2026-07-16.json)
+for the command, complete measurements, and limitations.
+
 ## Quick Start
 
 ### Requirements
