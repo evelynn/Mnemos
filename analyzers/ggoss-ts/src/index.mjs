@@ -57,15 +57,20 @@ function openOutput(outPath) {
   return fs.createWriteStream(outPath, { encoding: "utf-8" });
 }
 
-const _SOURCE_EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
+const _SOURCE_EXTS = [
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue",
+];
 
 // Generated-output directories — never source, always skipped.
-const _SKIP_DIRS = new Set(["node_modules", "dist", "build", "coverage", "out"]);
+const _SKIP_DIRS = new Set([
+  "node_modules", "dist", "build", "coverage", "out",
+]);
 
 // Minified / bundled output (e.g. a vendored ``a2ui.bundle.js``) — generated,
 // not source. A single bundle can be tens of thousands of unreadable nodes
 // that swamp the graph, so it is skipped by filename (PR-183 S2).
-const _SKIP_FILE_RE = /\.(min|bundle)\.[cm]?[jt]sx?$/;
+const _SKIP_FILE_RE =
+  /(?:\.(?:min|bundle|iife|umd)|^(?:bundle|iife|umd))\.(?:[cm]?js)$/i;
 
 // Test / fixture directory names. Normally analysed like any other
 // code, but excluded on the crash-retry path: a compiler-style repo
@@ -92,7 +97,8 @@ function walkFiles(dir, exts, opts = {}, collected = []) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) walkFiles(full, exts, opts, collected);
     else if (
-      exts.some((ext) => e.name.endsWith(ext)) && !_SKIP_FILE_RE.test(e.name)
+      exts.some((ext) => e.name.toLowerCase().endsWith(ext)) &&
+      !_SKIP_FILE_RE.test(e.name)
     )
       collected.push(full);
   }
@@ -181,6 +187,200 @@ function buildOptions(target) {
   return options;
 }
 
+function _findTagEnd(source, start) {
+  let quote = null;
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i];
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === ">") return i;
+  }
+  return -1;
+}
+
+function _vueScriptSource(fileName) {
+  // Vue SFC template/style markup is presentation, not executable source.
+  // Preserve newlines and absolute offsets while exposing only inline
+  // <script> / <script setup> bodies to the TypeScript parser. This keeps
+  // graph locations anchored to the original .vue file without generating
+  // or writing a transformed copy into the target repository.
+  const source = fs.readFileSync(fileName, "utf-8");
+  let masked = source.replace(/[^\r\n]/g, " ");
+  const lower = source.toLowerCase();
+  let scriptKind = ts.ScriptKind.TS;
+  let cursor = 0;
+  let depth = 0;
+  const voidElements = new Set([
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+  ]);
+  while (cursor < source.length) {
+    const tagStart = source.indexOf("<", cursor);
+    if (tagStart < 0) break;
+    if (source.startsWith("<!--", tagStart)) {
+      const commentEnd = source.indexOf("-->", tagStart + 4);
+      if (commentEnd < 0) throw new Error("unterminated HTML comment");
+      cursor = commentEnd + 3;
+      continue;
+    }
+    const tagMatch = source
+      .slice(tagStart)
+      .match(/^<\s*(\/?)\s*([A-Za-z][\w:-]*)/);
+    if (!tagMatch) {
+      cursor = tagStart + 1;
+      continue;
+    }
+    const closing = tagMatch[1] === "/";
+    const tagName = tagMatch[2].toLowerCase();
+    const attributesStart = tagStart + tagMatch[0].length;
+    const tagEnd = _findTagEnd(source, attributesStart);
+    if (tagEnd < 0) throw new Error(`unterminated <${tagName}> tag`);
+    if (closing) {
+      depth = Math.max(0, depth - 1);
+      cursor = tagEnd + 1;
+      continue;
+    }
+    const rawTag = source.slice(tagStart, tagEnd + 1);
+    const selfClosing = /\/\s*>$/.test(rawTag);
+
+    // Script/style elements use raw-text HTML parsing. At SFC top level,
+    // restore script bytes; inside <template> they remain presentation and
+    // are skipped as one raw element.
+    if (tagName !== "script" && tagName !== "style") {
+      if (!selfClosing && !voidElements.has(tagName)) depth += 1;
+      cursor = tagEnd + 1;
+      continue;
+    }
+    if (selfClosing) {
+      cursor = tagEnd + 1;
+      continue;
+    }
+    const closeNeedle = `</${tagName}`;
+    const closeStart = lower.indexOf(closeNeedle, tagEnd + 1);
+    if (closeStart < 0) throw new Error(`missing </${tagName}> tag`);
+    const closeEnd = _findTagEnd(source, closeStart + closeNeedle.length);
+    if (closeEnd < 0) {
+      throw new Error(`unterminated </${tagName}> tag`);
+    }
+    const attributes = source.slice(attributesStart, tagEnd);
+    // A src-backed block points at a normal JS/TS file which the directory
+    // walk indexes independently. Do not fabricate an empty duplicate.
+    if (
+      tagName === "script" &&
+      depth === 0 &&
+      !/\bsrc\s*=/i.test(attributes)
+    ) {
+      const contentStart = tagEnd + 1;
+      const content = source.slice(contentStart, closeStart);
+      masked =
+        masked.slice(0, contentStart) +
+        content +
+        masked.slice(closeStart);
+      if (/\blang\s*=\s*["']?(?:tsx|jsx)\b/i.test(attributes)) {
+        scriptKind = ts.ScriptKind.TSX;
+      }
+    }
+    cursor = closeEnd + 1;
+  }
+  return { text: masked, scriptKind };
+}
+
+function _compilerHost(options) {
+  const host = ts.createCompilerHost(options, true);
+  const baseGetSourceFile = host.getSourceFile.bind(host);
+  const vueCache = new Map();
+  host.getSourceFile = (
+    fileName,
+    languageVersion,
+    onError,
+    shouldCreateNewSourceFile,
+  ) => {
+    if (!fileName.toLowerCase().endsWith(".vue")) {
+      return baseGetSourceFile(
+        fileName,
+        languageVersion,
+        onError,
+        shouldCreateNewSourceFile,
+      );
+    }
+    try {
+      let parsed = vueCache.get(fileName);
+      if (!parsed || shouldCreateNewSourceFile) {
+        parsed = _vueScriptSource(fileName);
+        vueCache.set(fileName, parsed);
+      }
+      return ts.createSourceFile(
+        fileName,
+        parsed.text,
+        languageVersion,
+        true,
+        parsed.scriptKind,
+      );
+    } catch (err) {
+      reportError(fileName, `vue_sfc_parse_failed: ${err.message}`, true);
+      if (onError) onError(err.message);
+      let raw = "";
+      try {
+        raw = fs.readFileSync(fileName, "utf-8");
+      } catch {
+        // The durable stderr category remains generic at ingest.
+      }
+      const blank = raw.replace(/[^\r\n]/g, " ");
+      return ts.createSourceFile(
+        fileName,
+        blank,
+        languageVersion,
+        true,
+        ts.ScriptKind.TS,
+      );
+    }
+  };
+  host.resolveModuleNames = (moduleNames, containingFile) =>
+    moduleNames.map((moduleName) => {
+      if (moduleName.toLowerCase().endsWith(".vue")) {
+        const candidate = path.resolve(path.dirname(containingFile), moduleName);
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return {
+            resolvedFileName: candidate,
+            extension: ts.Extension.Ts,
+            isExternalLibraryImport: false,
+          };
+        }
+      }
+      return ts.resolveModuleName(
+        moduleName,
+        containingFile,
+        options,
+        host,
+      ).resolvedModule;
+    });
+  return host;
+}
+
+function _createProgram(files, options, analysisAllowedFiles = files) {
+  const program = ts.createProgram({
+    rootNames: files,
+    options: { ...options, allowNonTsExtensions: true },
+    host: _compilerHost({ ...options, allowNonTsExtensions: true }),
+  });
+  // TypeScript follows imports beyond rootNames. Facts must still come only
+  // from the analyzer's explicit discovery set; otherwise an excluded bundle
+  // can re-enter through ``import "./vendor.iife.js"`` and drift from the
+  // source manifest.
+  program.__mnemosAllowedFiles = new Set(analysisAllowedFiles.map(_normKey));
+  return program;
+}
+
+function _programOwnsSource(program, sourceFile) {
+  return (
+    !sourceFile.isDeclarationFile &&
+    program.__mnemosAllowedFiles.has(_normKey(sourceFile.fileName))
+  );
+}
+
 function buildProgram(target) {
   // An analyzer must see *all* the code, not the subset a project's
   // build tsconfig happens to scope. Real repos make that distinction
@@ -192,7 +392,7 @@ function buildProgram(target) {
   const options = buildOptions(target);
   const files = walkFiles(target, _SOURCE_EXTS);
   try {
-    return ts.createProgram({ rootNames: files, options });
+    return _createProgram(files, options);
   } catch (err) {
     // A pathological source file — common in a compiler's own test
     // corpus — can trip a hard assertion inside createProgram. Retry
@@ -204,13 +404,17 @@ function buildProgram(target) {
       true,
     );
     const safe = walkFiles(target, _SOURCE_EXTS, { skipTests: true });
-    return ts.createProgram({ rootNames: safe, options });
+    return _createProgram(safe, options);
   }
 }
 
 function symbolIdFor(sf, node, name) {
   const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
   return `ts:${sourceRelative(sf.fileName)}:${name}@${line + 1}:${character + 1}`;
+}
+
+function moduleSymbolId(sf) {
+  return `ts:${sourceRelative(sf.fileName)}:<module>`;
 }
 
 function visibilityOf(node) {
@@ -245,14 +449,40 @@ function emitSymbol(out, sf, node, kind, name, compId) {
   writeLine(out, envelope("symbol", data));
 }
 
+function emitVueModuleSymbol(out, sf, compId) {
+  writeLine(
+    out,
+    envelope("symbol", {
+      id: moduleSymbolId(sf),
+      kind: "module",
+      name: "<module>",
+      component_id: compId,
+      signature: "",
+      location: {
+        file: sourceRelative(sf.fileName),
+        line: 1,
+        col: 1,
+      },
+      visibility: "public",
+      is_entry_point: false,
+      xml_doc: null,
+      metadata: { vue_sfc: true },
+      certainty: "asserted",
+      created_by: [SOURCE_NAME],
+    }),
+  );
+}
+
 function cmdSymbols(target, outPath) {
   const program = buildProgram(target);
   const out = openOutput(outPath);
   const compId = componentId(target);
 
   for (const sf of program.getSourceFiles()) {
-    if (sf.isDeclarationFile) continue;
-    if (sf.fileName.includes("node_modules")) continue;
+    if (!_programOwnsSource(program, sf)) continue;
+    if (sf.fileName.toLowerCase().endsWith(".vue")) {
+      emitVueModuleSymbol(out, sf, compId);
+    }
 
     const visit = (node) => {
       switch (node.kind) {
@@ -323,7 +553,7 @@ function cmdSymbols(target, outPath) {
   if (outPath) out.end();
 }
 
-function _resolveCalleeId(checker, callExpr) {
+function _resolveCalleeId(checker, callExpr, allowedFiles) {
   // Resolve the call's expression back to the declaring symbol via the
   // TypeChecker and produce the same ``ts:<basename>:<name>@L:C`` id
   // ``cmdSymbols`` emits — so CALLS edges actually JOIN with symbol
@@ -341,9 +571,29 @@ function _resolveCalleeId(checker, callExpr) {
       const declSf = decl.getSourceFile && decl.getSourceFile();
       if (!declSf || declSf.isDeclarationFile) continue;
       if (declSf.fileName.includes("node_modules")) continue;
-      // FunctionDeclaration / MethodDeclaration / VariableDeclaration
-      // with a plain identifier name — the same shapes cmdSymbols
-      // emits as symbols.
+      if (!allowedFiles.has(_normKey(declSf.fileName))) continue;
+      // A TypeScript symbol can point at any variable declaration, including
+      // ``const client = makeClient()``. Resolve only declaration shapes that
+      // cmdSymbols actually emits; otherwise ``callee_resolved: true`` would
+      // claim a target node that does not exist in the graph.
+      const emittedDeclaration =
+        decl.kind === ts.SyntaxKind.FunctionDeclaration ||
+        decl.kind === ts.SyntaxKind.ClassDeclaration ||
+        decl.kind === ts.SyntaxKind.InterfaceDeclaration ||
+        decl.kind === ts.SyntaxKind.TypeAliasDeclaration ||
+        decl.kind === ts.SyntaxKind.EnumDeclaration ||
+        decl.kind === ts.SyntaxKind.MethodDeclaration ||
+        decl.kind === ts.SyntaxKind.MethodSignature ||
+        (
+          decl.kind === ts.SyntaxKind.VariableDeclaration &&
+          decl.initializer &&
+          (
+            decl.initializer.kind === ts.SyntaxKind.ArrowFunction ||
+            decl.initializer.kind === ts.SyntaxKind.FunctionExpression ||
+            decl.initializer.kind === ts.SyntaxKind.ClassExpression
+          )
+        );
+      if (!emittedDeclaration) continue;
       const nm = decl.name;
       if (nm && nm.kind === ts.SyntaxKind.Identifier) {
         return symbolIdFor(declSf, decl, nm.text);
@@ -355,18 +605,98 @@ function _resolveCalleeId(checker, callExpr) {
   }
 }
 
-function emitCallEdges(out, sf, caller, callSite, calleeId, calleeName, callerName) {
-  // ``callerName`` is the binding name for ArrowFunction /
-  // FunctionExpression where ``caller.name`` is undefined. Passed
-  // by cmdCalls; FunctionDeclaration / MethodDeclaration callers
-  // pass their own ``.name.text``.
-  const _name = callerName ?? caller.name?.text ?? "<anonymous>";
-  const callerId = symbolIdFor(sf, caller, _name);
+function _externalCalleeName(expression) {
+  // Keep unresolved identities structural and bounded. ``getText()`` on a
+  // chained/minified expression can be an entire inline function or array,
+  // which is neither a symbol name nor useful graph evidence.
+  if (expression.kind === ts.SyntaxKind.Identifier) return expression.text;
+  if (expression.kind === ts.SyntaxKind.ThisKeyword) return "this";
+  if (expression.kind === ts.SyntaxKind.SuperKeyword) return "super";
+  if (expression.kind !== ts.SyntaxKind.PropertyAccessExpression) return null;
+
+  const parts = [expression.name.text];
+  let current = expression.expression;
+  while (parts.length < 4) {
+    if (current.kind === ts.SyntaxKind.Identifier) {
+      parts.unshift(current.text);
+      return parts.join(".");
+    }
+    if (current.kind === ts.SyntaxKind.ThisKeyword) {
+      parts.unshift("this");
+      return parts.join(".");
+    }
+    if (current.kind === ts.SyntaxKind.SuperKeyword) {
+      parts.unshift("super");
+      return parts.join(".");
+    }
+    if (current.kind !== ts.SyntaxKind.PropertyAccessExpression) break;
+    parts.unshift(current.name.text);
+    current = current.expression;
+  }
+  // The receiver is itself a call/array/function expression. The terminal
+  // method name (``map``, ``join``, ``then``) is the only stable identity.
+  return expression.name.text;
+}
+
+function _functionBindingFor(node) {
+  if (
+    node.kind === ts.SyntaxKind.FunctionDeclaration ||
+    node.kind === ts.SyntaxKind.MethodDeclaration
+  ) {
+    return {
+      nodeForId: node,
+      name: node.name?.text ?? null,
+      isModule: false,
+    };
+  }
+  let parent = node.parent;
+  while (parent) {
+    if (
+      parent.kind === ts.SyntaxKind.VariableDeclaration &&
+      parent.name?.kind === ts.SyntaxKind.Identifier
+    ) {
+      return { nodeForId: parent, name: parent.name.text, isModule: false };
+    }
+    if (
+      parent.kind === ts.SyntaxKind.PropertyAssignment &&
+      parent.name &&
+      "text" in parent.name
+    ) {
+      return { nodeForId: parent, name: parent.name.text, isModule: false };
+    }
+    if (
+      parent.kind === ts.SyntaxKind.FunctionDeclaration ||
+      parent.kind === ts.SyntaxKind.MethodDeclaration ||
+      parent.kind === ts.SyntaxKind.ArrowFunction ||
+      parent.kind === ts.SyntaxKind.FunctionExpression
+    ) {
+      break;
+    }
+    parent = parent.parent;
+  }
+  return { nodeForId: node, name: null, isModule: false };
+}
+
+function _bindingSymbolId(sf, binding) {
+  if (binding?.isModule) return moduleSymbolId(sf);
+  if (!binding?.nodeForId || !binding.name) return null;
+  return symbolIdFor(sf, binding.nodeForId, binding.name);
+}
+
+function emitCallEdges(out, sf, caller, callSite, calleeId, calleeName) {
+  const callerId = _bindingSymbolId(sf, caller);
+  if (callerId === null) return;
   const start = sf.getLineAndCharacterOfPosition(callSite.getStart(sf));
   // Resolved callee → joinable symbol id, asserted certainty.
   // Unresolved → ``ts:extern:<name>`` so external/built-in calls are
   // distinct from intra-project ones and clearly inferred.
   const resolved = calleeId != null;
+  // Bundled/minified code can make ``expression.getText()`` return an entire
+  // inline function body. It is not a useful external symbol identity and can
+  // exceed the graph contract's 4,096-character identifier ceiling. Filtering
+  // it here keeps the producer output authoritative instead of asking ingest
+  // to drop malformed records after the analyzer claimed complete coverage.
+  if (!resolved && `ts:extern:${calleeName}`.length > 4096) return;
   const data = {
     source_id: callerId,
     target_id: resolved ? calleeId : `ts:extern:${calleeName}`,
@@ -420,9 +750,10 @@ function emitCallsForProgram(program, out, onlyFiles) {
   // this program too, and walking them would double-emit. null = emit for
   // every source file (the single-program path).
   const checker = program.getTypeChecker();
+  const allowedFiles = program.__mnemosAllowedFiles;
 
   for (const sf of program.getSourceFiles()) {
-    if (sf.isDeclarationFile || sf.fileName.includes("node_modules")) continue;
+    if (!_programOwnsSource(program, sf)) continue;
     if (onlyFiles && !onlyFiles.has(_normKey(sf.fileName))) continue;
     // Each entry: { node, nameForId } — name is what emitCallEdges
     // uses to build the caller symbol id. For FunctionDeclaration /
@@ -431,35 +762,9 @@ function emitCallsForProgram(program, out, onlyFiles) {
     // up at the VariableDeclaration. Without this, modern JS code
     // (``const f = () => g()``) silently dropped every callee — a
     // regression PR-111's accuracy harness flagged at recall 0.667.
-    const enclosingFn = [];
-    const _enclosingNameFor = (node) => {
-      if (node.kind === ts.SyntaxKind.FunctionDeclaration ||
-          node.kind === ts.SyntaxKind.MethodDeclaration) {
-        return node.name?.text ?? "<anonymous>";
-      }
-      // ArrowFunction / FunctionExpression: name is on the parent
-      // VariableDeclaration (``const X = (...) => ...``) or
-      // PropertyAssignment (``{ X: (...) => ... }``).
-      let p = node.parent;
-      while (p) {
-        if (p.kind === ts.SyntaxKind.VariableDeclaration && p.name?.text) {
-          return p.name.text;
-        }
-        if (p.kind === ts.SyntaxKind.PropertyAssignment && p.name?.text) {
-          return p.name.text;
-        }
-        // Stop walking at the next function — beyond that we're
-        // outside the binding scope.
-        if (p.kind === ts.SyntaxKind.FunctionDeclaration ||
-            p.kind === ts.SyntaxKind.MethodDeclaration ||
-            p.kind === ts.SyntaxKind.ArrowFunction ||
-            p.kind === ts.SyntaxKind.FunctionExpression) {
-          break;
-        }
-        p = p.parent;
-      }
-      return null;  // anonymous IIFE etc — we still track scope but emit nothing
-    };
+    const enclosingFn = sf.fileName.toLowerCase().endsWith(".vue")
+      ? [{ nodeForId: null, name: "<module>", isModule: true }]
+      : [];
     const visit = (node) => {
       const isFn =
         node.kind === ts.SyntaxKind.FunctionDeclaration ||
@@ -467,21 +772,19 @@ function emitCallsForProgram(program, out, onlyFiles) {
         node.kind === ts.SyntaxKind.ArrowFunction ||
         node.kind === ts.SyntaxKind.FunctionExpression;
       if (isFn) {
-        enclosingFn.push({ node, nameForId: _enclosingNameFor(node) });
+        enclosingFn.push(_functionBindingFor(node));
       }
       if (node.kind === ts.SyntaxKind.CallExpression) {
         const call = node;
         const caller = enclosingFn[enclosingFn.length - 1];
-        if (caller && caller.nameForId) {
-          const calleeName =
-            call.expression.kind === ts.SyntaxKind.Identifier
-              ? call.expression.text
-              : call.expression.getText(sf);
-          const calleeId = _resolveCalleeId(checker, call);
-          emitCallEdges(
-            out, sf, caller.node, call, calleeId, calleeName,
-            caller.nameForId,
-          );
+        if (caller && _bindingSymbolId(sf, caller) !== null) {
+          const calleeId = _resolveCalleeId(checker, call, allowedFiles);
+          const calleeName = _externalCalleeName(call.expression);
+          if (calleeId !== null || calleeName !== null) {
+            emitCallEdges(
+              out, sf, caller, call, calleeId, calleeName,
+            );
+          }
         }
       }
       ts.forEachChild(node, visit);
@@ -513,7 +816,7 @@ function cmdCalls(target, outPath) {
     for (const chunk of chunks) {
       let program;
       try {
-        program = ts.createProgram({ rootNames: chunk, options });
+        program = _createProgram(chunk, options, files);
       } catch (err) {
         reportError(target, `calls chunk build failed: ${err.message}`, true);
         continue;
@@ -536,6 +839,9 @@ function cmdCalls(target, outPath) {
 // HTTP verbs an Express/Koa-style router exposes as ``router.<verb>()``.
 const _HTTP_VERBS = new Set([
   "get", "post", "put", "delete", "patch", "options", "head", "all",
+]);
+const _HTTP_CLIENT_RECEIVERS = new Set([
+  "axios", "httpclient", "apiclient", "restclient", "$http",
 ]);
 // NestJS method decorators that declare a route.
 const _HTTP_DECORATORS = new Set([
@@ -636,6 +942,27 @@ function _normalizeUrl(url) {
   return bare.startsWith("/") ? bare : "/" + bare;
 }
 
+function _httpReceiverRole(receiver) {
+  let name = null;
+  if (receiver.kind === ts.SyntaxKind.Identifier) {
+    name = receiver.text.toLowerCase();
+  } else if (receiver.kind === ts.SyntaxKind.PropertyAccessExpression) {
+    name = receiver.name.text.toLowerCase();
+  }
+  if (name === null) return null;
+  if (
+    name === "app" ||
+    name === "server" ||
+    name === "fastify" ||
+    name === "router" ||
+    name.endsWith("router")
+  ) {
+    return "server";
+  }
+  if (_HTTP_CLIENT_RECEIVERS.has(name)) return "client";
+  return null;
+}
+
 function emitHttpContract(out, sf, node, method, url, relation, detectedBy) {
   const path_ = _normalizeUrl(url);
   const id = `http.${method.toUpperCase()}.${path_}`;
@@ -649,7 +976,9 @@ function emitHttpContract(out, sf, node, method, url, relation, detectedBy) {
     created_by: [SOURCE_NAME],
   };
   writeLine(out, envelope("contract", contract));
-  const callerId = symbolIdFor(sf, node, "<caller>");
+  const callerId = sf.fileName.toLowerCase().endsWith(".vue")
+    ? moduleSymbolId(sf)
+    : symbolIdFor(sf, node, "<caller>");
   writeLine(
     out,
     envelope("edge", {
@@ -669,7 +998,7 @@ function cmdContracts(target, outPath) {
   const out = openOutput(outPath);
 
   for (const sf of program.getSourceFiles()) {
-    if (sf.isDeclarationFile || sf.fileName.includes("node_modules")) continue;
+    if (!_programOwnsSource(program, sf)) continue;
 
     // Next.js App Router route handlers — detected per-file from the path +
     // exported HTTP-method functions, not via the AST verb/decorator visit.
@@ -740,19 +1069,30 @@ function cmdContracts(target, outPath) {
             out, sf, node, method, url, "CALLS", "ts_fetch_literal",
           );
         } else if (expr.kind === ts.SyntaxKind.PropertyAccessExpression) {
-          // Express / Koa router — ``app.get("/path", handler)``. The
-          // path must start with "/" so ``map.get("key")`` and other
-          // ordinary ``.get()`` calls don't masquerade as routes.
+          // A literal HTTP method call can be either a server route
+          // (``router.post``) or a client request (``httpClient.post``).
+          // Classify the receiver explicitly: treating every ``.post("/…")``
+          // as Express makes Vue API clients look like endpoint exposers and
+          // creates false duplicate-endpoint findings.
           const verb = expr.name.text.toLowerCase();
           const a0 = call.arguments[0];
+          const receiverRole = _httpReceiverRole(expr.expression);
           if (
             _HTTP_VERBS.has(verb) &&
             a0?.kind === ts.SyntaxKind.StringLiteral &&
-            a0.text.startsWith("/")
+            a0.text.startsWith("/") &&
+            receiverRole !== null
           ) {
             emitHttpContract(
-              out, sf, node, verb, a0.text, "EXPOSES",
-              "ts_express_route",
+              out,
+              sf,
+              node,
+              verb,
+              a0.text,
+              receiverRole === "server" ? "EXPOSES" : "CALLS",
+              receiverRole === "server"
+                ? "ts_express_route"
+                : "ts_http_client_literal",
             );
           }
         }
@@ -885,7 +1225,7 @@ const _NOT_ENTITY = new Set([
   "repository", "repositories", "datasource",
 ]);
 
-function emitDataAccess(out, sf, fnNode, rawEntity, access, site, seen) {
+function emitDataAccess(out, sf, binding, rawEntity, access, site, seen) {
   const name = dataEntityName(rawEntity);
   // A logical (name-keyed) entity id — the merge layer reconciles it
   // against the schema-qualified DataEntity the DB analyzers emit.
@@ -909,9 +1249,10 @@ function emitDataAccess(out, sf, fnNode, rawEntity, access, site, seen) {
       }),
     );
   }
-  const callerId = fnNode
-    ? symbolIdFor(sf, fnNode, fnNode.name?.text ?? "<anonymous>")
-    : `ts:${sourceRelative(sf.fileName)}:<module>`;
+  const callerId = binding
+    ? _bindingSymbolId(sf, binding)
+    : moduleSymbolId(sf);
+  if (callerId === null) return;
   writeLine(
     out,
     envelope("edge", {
@@ -943,14 +1284,16 @@ function cmdDataAccess(target, outPath) {
   const out = openOutput(outPath);
 
   for (const sf of program.getSourceFiles()) {
-    if (sf.isDeclarationFile || sf.fileName.includes("node_modules")) continue;
+    if (!_programOwnsSource(program, sf)) continue;
     const enclosingFn = [];
     const seen = new Set();
     const visit = (node) => {
       const isFn =
         node.kind === ts.SyntaxKind.FunctionDeclaration ||
-        node.kind === ts.SyntaxKind.MethodDeclaration;
-      if (isFn) enclosingFn.push(node);
+        node.kind === ts.SyntaxKind.MethodDeclaration ||
+        node.kind === ts.SyntaxKind.ArrowFunction ||
+        node.kind === ts.SyntaxKind.FunctionExpression;
+      if (isFn) enclosingFn.push(_functionBindingFor(node));
       const fn = enclosingFn[enclosingFn.length - 1] ?? null;
 
       // (1) Raw SQL in a ``sql`...` `` tagged template.

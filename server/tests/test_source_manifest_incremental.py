@@ -152,6 +152,162 @@ def test_hidden_tool_cache_does_not_enter_manifest(tmp_path):
     assert changed_analyzers(_stats(before), after) == (set(), set())
 
 
+def test_ts_manifest_includes_vue_and_excludes_generated_module_formats(
+    tmp_path,
+):
+    source = tmp_path / "Component.vue"
+    source.write_text(
+        '<script setup lang="ts">const load = () => fetch("/api")</script>\n',
+        encoding="utf-8",
+    )
+    generated = [
+        tmp_path / "client.min.js",
+        tmp_path / "client.bundle.js",
+        tmp_path / "bundle.js",
+        tmp_path / "client.bundle.mjs",
+        tmp_path / "client.iife.js",
+        tmp_path / "client.umd.js",
+        tmp_path / "client.umd.cjs",
+        tmp_path / "UPPER.IIFE.JS",
+    ]
+    for path in generated:
+        path.write_text("export const generated = true\n", encoding="utf-8")
+
+    allowed = [
+        tmp_path / "public" / "static" / "app.js",
+        tmp_path / "source.esm.js",
+        tmp_path / "domain.bundle.ts",
+        tmp_path / "min.js",
+    ]
+    for path in allowed:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("export const source = true\n", encoding="utf-8")
+    (tmp_path / ".eslintrc.js").write_text(
+        "module.exports = {}\n",
+        encoding="utf-8",
+    )
+
+    before = build_source_manifest(tmp_path, ["typescript"])
+    assert before.file_counts == {"ggoss-ts": 5}
+
+    for index, path in enumerate(generated):
+        path.write_text(
+            f"export const generated = {index}\n",
+            encoding="utf-8",
+        )
+        after_generated = build_source_manifest(tmp_path, ["typescript"])
+        assert changed_analyzers(_stats(before), after_generated) == (
+            set(),
+            set(),
+        )
+
+    source.write_text(
+        '<script setup lang="ts">const load = () => fetch("/v2/api")</script>\n',
+        encoding="utf-8",
+    )
+    after_source = build_source_manifest(tmp_path, ["typescript"])
+    assert changed_analyzers(_stats(before), after_source) == (
+        {"ggoss-ts"},
+        set(),
+    )
+
+
+def test_generated_js_and_mockup_exclusions_match_exact_git_contract(
+    tmp_path, monkeypatch
+):
+    repository, _revision = _git_repository(tmp_path)
+    artifact = repository / "public" / "static" / "atlas.iife.js"
+    app = repository / "public" / "static" / "app.js"
+    mockup = repository / "docs" / "mockup" / "demo.html"
+    docs_site = repository / "docs" / "site.html"
+    for path, body in (
+        (artifact, "export const generated = 1\n"),
+        (app, "export const app = 1\n"),
+        (mockup, "<html>mockup</html>\n"),
+        (docs_site, "<html>site</html>\n"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-m", "add source and excluded artifacts")
+    before_revision = _git(repository, "rev-parse", "HEAD")
+    monkeypatch.setattr(
+        source_manifest_mod, "_producer_runtime_marker", lambda _producer: "runtime"
+    )
+    before = build_source_manifest(
+        repository,
+        ["typescript", "html"],
+        git_repository=repository,
+        git_revision=before_revision,
+    )
+
+    artifact.write_text("export const generated = 2\n", encoding="utf-8")
+    mockup.write_text("<html>changed mockup</html>\n", encoding="utf-8")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-m", "change excluded artifacts")
+    excluded_revision = _git(repository, "rev-parse", "HEAD")
+    after_excluded = build_source_manifest(
+        repository,
+        ["typescript", "html"],
+        git_repository=repository,
+        git_revision=excluded_revision,
+    )
+    assert changed_analyzers(_stats(before), after_excluded) == (set(), set())
+
+    app.write_text("export const app = 2\n", encoding="utf-8")
+    docs_site.write_text("<html>changed site</html>\n", encoding="utf-8")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-m", "change real sources")
+    source_revision = _git(repository, "rev-parse", "HEAD")
+    after_source = build_source_manifest(
+        repository,
+        ["typescript", "html"],
+        git_repository=repository,
+        git_revision=source_revision,
+    )
+    assert changed_analyzers(_stats(after_excluded), after_source) == (
+        {"ggoss-ts", "ggoss-web"},
+        set(),
+    )
+
+
+def test_web_mockup_exclusion_matches_analyzer_and_mutable_manifest(tmp_path):
+    mockup = tmp_path / "docs" / "mockup" / "demo.html"
+    docs_site = tmp_path / "docs" / "site.html"
+    static_app = tmp_path / "src" / "main" / "resources" / "static" / "index.html"
+    for path in (mockup, docs_site, static_app):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("<html>source</html>\n", encoding="utf-8")
+
+    analyzer = (
+        Path(__file__).resolve().parents[2]
+        / "analyzers"
+        / "ggoss-web"
+        / "src"
+        / "ggoss_web.py"
+    )
+    completed = subprocess.run(
+        [os.fspath(shutil.which("python") or "python"), str(analyzer), "inventory", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+    assert json.loads(completed.stdout)["html_files"] == 2
+
+    before = build_source_manifest(tmp_path, ["html"])
+    assert before.file_counts == {"ggoss-web": 2}
+    mockup.write_text("<html>changed mockup</html>\n", encoding="utf-8")
+    after_mockup = build_source_manifest(tmp_path, ["html"])
+    assert changed_analyzers(_stats(before), after_mockup) == (set(), set())
+    docs_site.write_text("<html>changed source</html>\n", encoding="utf-8")
+    after_source = build_source_manifest(tmp_path, ["html"])
+    assert changed_analyzers(_stats(after_mockup), after_source) == (
+        {"ggoss-web"},
+        set(),
+    )
+
+
 def test_exact_git_manifest_uses_tree_objects_without_reading_source_bodies(
     tmp_path, monkeypatch
 ):
