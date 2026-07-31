@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "mnemos-platform"
 version = "0.7.0"
 description = "Knowledge Production Platform — server"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     # 0.121 adds function-scoped yield dependencies. Graph reads use that

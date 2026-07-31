@@ -29,6 +29,64 @@ Mnemos는 소스를 먼저 색인하고, 질문에 필요한 범위만 작게 �
 해결합니다. 분석 결과에는 출처와 확실성 정보가 포함되며, 결정적 분석 결과와 AI가
 추론한 내용을 구분합니다.
 
+## 동작 방식
+
+Mnemos는 먼저 결정적 색인 파이프라인을 실행하고, 사용자가 명시적으로 선택할 때만
+LLM을 호출합니다. 기본 색인 과정은 토큰을 전혀 쓰지 않고 원본 소스를 다시 질의할 수
+있는 지식 그래프로 변환합니다.
+
+```mermaid
+flowchart LR
+    subgraph 입력
+        REPO[대규모 소스 저장소<br/>Python · TS/JS · C/C++<br/>Java · Kotlin · Web · …]
+    end
+
+    subgraph Deterministic["결정적 코어 (LLM 토큰 0)"]
+        ANALYZE[언어 분석기<br/>ggoss-*]
+        GRAPH[(양시간축<br/>지식 그래프<br/>노드 · 엣지 · 출처)]
+        MERGE[병합 레이어<br/>계약 ID · 런타임<br/>대사 · 위험도]
+        ANALYZE -->|심볼, 호출,<br/>API, 데이터 접근| GRAPH
+        GRAPH --> MERGE
+        MERGE --> GRAPH
+    end
+
+    subgraph Optional["선택적 AI (옵트인, 예산 제한)"]
+        NARR[L1→L2→L3<br/>요약]
+        GROUND[근거 검증<br/>검증됨 vs 추론됨]
+        NARR --> GROUND
+        GROUND --> GRAPH
+    end
+
+    subgraph Serve["재질의 표면"]
+        MCP[MCP 도구<br/>검색 · 호출자 · 영향도]
+        DASH[대시보드<br/>표 · 채팅]
+    end
+
+    REPO --> ANALYZE
+    GRAPH --> MCP
+    GRAPH --> DASH
+    GRAPH -. 근거 .-> NARR
+```
+
+### 어떻게 사용되는가
+
+AI 에이전트나 개발자가 질문하면, Mnemos는 저장소 전체를 다시 읽는 대신 그래프에서
+근거가 뒷받침된 작은 조각만 골라 답합니다.
+
+```mermaid
+sequenceDiagram
+    actor User as 개발자 / AI 에이전트
+    participant M as Mnemos
+    participant G as 지식 그래프
+
+    Note over M,G: 저장소는 한 번만 색인 (질문마다 재수집 없음)
+    User->>M: "이 함수를 바꾸면 무엇이 깨지나요?"
+    M->>G: 심볼, 호출자, 계약, 데이터 접근 질의
+    G-->>M: 제한된 근거 + 출처 + 확실성
+    M-->>User: 소스 위치와 함께 답변,<br/>검증된 사실과 추론을 구분
+    Note over User,M: 같은 그래프를 여러 질문·대시보드·<br/>MCP 클라이언트가 재사용
+```
+
 ## 주요 기능
 
 ### 대규모 소스 색인

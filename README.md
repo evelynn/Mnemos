@@ -37,6 +37,64 @@ only the small evidence set needed for each question. Results include source
 provenance and certainty information, keeping deterministic findings separate
 from AI-generated inference.
 
+## How It Works
+
+Mnemos runs a deterministic indexing pipeline first and only calls an LLM when
+you explicitly opt in. The default pass turns raw source into a re-queryable
+knowledge graph without spending any tokens.
+
+```mermaid
+flowchart LR
+    subgraph Input
+        REPO[Large source repo<br/>Python · TS/JS · C/C++<br/>Java · Kotlin · Web · …]
+    end
+
+    subgraph Deterministic["Deterministic core (zero LLM tokens)"]
+        ANALYZE[Language analyzers<br/>ggoss-*]
+        GRAPH[(Bitemporal<br/>knowledge graph<br/>nodes · edges · provenance)]
+        MERGE[Merge layer<br/>contract-id · runtime<br/>reconcile · risk]
+        ANALYZE -->|symbols, calls,<br/>APIs, data access| GRAPH
+        GRAPH --> MERGE
+        MERGE --> GRAPH
+    end
+
+    subgraph Optional["Optional AI (opt-in, budgeted)"]
+        NARR[L1→L2→L3<br/>narration]
+        GROUND[Grounding &<br/>validation<br/>verified vs inferred]
+        NARR --> GROUND
+        GROUND --> GRAPH
+    end
+
+    subgraph Serve["Re-query surfaces"]
+        MCP[MCP tools<br/>search · callers · impact]
+        DASH[Dashboard<br/>tables · chat]
+    end
+
+    REPO --> ANALYZE
+    GRAPH --> MCP
+    GRAPH --> DASH
+    GRAPH -. evidence .-> NARR
+```
+
+### How it is used
+
+An AI agent or a developer asks a question, and Mnemos answers from the small,
+evidence-backed slice of the graph instead of re-reading the whole repository.
+
+```mermaid
+sequenceDiagram
+    actor User as Developer / AI agent
+    participant M as Mnemos
+    participant G as Knowledge graph
+
+    Note over M,G: Repo already indexed once (no re-ingest per question)
+    User->>M: "What breaks if this function changes?"
+    M->>G: Query symbols, callers, contracts, data access
+    G-->>M: Bounded evidence + provenance + certainty
+    M-->>User: Answer with source locations,<br/>separating verified facts from inference
+    Note over User,M: Same graph reused across many questions,<br/>the dashboard, and MCP clients
+```
+
 ## Key Features
 
 ### Large-scale source indexing
